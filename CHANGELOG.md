@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.3] - 2026-11-22
+
+### Changed
+- **Local-First Repository Initialization & Remote Setup**:
+  - Initialized Git repository on `main` branch connected to remote `git@github.com:ki2pixel/free-gemini-api.git`.
+  - Hardened root and subfolder `.gitignore` rules aligning with security finding F-21: explicitly ignored binary model blob `*.cact` (`tuned.cact`), prompt debug traces (`**/debug_*.txt`), local agent session dumps (`debug/`), test coverage (`coverage.out`), and scan outputs (`results.sarif`).
+  - Cleaned up obsolete local files (`task-209-res.txt` and legacy draft `pr_body.md`).
+
+### Removed
+- **Automated Cloud CI/CD & Dependabot Workflows**:
+  - Removed `.github/` directory (`.github/workflows/ci.yml`, `.github/workflows/docker-publish.yml`, `.github/dependabot.yml`) to optimize the repository for private, local-first execution.
+  - Eliminated high GitHub Actions quota consumption from multi-architecture Docker image builds (`amd64`/`arm64`).
+  - Closed 10 automated Dependabot PRs and pruned remote dependency branches.
+
+---
+
 ## [3.4.2] - 2026-11-22
 
 ### Added
