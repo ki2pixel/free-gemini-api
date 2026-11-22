@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.6] - 2026-11-22
+
+### Added
+- **Formal JSON Schema Validation (`gemini/schema_validator.go`)**:
+  - Added a pure-Go JSON Schema validator (Draft 2020-12 / Draft-07 / Draft-04) backed by `github.com/santhosh-tekuri/jsonschema/v6 v6.0.3`.
+  - Added `ToolSchemaRegistry`, a thread-safe LRU cache keyed by the SHA-256 hash of the request's tool block, plus `CompiledToolCatalog.ValidateCall` returning precise, model-actionable violations (`missing required property 'path'`, `type mismatch for 'path'`, undeclared tool, invalid JSON arguments).
+  - Added `HasInvalidSchemaToolCall(raw, tools)` so the API layer can detect invalid calls before any mutation reaches OpenCode or the host.
+- **Write-Serial Mutation Throttling (`gemini/arranger.go`)**:
+  - Added `ThrottleMutatingToolCalls`, preserving every read-only call (`read`, `grep`, `glob`, `list`) while allowing at most one mutation (`write`, `edit`, `shell`, `patch`, `multiedit`, `apply_patch`) per turn. The batch is truncated at the first subsequent mutation so the next change can be verified before execution.
+- **Abstract-Error Retry Protocol (`api/chat_handler.go`, `api/session_transcripts.go`)**:
+  - Streaming and non-streaming paths now detect schema-invalid tool calls, reset the poisoned upstream conversation, and retry once with a targeted `[SYSTEM DIRECTIVE: Previous tool call failed validation: ...]` notice instead of replaying the broken raw tokens.
+  - Added `isSchemaInvalidOutput` and `formatSchemaRetryDirective`; exhausted retries return an explicit SSE error / HTTP 502 instead of silently emitting a `stop` response.
+- **Compact Tool Catalog (`gemini/arranger.go`)**:
+  - `FormatToolsInstruction` now serializes a compact projection of each tool (`name`, truncated description, `required`, `properties`) instead of the full indented OpenAI envelope.
+  - `required` is highlighted before `properties`, and `path` is forced to the first key in every relevant schema and required list, reducing prompt footprint and lost-in-the-middle drift.
+- **Regression Tests**:
+  - `gemini/schema_validator_test.go`: valid OpenCode tools (`write`, `read`, `edit`, `shell`, `list`), missing required key, type mismatch, undeclared tool, malformed JSON, `additionalProperties`, Draft-07, LRU eviction and concurrent cache access.
+  - `gemini/arranger_test.go`: schema-valid/invalid arrangement, partial rejection, write throttling, parallel reads and compact-catalog size/order assertions.
+  - `api/session_scope_test.go`: `isSchemaInvalidOutput` and abstract retry directive coverage.
+
+### Changed
+- **Dependencies (`go.mod`)**:
+  - Added direct dependency `github.com/santhosh-tekuri/jsonschema/v6 v6.0.3` (pure Go, no CGO).
+  - Bumped transitive `github.com/dlclark/regexp2` to `v1.11.0` as required by the validator.
+- **Tool-Call Pipeline**:
+  - `ArrangeGeminiOutputWithTools` is now the primary arranger entry point; `ArrangeGeminiOutput` remains as a backward-compatible wrapper with validation disabled.
+  - Tagged, fenced and raw-JSON fallbacks all enforce schema validation when request tools are provided, and invalid calls are removed from both the tool-call list and the cleaned text.
+
+---
+
 ## [3.4.5] - 2026-11-22
 
 ### Added

@@ -211,6 +211,15 @@ func isToolRefusalOutput(text string) bool {
 	return false
 }
 
+// isSchemaInvalidOutput reports whether text contains at least one tool call
+// that violates the JSON Schema declared in tools. Such output must not be
+// committed: the API layer resets the upstream conversation and retries with a
+// targeted abstract-error directive.
+func isSchemaInvalidOutput(text string, tools []map[string]any) bool {
+	invalid, _ := gemini.HasInvalidSchemaToolCall(text, tools)
+	return invalid
+}
+
 // isUnusableModelOutput reports whether the model output is empty, one of
 // gemini.google.com's canned failure strings, or a tool refusal when tools were provided.
 // Such turns are not committed, so the next request starts a fresh upstream conversation

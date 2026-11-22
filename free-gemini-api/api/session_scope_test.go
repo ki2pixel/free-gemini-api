@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -81,6 +82,49 @@ func TestIsToolRefusalOutput(t *testing.T) {
 	for _, text := range notRefusals {
 		if isToolRefusalOutput(text) {
 			t.Errorf("expected no refusal detection for %q", text)
+		}
+	}
+}
+
+func TestIsSchemaInvalidOutput(t *testing.T) {
+	tools := []map[string]any{{
+		"type": "function",
+		"function": map[string]any{
+			"name": "write",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":    map[string]any{"type": "string"},
+					"content": map[string]any{"type": "string"},
+				},
+				"required": []any{"path", "content"},
+			},
+		},
+	}}
+
+	invalid := `<tool_call>{"name":"write","arguments":{"content":"hello"}}</tool_call>`
+	if !isSchemaInvalidOutput(invalid, tools) {
+		t.Fatal("expected a write without path to be schema-invalid")
+	}
+	valid := `<tool_call>{"name":"write","arguments":{"path":"a.txt","content":"hello"}}</tool_call>`
+	if isSchemaInvalidOutput(valid, tools) {
+		t.Fatal("expected a complete write to be schema-valid")
+	}
+	if isSchemaInvalidOutput(invalid, nil) {
+		t.Fatal("schema validation must be disabled when no tools were declared")
+	}
+}
+
+func TestFormatSchemaRetryDirective(t *testing.T) {
+	directive := formatSchemaRetryDirective("tool 'write': missing required property 'path'")
+	for _, want := range []string{
+		"[SYSTEM DIRECTIVE:",
+		"missing required property 'path'",
+		"place 'path' first",
+		"required property",
+	} {
+		if !strings.Contains(directive, want) {
+			t.Errorf("retry directive %q does not contain %q", directive, want)
 		}
 	}
 }

@@ -11,6 +11,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/quic-go/quic-go v0.62.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/xuri/excelize/v2 v2.11.1
 	modernc.org/sqlite v1.58.0
 )
@@ -23,7 +24,7 @@ require (
 	github.com/bogdanfinn/utls v1.7.8-barnius // indirect
 	github.com/bogdanfinn/websocket v1.5.6-barnius // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
-	github.com/dlclark/regexp2 v1.10.0 // indirect
+	github.com/dlclark/regexp2 v1.11.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gofiber/schema v1.8.1 // indirect
 	github.com/gofiber/utils/v2 v2.1.1 // indirect

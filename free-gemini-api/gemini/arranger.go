@@ -3,6 +3,7 @@ package gemini
 import (
 	"encoding/json"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -29,16 +30,60 @@ type ArrangedOutput struct {
 	FinishReason     string     `json:"finish_reason"` // "tool_calls" or "stop"
 }
 
-// FormatToolsInstruction creates a clear, structured system prompt injecting tools into Gemini
+const (
+	maxToolDescriptionRunes     = 180
+	maxPropertyDescriptionRunes = 120
+	maxCompactSchemaDepth       = 6
+)
+
+// orderedJSONField and orderedJSONObject preserve a deliberate key order
+// (notably `path` first) that encoding/json would otherwise sort
+// alphabetically.
+type orderedJSONField struct {
+	key   string
+	value any
+}
+
+type orderedJSONObject []orderedJSONField
+
+func (o orderedJSONObject) MarshalJSON() ([]byte, error) {
+	var sb strings.Builder
+	sb.WriteByte('{')
+	for i, field := range o {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		key, err := json.Marshal(field.key)
+		if err != nil {
+			return nil, err
+		}
+		value, err := json.Marshal(field.value)
+		if err != nil {
+			return nil, err
+		}
+		sb.Write(key)
+		sb.WriteByte(':')
+		sb.Write(value)
+	}
+	sb.WriteByte('}')
+	return []byte(sb.String()), nil
+}
+
+// FormatToolsInstruction creates a clear, structured system prompt injecting
+// tools into Gemini. Schemas are compacted to their actionable fields
+// (name/description/required/properties) to cut the prompt footprint and to
+// keep required keys — `path` first — at the model's focus point.
 func FormatToolsInstruction(tools []map[string]any) string {
 	if len(tools) == 0 {
 		return ""
 	}
 
-	toolsJSON, err := json.MarshalIndent(tools, "", "  ")
+	toolsJSON, err := json.Marshal(compactToolDefinitions(tools))
 	if err != nil {
-		bytes, _ := json.Marshal(tools)
-		toolsJSON = bytes
+		toolsJSON, err = json.Marshal(tools)
+		if err != nil {
+			toolsJSON = []byte("[]")
+		}
 	}
 
 	var sb strings.Builder
@@ -74,6 +119,237 @@ func FormatToolsInstruction(tools []map[string]any) string {
 	sb.WriteString("</tool_call>\n")
 
 	return sb.String()
+}
+
+// compactToolDefinitions projects OpenAI tool declarations onto the fields the
+// model actually needs in order to produce a valid call.
+func compactToolDefinitions(tools []map[string]any) []orderedJSONObject {
+	out := make([]orderedJSONObject, 0, len(tools))
+	for _, tool := range tools {
+		fn := toolFunctionDefinition(tool)
+		if fn == nil {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		obj := orderedJSONObject{{key: "name", value: name}}
+		if desc, ok := fn["description"].(string); ok {
+			if desc = truncateRunes(strings.TrimSpace(desc), maxToolDescriptionRunes); desc != "" {
+				obj = append(obj, orderedJSONField{key: "description", value: desc})
+			}
+		}
+		params, ok := fn["parameters"].(map[string]any)
+		if !ok || len(params) == 0 {
+			if input, okInput := fn["inputSchema"].(map[string]any); okInput {
+				params = input
+			}
+		}
+		if len(params) > 0 {
+			obj = append(obj, orderedJSONField{key: "parameters", value: compactParametersSchema(params)})
+		}
+		out = append(out, obj)
+	}
+	return out
+}
+
+func compactParametersSchema(params map[string]any) orderedJSONObject {
+	obj := orderedJSONObject{}
+	typ, _ := params["type"].(string)
+	if typ == "" {
+		typ = "object"
+	}
+	obj = append(obj, orderedJSONField{key: "type", value: typ})
+
+	required := stringList(params["required"])
+	if len(required) > 0 {
+		obj = append(obj, orderedJSONField{key: "required", value: pathFirst(required)})
+	}
+	if props, ok := params["properties"].(map[string]any); ok && len(props) > 0 {
+		obj = append(obj, orderedJSONField{key: "properties", value: compactProperties(props, required)})
+	}
+	if additional, ok := params["additionalProperties"]; ok {
+		obj = append(obj, orderedJSONField{key: "additionalProperties", value: additional})
+	}
+	for _, key := range []string{"anyOf", "oneOf", "allOf"} {
+		if value, ok := params[key]; ok {
+			obj = append(obj, orderedJSONField{key: key, value: compactSchemaList(value, 0)})
+		}
+	}
+	// Reference-based parameter schemas need their definitions to stay
+	// resolvable in the prompt.
+	for _, key := range []string{"$ref", "$defs", "definitions"} {
+		if value, ok := params[key]; ok {
+			obj = append(obj, orderedJSONField{key: key, value: value})
+		}
+	}
+	return obj
+}
+
+func compactProperties(props map[string]any, required []string) orderedJSONObject {
+	keys := orderedPropertyKeys(props, required)
+	out := make(orderedJSONObject, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, orderedJSONField{key: key, value: compactPropertySchema(props[key], 0)})
+	}
+	return out
+}
+
+// orderedPropertyKeys puts `path` first, then the remaining required keys in
+// declaration order, then every other property alphabetically.
+func orderedPropertyKeys(props map[string]any, required []string) []string {
+	seen := make(map[string]struct{}, len(props))
+	keys := make([]string, 0, len(props))
+	add := func(key string) {
+		if _, ok := props[key]; !ok {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	add("path")
+	for _, key := range required {
+		add(key)
+	}
+	rest := make([]string, 0, len(props))
+	for key := range props {
+		if _, ok := seen[key]; !ok {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	return append(keys, rest...)
+}
+
+func pathFirst(required []string) []string {
+	out := make([]string, 0, len(required))
+	for _, key := range required {
+		if key == "path" {
+			out = append(out, key)
+			break
+		}
+	}
+	for _, key := range required {
+		if key != "path" {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func stringList(value any) []string {
+	switch values := value.(type) {
+	case []string:
+		return append([]string(nil), values...)
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, item := range values {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+var compactSchemaFields = []string{
+	"type", "description", "enum", "const", "default", "format", "items",
+	"properties", "required", "additionalProperties", "anyOf", "oneOf",
+	"allOf", "minimum", "maximum", "minLength", "maxLength", "pattern",
+	"minItems", "maxItems", "uniqueItems",
+}
+
+func compactPropertySchema(value any, depth int) any {
+	schema, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	// Preserve reference-based schemas verbatim: rewriting a $ref target
+	// without its $defs would break validation.
+	if _, ok := schema["$ref"]; ok {
+		return schema
+	}
+	if _, ok := schema["$defs"]; ok {
+		return schema
+	}
+	if _, ok := schema["definitions"]; ok {
+		return schema
+	}
+	if depth > maxCompactSchemaDepth {
+		if typ, ok := schema["type"]; ok {
+			return orderedJSONObject{{key: "type", value: typ}}
+		}
+		return orderedJSONObject{}
+	}
+
+	obj := orderedJSONObject{}
+	for _, key := range compactSchemaFields {
+		fieldValue, exists := schema[key]
+		if !exists {
+			continue
+		}
+		switch key {
+		case "description":
+			desc, ok := fieldValue.(string)
+			if !ok {
+				continue
+			}
+			if desc = truncateRunes(strings.TrimSpace(desc), maxPropertyDescriptionRunes); desc != "" {
+				obj = append(obj, orderedJSONField{key: key, value: desc})
+			}
+		case "items":
+			obj = append(obj, orderedJSONField{key: key, value: compactPropertySchema(fieldValue, depth+1)})
+		case "properties":
+			props, ok := fieldValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			obj = append(obj, orderedJSONField{key: key, value: compactProperties(props, stringList(schema["required"]))})
+		case "required":
+			required := stringList(fieldValue)
+			if len(required) > 0 {
+				obj = append(obj, orderedJSONField{key: key, value: pathFirst(required)})
+			}
+		case "anyOf", "oneOf", "allOf":
+			obj = append(obj, orderedJSONField{key: key, value: compactSchemaList(fieldValue, depth+1)})
+		default:
+			obj = append(obj, orderedJSONField{key: key, value: fieldValue})
+		}
+	}
+	if len(obj) == 0 {
+		return schema
+	}
+	return obj
+}
+
+func compactSchemaList(value any, depth int) any {
+	items, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, len(items))
+	for i, item := range items {
+		out[i] = compactPropertySchema(item, depth)
+	}
+	return out
+}
+
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return strings.TrimSpace(string(runes[:max-1])) + "…"
 }
 
 var (
@@ -201,8 +477,21 @@ func deLinkifyAutoLinks(s string) string {
 	})
 }
 
-// ArrangeGeminiOutput analyzes, cleans, parses, and structures raw Gemini output
+// ArrangeGeminiOutput analyzes, cleans, parses, and structures raw Gemini
+// output without schema validation. It is kept for backward compatibility.
 func ArrangeGeminiOutput(raw string) *ArrangedOutput {
+	return ArrangeGeminiOutputWithTools(raw, nil)
+}
+
+// ArrangeGeminiOutputWithTools analyzes, cleans, parses, and strictly validates
+// raw Gemini output against the request's declared tool schemas. Calls that do
+// not conform are dropped so they can never reach the host.
+func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedOutput {
+	var catalog *CompiledToolCatalog
+	if len(tools) > 0 {
+		catalog, _ = DefaultToolSchemaRegistry.CompileTools(tools)
+	}
+
 	res := &ArrangedOutput{
 		FinishReason: "stop",
 	}
@@ -234,7 +523,8 @@ func ArrangeGeminiOutput(raw string) *ArrangedOutput {
 
 	// 2. Extract Tool Calls from <tool_call> tags (supporting standard </tool_call>, markdown fences ```, or unclosed blocks)
 	if strings.Contains(text, "<tool_call>") {
-		taggedCalls, cleanText := extractTaggedToolCalls(text)
+		taggedCalls, cleanText := extractTaggedToolCalls(text, catalog)
+		text = cleanText
 		if len(taggedCalls) > 0 {
 			res.ToolCalls = taggedCalls
 			res.IsToolCall = true
@@ -252,7 +542,7 @@ func ArrangeGeminiOutput(raw string) *ArrangedOutput {
 				if len(m) > 1 {
 					payload := strings.TrimSpace(m[1])
 					tc, ok := parseSingleToolCall(payload)
-					if ok {
+					if ok && acceptsToolCall(catalog, tc) {
 						res.ToolCalls = append(res.ToolCalls, tc)
 					}
 				}
@@ -261,7 +551,7 @@ func ArrangeGeminiOutput(raw string) *ArrangedOutput {
 		// If still none, try entire text as JSON
 		if len(res.ToolCalls) == 0 {
 			tc, ok := parseSingleToolCall(text)
-			if ok {
+			if ok && acceptsToolCall(catalog, tc) {
 				res.ToolCalls = append(res.ToolCalls, tc)
 			}
 		}
@@ -271,7 +561,7 @@ func ArrangeGeminiOutput(raw string) *ArrangedOutput {
 		// sometimes put the argument fields at the top level ({"name": "x",
 		// "code": "..."}) instead of nesting them under "arguments".
 		if len(res.ToolCalls) == 0 {
-			if tc, ok := findFirstJSONToolCall(text); ok {
+			if tc, ok := findFirstJSONToolCall(text, catalog); ok {
 				res.ToolCalls = append(res.ToolCalls, tc)
 			}
 		}
@@ -291,7 +581,9 @@ func ArrangeGeminiOutput(raw string) *ArrangedOutput {
 
 // extractTaggedToolCalls extracts tool calls from <tool_call> blocks even if the model
 // closed them with markdown fences (```) or omitted the closing tag entirely.
-func extractTaggedToolCalls(text string) ([]ToolCall, string) {
+// When catalog is non-nil, calls that violate the declared schema are removed
+// from both the result and the cleaned text.
+func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCall, string) {
 	const tag = "<tool_call>"
 	tagLen := len(tag)
 	var tcs []ToolCall
@@ -339,7 +631,9 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 			}
 
 			if parsed {
-				tcs = append(tcs, tc)
+				if acceptsToolCall(catalog, tc) {
+					tcs = append(tcs, tc)
+				}
 				endBlock := endObjIdx
 				rest := text[endObjIdx:]
 				trimmed := strings.TrimLeft(rest, " \t\r\n")
@@ -372,7 +666,9 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 			candLimit := absIdx + tagLen + closeIdx
 			candidate := strings.TrimSpace(text[absIdx+tagLen : candLimit])
 			if tc, parsed := parseSingleToolCall(candidate); parsed {
-				tcs = append(tcs, tc)
+				if acceptsToolCall(catalog, tc) {
+					tcs = append(tcs, tc)
+				}
 				endBlock := candLimit + len("</tool_call>")
 				spans = append(spans, span{start: absIdx, end: endBlock})
 				pos = endBlock
@@ -380,13 +676,17 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 			} else if !shouldRejectMidValueRepair(candidate) {
 				fixed, _ := autoCloseJSONBraces(candidate)
 				if tc, parsed := parseSingleToolCall(fixed); parsed {
-					tcs = append(tcs, tc)
+					if acceptsToolCall(catalog, tc) {
+						tcs = append(tcs, tc)
+					}
 					endBlock := candLimit + len("</tool_call>")
 					spans = append(spans, span{start: absIdx, end: endBlock})
 					pos = endBlock
 					recovered = true
 				} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
-					tcs = append(tcs, tcHeur)
+					if acceptsToolCall(catalog, tcHeur) {
+						tcs = append(tcs, tcHeur)
+					}
 					endBlock := candLimit + len("</tool_call>")
 					spans = append(spans, span{start: absIdx, end: endBlock})
 					pos = endBlock
@@ -411,12 +711,16 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 			if !shouldRejectMidValueRepair(candidate) {
 				fixed, _ := autoCloseJSONBraces(candidate)
 				if tc, parsed := parseSingleToolCall(fixed); parsed {
-					tcs = append(tcs, tc)
+					if acceptsToolCall(catalog, tc) {
+						tcs = append(tcs, tc)
+					}
 					spans = append(spans, span{start: absIdx, end: endBlock})
 					pos = endBlock
 					recovered = true
 				} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
-					tcs = append(tcs, tcHeur)
+					if acceptsToolCall(catalog, tcHeur) {
+						tcs = append(tcs, tcHeur)
+					}
 					spans = append(spans, span{start: absIdx, end: endBlock})
 					pos = endBlock
 					recovered = true
@@ -431,7 +735,7 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 		pos = braceIdx + 1
 	}
 
-	if len(tcs) == 0 {
+	if len(spans) == 0 {
 		return nil, text
 	}
 
@@ -448,6 +752,37 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 	}
 
 	return tcs, strings.TrimSpace(sb.String())
+}
+
+// acceptsToolCall reports whether tc conforms to the request's compiled tool
+// catalog. A nil catalog means validation is disabled.
+func acceptsToolCall(catalog *CompiledToolCatalog, tc ToolCall) bool {
+	if catalog == nil {
+		return true
+	}
+	ok, _ := catalog.ValidateCall(tc.Function.Name, tc.Function.Arguments)
+	return ok
+}
+
+// ThrottleMutatingToolCalls enforces the Write-Serial cadence: every read-only
+// call is preserved, at most one mutating call is allowed, and the batch is
+// truncated at the first subsequent mutation.
+func ThrottleMutatingToolCalls(calls []ToolCall) []ToolCall {
+	if len(calls) == 0 {
+		return calls
+	}
+	out := make([]ToolCall, 0, len(calls))
+	mutationSeen := false
+	for _, tc := range calls {
+		if isMutatingTool(tc.Function.Name) {
+			if mutationSeen {
+				break
+			}
+			mutationSeen = true
+		}
+		out = append(out, tc)
+	}
+	return out
 }
 
 func parseSingleToolCall(payload string) (ToolCall, bool) {
@@ -700,9 +1035,10 @@ func extractHeuristicToolCall(payload string) (ToolCall, bool) {
 }
 
 // findFirstJSONToolCall scans text for balanced {...} objects and returns the
-// first that parses as a tool call. Handles overlapping or concatenated JSON
-// emissions (e.g. a truncated attempt immediately followed by the full one).
-func findFirstJSONToolCall(text string) (ToolCall, bool) {
+// first that parses as a schema-valid tool call. Handles overlapping or
+// concatenated JSON emissions (e.g. a truncated attempt immediately followed by
+// the full one).
+func findFirstJSONToolCall(text string, catalog *CompiledToolCatalog) (ToolCall, bool) {
 	candidates := 0
 	for i := 0; i < len(text); i++ {
 		if text[i] != '{' {
@@ -716,7 +1052,7 @@ func findFirstJSONToolCall(text string) (ToolCall, bool) {
 		if !ok {
 			continue
 		}
-		if tc, ok := parseSingleToolCall(objStr); ok {
+		if tc, ok := parseSingleToolCall(objStr); ok && acceptsToolCall(catalog, tc) {
 			return tc, true
 		}
 	}
@@ -738,7 +1074,7 @@ func findFirstJSONToolCall(text string) (ToolCall, bool) {
 			continue
 		}
 		fixed, _ := autoCloseJSONBraces(cand)
-		if tc, ok := parseSingleToolCall(fixed); ok {
+		if tc, ok := parseSingleToolCall(fixed); ok && acceptsToolCall(catalog, tc) {
 			return tc, true
 		}
 	}

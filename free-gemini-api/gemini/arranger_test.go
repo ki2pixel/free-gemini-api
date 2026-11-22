@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -587,5 +588,172 @@ func TestAutoCloseJSONBraces(t *testing.T) {
 		if isMidValue != tc.isMidValue {
 			t.Errorf("autoCloseJSONBraces(%q) isMidValue = %v, want %v", tc.input, isMidValue, tc.isMidValue)
 		}
+	}
+}
+
+func TestArrangeGeminiOutputWithTools_ValidSchema(t *testing.T) {
+	raw := `<tool_call>{"name":"write","arguments":{"path":"notes.txt","content":"hello"}}</tool_call>`
+	res := ArrangeGeminiOutputWithTools(raw, openCodeToolsFixture())
+	if !res.IsToolCall {
+		t.Fatal("expected a schema-valid write to be accepted")
+	}
+	if len(res.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(res.ToolCalls))
+	}
+	if res.ToolCalls[0].Function.Name != "write" {
+		t.Errorf("expected write, got %q", res.ToolCalls[0].Function.Name)
+	}
+	if res.FinishReason != "tool_calls" {
+		t.Errorf("expected finish_reason tool_calls, got %q", res.FinishReason)
+	}
+}
+
+func TestArrangeGeminiOutputWithTools_MissingPathRejected(t *testing.T) {
+	raw := `<tool_call>{"name":"write","arguments":{"content":"hello"}}</tool_call>`
+	res := ArrangeGeminiOutputWithTools(raw, openCodeToolsFixture())
+	if res.IsToolCall || len(res.ToolCalls) != 0 {
+		t.Fatalf("expected the schema-invalid write to be rejected, got %d call(s)", len(res.ToolCalls))
+	}
+	if res.FinishReason != "stop" {
+		t.Errorf("expected finish_reason stop, got %q", res.FinishReason)
+	}
+	if strings.Contains(res.CleanText, "<tool_call>") {
+		t.Errorf("rejected tool block leaked into CleanText: %q", res.CleanText)
+	}
+}
+
+func TestArrangeGeminiOutputWithTools_InvalidCallDroppedButValidKept(t *testing.T) {
+	raw := "<tool_call>\n" +
+		`{"name":"write","arguments":{"content":"missing path"}}` + "\n</tool_call>\n" +
+		"<tool_call>\n" +
+		`{"name":"read","arguments":{"path":"notes.txt"}}` + "\n</tool_call>"
+	res := ArrangeGeminiOutputWithTools(raw, openCodeToolsFixture())
+	if !res.IsToolCall {
+		t.Fatal("expected the valid read to survive")
+	}
+	if len(res.ToolCalls) != 1 || res.ToolCalls[0].Function.Name != "read" {
+		t.Fatalf("expected only the read call, got %+v", res.ToolCalls)
+	}
+}
+
+func TestThrottleMutatingToolCalls_SingleWriteAllowed(t *testing.T) {
+	calls := []ToolCall{
+		{Type: "function", Function: ToolCallFunction{Name: "read", Arguments: `{"path":"a"}`}},
+		{Type: "function", Function: ToolCallFunction{Name: "write", Arguments: `{"path":"a","content":"x"}`}},
+		{Type: "function", Function: ToolCallFunction{Name: "edit", Arguments: `{"path":"b","old_string":"x","new_string":"y"}`}},
+	}
+	out := ThrottleMutatingToolCalls(calls)
+	if len(out) != 2 {
+		t.Fatalf("expected read + first write, got %d calls", len(out))
+	}
+	if out[0].Function.Name != "read" || out[1].Function.Name != "write" {
+		t.Errorf("unexpected throttled calls: %q, %q", out[0].Function.Name, out[1].Function.Name)
+	}
+}
+
+func TestThrottleMutatingToolCalls_ParallelReadsWithOneWrite(t *testing.T) {
+	calls := []ToolCall{
+		{Function: ToolCallFunction{Name: "read"}},
+		{Function: ToolCallFunction{Name: "grep"}},
+		{Function: ToolCallFunction{Name: "glob"}},
+		{Function: ToolCallFunction{Name: "write"}},
+		{Function: ToolCallFunction{Name: "read"}},
+		{Function: ToolCallFunction{Name: "edit"}},
+		{Function: ToolCallFunction{Name: "list"}},
+	}
+	out := ThrottleMutatingToolCalls(calls)
+	if len(out) != 5 {
+		t.Fatalf("expected the batch to stop at the second mutation, got %d calls", len(out))
+	}
+	names := make([]string, len(out))
+	for i, tc := range out {
+		names[i] = tc.Function.Name
+	}
+	want := []string{"read", "grep", "glob", "write", "read"}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("throttled names = %v, want %v", names, want)
+		}
+	}
+}
+
+func TestThrottleMutatingToolCalls_ReadOnly(t *testing.T) {
+	calls := []ToolCall{
+		{Function: ToolCallFunction{Name: "read"}},
+		{Function: ToolCallFunction{Name: "grep"}},
+		{Function: ToolCallFunction{Name: "glob"}},
+		{Function: ToolCallFunction{Name: "list"}},
+	}
+	out := ThrottleMutatingToolCalls(calls)
+	if len(out) != len(calls) {
+		t.Fatalf("read-only batches must be preserved, got %d/%d", len(out), len(calls))
+	}
+	if got := ThrottleMutatingToolCalls(nil); got != nil {
+		t.Fatalf("nil input should stay nil, got %#v", got)
+	}
+}
+
+func TestFormatToolsInstruction_CompactOutput(t *testing.T) {
+	tools := openCodeToolsFixture()
+	fn := tools[0]["function"].(map[string]any)
+	fn["description"] = strings.Repeat("Write a file to disk with strict metadata ordering. ", 20)
+	params := fn["parameters"].(map[string]any)
+	params["title"] = "WriteFileParameters"
+	params["$schema"] = "http://json-schema.org/draft-07/schema#"
+	props := params["properties"].(map[string]any)
+	props["path"].(map[string]any)["description"] = strings.Repeat("Absolute or relative path on the host filesystem. ", 20)
+
+	indented, err := json.MarshalIndent(tools, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal tools: %v", err)
+	}
+	out := FormatToolsInstruction(tools)
+	const fence = "```json\n"
+	start := strings.Index(out, fence)
+	if start == -1 {
+		t.Fatalf("compact tool catalog block not found in instruction")
+	}
+	catalogStart := start + len(fence)
+	relEnd := strings.Index(out[catalogStart:], "\n```")
+	if relEnd == -1 {
+		t.Fatalf("compact tool catalog closing fence not found")
+	}
+	compact := out[catalogStart : catalogStart+relEnd]
+	var decoded []map[string]any
+	if err := json.Unmarshal([]byte(compact), &decoded); err != nil {
+		t.Fatalf("compact catalog is not valid JSON: %v\n%s", err, compact)
+	}
+	if len(decoded) != len(tools) {
+		t.Fatalf("compact catalog has %d tools, want %d", len(decoded), len(tools))
+	}
+
+	if len(compact) >= len(indented)*6/10 {
+		t.Errorf("compact catalog is %d bytes, want at least 40%% below the %d-byte indented catalog", len(compact), len(indented))
+	}
+	if strings.Contains(compact, "\n  ") {
+		t.Errorf("compact catalog still contains indentation: %q", compact)
+	}
+	pathIdx := strings.Index(compact, `"path"`)
+	contentIdx := strings.Index(compact, `"content"`)
+	if pathIdx == -1 || contentIdx == -1 {
+		t.Fatalf("compact catalog lost path/content properties: %s", compact)
+	}
+	if pathIdx > contentIdx {
+		t.Errorf("path must be serialized before content: %s", compact)
+	}
+	if !strings.Contains(compact, `"required":["path","content"]`) {
+		t.Errorf("required keys must be explicit and path-first: %s", compact)
+	}
+}
+
+func TestThrottleMutatingToolCalls_ShellAndPatch(t *testing.T) {
+	calls := []ToolCall{
+		{Function: ToolCallFunction{Name: "shell"}},
+		{Function: ToolCallFunction{Name: "patch"}},
+		{Function: ToolCallFunction{Name: "read"}},
+	}
+	out := ThrottleMutatingToolCalls(calls)
+	if len(out) != 1 || out[0].Function.Name != "shell" {
+		t.Fatalf("expected only the first mutation (shell), got %+v", out)
 	}
 }

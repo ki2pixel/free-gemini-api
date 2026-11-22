@@ -42,6 +42,18 @@ func EstimateTokens(text string) int {
 	return tokens
 }
 
+// formatSchemaRetryDirective builds the abstract-error retry prompt used when
+// the upstream model emitted a tool call that violates its declared schema.
+// The broken raw tokens are never replayed; only the actionable violation is
+// sent back, together with the metadata-first ordering reminder.
+func formatSchemaRetryDirective(detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		detail = "invalid tool arguments"
+	}
+	return fmt.Sprintf("[SYSTEM DIRECTIVE: Previous tool call failed validation: %s. Re-issue the tool call correcting this parameter, place 'path' first in the arguments object, and include every required property.]\n\n", detail)
+}
+
 // firstUserMessageContent returns the flattened text of the conversation's
 // first user message. Clients that send no explicit affinity identifier are
 // scoped per chat by this value, so separate chats get separate upstream
@@ -486,17 +498,23 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					maxAttempts = 2
 				}
 				forceFull := false
+				schemaRetryDetail := ""
 				for attempt := 0; attempt < maxAttempts; attempt++ {
 					var sendPrompt string
 					emittedThoughtRunes = 0
 					emittedContentRunes = 0
 					if forceFull {
-						// Previous attempt hit a blocked/empty generation or refusal:
-						// replay everything fresh with a strict override directive.
+						// Previous attempt hit a blocked/empty generation, a
+						// refusal, or an invalid tool call: replay everything
+						// fresh with a targeted override directive.
 						wWorker.Client.ResetConversationStateSession(sessionKey, model)
 						override := ""
 						if len(req.Tools) > 0 {
-							override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls.]\n\n"
+							if schemaRetryDetail != "" {
+								override = formatSchemaRetryDirective(schemaRetryDetail)
+							} else {
+								override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls.]\n\n"
+							}
 						}
 						sendPrompt = override + msgFlat + turnCue
 					} else {
@@ -608,11 +626,20 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					if streamResp != nil && len(streamResp.Text) > len(finalAttemptText) {
 						finalAttemptText = streamResp.Text
 					}
-					if attempt+1 < maxAttempts && isUnusableModelOutput(finalAttemptText, len(req.Tools) > 0) {
-						log.Printf("⚠️ Unusable model output (%d chars), retrying on a fresh upstream conversation", len(finalAttemptText))
-						invalidateSessionTurn(sessionKey)
-						forceFull = true
-						continue
+					if attempt+1 < maxAttempts {
+						if invalid, detail := gemini.HasInvalidSchemaToolCall(finalAttemptText, req.Tools); invalid {
+							log.Printf("⚠️ Invalid tool-call schema (%s), retrying with an abstract error directive", detail)
+							schemaRetryDetail = detail
+							invalidateSessionTurn(sessionKey)
+							forceFull = true
+							continue
+						}
+						if isUnusableModelOutput(finalAttemptText, len(req.Tools) > 0) {
+							log.Printf("⚠️ Unusable model output (%d chars), retrying on a fresh upstream conversation", len(finalAttemptText))
+							invalidateSessionTurn(sessionKey)
+							forceFull = true
+							continue
+						}
 					}
 					return nil
 				}
@@ -652,6 +679,33 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			if streamResp != nil && len(streamResp.Text) > len(finalText) {
 				finalText = streamResp.Text
 			}
+			if len(req.Tools) > 0 {
+				if invalid, detail := gemini.HasInvalidSchemaToolCall(finalText, req.Tools); invalid {
+					log.Printf("❌ Upstream tool call failed schema validation after retry: %s", detail)
+					invalidateSessionTurn(sessionKey)
+					errChunk := OpenAIChatCompletionChunk{
+						ID:      chunkID,
+						Object:  "chat.completion.chunk",
+						Created: createdTime,
+						Model:   model,
+						Choices: []OpenAIStreamChoice{
+							{
+								Index: 0,
+								Delta: OpenAIDelta{
+									Role:    "assistant",
+									Content: fmt.Sprintf("\n\n[Error: upstream tool call failed schema validation: %s]", detail),
+								},
+								FinishReason: "stop",
+							},
+						},
+					}
+					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
+						writeChunk(errBytes)
+					}
+					writeRaw("data: [DONE]\n\n")
+					return
+				}
+			}
 			if isUnusableModelOutput(finalText, len(req.Tools) > 0) {
 				invalidateSessionTurn(sessionKey)
 			} else if streamResp != nil {
@@ -670,7 +724,14 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				if streamResp != nil && streamResp.Text != "" && len(rawOutput) < len(streamResp.Text) {
 					rawOutput = streamResp.Text
 				}
-				arranged := gemini.ArrangeGeminiOutput(rawOutput)
+				arranged := gemini.ArrangeGeminiOutputWithTools(rawOutput, req.Tools)
+				if arranged.IsToolCall {
+					arranged.ToolCalls = gemini.ThrottleMutatingToolCalls(arranged.ToolCalls)
+					if len(arranged.ToolCalls) == 0 {
+						arranged.IsToolCall = false
+						arranged.FinishReason = "stop"
+					}
+				}
 				if gemini.HasTruncatedMutationToolCall(rawOutput) {
 					// The model was cut off inside a mutating tool call. The
 					// arranger deliberately rejected it; report an explicit
@@ -840,15 +901,21 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		// Nothing has been emitted yet, so a blocked/empty generation can be
 		// retried invisibly on a fresh upstream conversation.
 		forceFull := false
+		schemaRetryDetail := ""
 		for attempt := 0; attempt < 2; attempt++ {
 			var sendPrompt string
 			if forceFull {
-				// Previous attempt hit a blocked/empty generation or refusal:
-				// replay everything fresh with a strict override directive.
+				// Previous attempt hit a blocked/empty generation, a refusal,
+				// or an invalid tool call: replay everything fresh with a
+				// targeted override directive.
 				w.Client.ResetConversationStateSession(sessionKey, model)
 				override := ""
 				if len(req.Tools) > 0 {
-					override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls.]\n\n"
+					if schemaRetryDetail != "" {
+						override = formatSchemaRetryDirective(schemaRetryDetail)
+					} else {
+						override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls.]\n\n"
+					}
 				}
 				sendPrompt = override + msgFlat + turnCue
 			} else {
@@ -874,11 +941,20 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			if err != nil {
 				return nil, err
 			}
-			if attempt+1 < 2 && isUnusableModelOutput(r.Text, len(req.Tools) > 0) {
-				log.Printf("⚠️ Unusable model output or refusal (%d chars), retrying on a fresh upstream conversation", len(r.Text))
-				invalidateSessionTurn(sessionKey)
-				forceFull = true
-				continue
+			if attempt+1 < 2 {
+				if invalid, detail := gemini.HasInvalidSchemaToolCall(r.Text, req.Tools); invalid {
+					log.Printf("⚠️ Invalid tool-call schema (%s), retrying with an abstract error directive", detail)
+					schemaRetryDetail = detail
+					invalidateSessionTurn(sessionKey)
+					forceFull = true
+					continue
+				}
+				if isUnusableModelOutput(r.Text, len(req.Tools) > 0) {
+					log.Printf("⚠️ Unusable model output or refusal (%d chars), retrying on a fresh upstream conversation", len(r.Text))
+					invalidateSessionTurn(sessionKey)
+					forceFull = true
+					continue
+				}
 			}
 			return r, nil
 		}
@@ -900,6 +976,16 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 
+	if len(req.Tools) > 0 {
+		if invalid, detail := gemini.HasInvalidSchemaToolCall(resp.Text, req.Tools); invalid {
+			log.Printf("❌ Upstream tool call failed schema validation after retry: %s", detail)
+			invalidateSessionTurn(sessionKey)
+			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+				"error": fmt.Sprintf("upstream tool call failed schema validation: %s", detail),
+			})
+		}
+	}
+
 	// Commit the turn only if the model produced usable output; a blocked or
 	// empty generation invalidates the session conversation so the next
 	// request resets it and replays the full transcript.
@@ -913,7 +999,14 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		commitSessionTurn(sessionKey, msgFlat, resp.ConversationID, resp.ResponseID, resp.ChoiceID, lastWorkerID)
 	}
 
-	arranged := gemini.ArrangeGeminiOutput(resp.Text)
+	arranged := gemini.ArrangeGeminiOutputWithTools(resp.Text, req.Tools)
+	if arranged.IsToolCall {
+		arranged.ToolCalls = gemini.ThrottleMutatingToolCalls(arranged.ToolCalls)
+		if len(arranged.ToolCalls) == 0 {
+			arranged.IsToolCall = false
+			arranged.FinishReason = "stop"
+		}
+	}
 	if gemini.HasTruncatedMutationToolCall(resp.Text) {
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": "upstream tool call was truncated mid-value; no mutation was executed",
