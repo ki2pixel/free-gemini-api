@@ -1,0 +1,4 @@
+handshake: connected from Origin https://evil.example
+ping -> {"type":"pong"}
+
+cookies_payload accepted (no auth, no origin check)

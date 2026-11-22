@@ -1,0 +1,2 @@
+{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}},"protocolVersion":"2024-11-05","serverInfo":{"name":"free-gemini-mcp","version":"2.2.0"}}}
+{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"🎨 Image generated successfully!\nURL: http://127.0.0.1:18002/out.png"}]}}

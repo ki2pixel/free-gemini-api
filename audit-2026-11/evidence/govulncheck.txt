@@ -1,0 +1,359 @@
+=== Symbol Results ===
+
+Vulnerability #1: GO-2026-6888
+    Excessive memory allocation when decompressing crafted streams in
+    github.com/andybalholm/brotli
+  More info: https://pkg.go.dev/vuln/GO-2026-6888
+  Module: github.com/andybalholm/brotli
+    Found in: github.com/andybalholm/brotli@v1.2.2
+    Fixed in: github.com/andybalholm/brotli@v1.2.7
+    Example traces found:
+      #1: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls brotli.Reader.Read
+      #2: api/queue.go:646:28: api.WorkerPool.DiscoverModelsFromWorkers calls brotli.decodeError.Error
+
+Vulnerability #2: GO-2026-6865
+    Panic on two-block frames in github.com/klauspost/compress
+  More info: https://pkg.go.dev/vuln/GO-2026-6865
+  Module: github.com/klauspost/compress
+    Found in: github.com/klauspost/compress@v1.19.0
+    Fixed in: github.com/klauspost/compress@v1.20.2
+    Example traces found:
+      #1: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fse.Compress
+      #2: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fse.Decompress
+      #3: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls huff0.Compress1X
+      #4: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls huff0.Compress4X
+      #5: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls huff0.ReadTable
+
+Vulnerability #3: GO-2026-6688
+    Mutually-referencing array formulas recurse unboundedly, causing a fatal
+    stack overflow in github.com/xuri/excelize
+  More info: https://pkg.go.dev/vuln/GO-2026-6688
+  Module: github.com/xuri/excelize/v2
+    Found in: github.com/xuri/excelize/v2@v2.11.0
+    Fixed in: github.com/xuri/excelize/v2@v2.11.1-0.20260911060113-ea12859e43c6
+    Example traces found:
+      #1: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.Close
+      #2: api/export.go:296:46: api.renderStyledSheet calls excelize.ColumnNumberToName
+      #3: api/export.go:496:44: api.renderAnalyticsSummarySheet calls excelize.CoordinatesToCellName
+      #4: api/export.go:314:18: api.renderStyledSheet calls excelize.File.AutoFilter
+      #5: api/export.go:153:2: api.ExportAnalyticsToExcel calls excelize.File.Close
+      #6: api/export.go:207:33: api.ExportAnalyticsToExcel calls excelize.File.GetSheetIndex
+      #7: api/export.go:181:12: api.ExportAnalyticsToExcel calls excelize.File.NewSheet
+      #8: api/export.go:333:29: api.renderAnalyticsSummarySheet calls excelize.File.NewStyle
+      #9: api/export.go:210:20: api.ExportAnalyticsToExcel calls excelize.File.SaveAs
+      #10: api/export.go:208:18: api.ExportAnalyticsToExcel calls excelize.File.SetActiveSheet
+      #11: api/export.go:415:20: api.renderAnalyticsSummarySheet calls excelize.File.SetCellStyle
+      #12: api/export.go:414:20: api.renderAnalyticsSummarySheet calls excelize.File.SetCellValue
+      #13: api/export.go:575:19: api.renderAnalyticsSummarySheet calls excelize.File.SetColWidth
+      #14: api/export.go:315:16: api.renderStyledSheet calls excelize.File.SetPanes
+      #15: api/export.go:416:20: api.renderAnalyticsSummarySheet calls excelize.File.SetRowHeight
+      #16: api/export.go:157:16: api.ExportAnalyticsToExcel calls excelize.File.SetSheetName
+      #17: api/export.go:329:21: api.renderAnalyticsSummarySheet calls excelize.File.SetSheetProps
+      #18: api/export.go:152:23: api.ExportAnalyticsToExcel calls excelize.NewFile
+      #19: gemini/registry.go:659:44: gemini.ModelRegistry.Get calls strings.TrimSpace, which eventually calls excelize.SplitCellName
+      #20: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.drawingsWriter
+      #21: gemini/registry.go:659:44: gemini.ModelRegistry.Get calls strings.TrimSpace, which eventually calls excelize.escapeSheetName
+      #22: api/export.go:16:2: api.init calls excelize.init
+      #23: main.go:139:22: goapi.main calls fiber.App.Listen, which eventually calls excelize.mergeExpandedCols
+      #24: main.go:139:22: goapi.main calls fiber.App.Listen, which eventually calls excelize.prepare
+      #25: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.relsWriter
+      #26: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.workSheetWriter
+      #27: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.writeToZip
+      #28: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.writeToZip
+
+Vulnerability #4: GO-2026-6684
+    Excelize Decrypt: unrecoverable panics on malformed OLE/CFB encrypted
+    workbooks in github.com/xuri/excelize
+  More info: https://pkg.go.dev/vuln/GO-2026-6684
+  Module: github.com/xuri/excelize/v2
+    Found in: github.com/xuri/excelize/v2@v2.11.0
+    Fixed in: github.com/xuri/excelize/v2@v2.11.1-0.20260915055537-22f76f9acb94
+    Example traces found:
+      #1: api/export.go:210:20: api.ExportAnalyticsToExcel calls excelize.File.SaveAs
+
+Vulnerability #5: GO-2026-6680
+    Excelize: Panic in cellInRange on a worksheet with an empty mergeCell ref in
+    github.com/xuri/excelize
+  More info: https://pkg.go.dev/vuln/GO-2026-6680
+  Module: github.com/xuri/excelize/v2
+    Found in: github.com/xuri/excelize/v2@v2.11.0
+    Fixed in: github.com/xuri/excelize/v2@v2.11.1-0.20260820023833-99903a3240e5
+    Example traces found:
+      #1: api/export.go:414:20: api.renderAnalyticsSummarySheet calls excelize.File.SetCellValue
+
+Vulnerability #6: GO-2026-6678
+    Unbounded <col max> lacks MaxColumns check in flatCols(), causing column
+    mutators to hang or OOM in github.com/xuri/excelize
+  More info: https://pkg.go.dev/vuln/GO-2026-6678
+  Module: github.com/xuri/excelize/v2
+    Found in: github.com/xuri/excelize/v2@v2.11.0
+    Fixed in: github.com/xuri/excelize/v2@v2.11.1-0.20260807015645-a54c578af309
+    Example traces found:
+      #1: api/export.go:575:19: api.renderAnalyticsSummarySheet calls excelize.File.SetColWidth
+
+Vulnerability #7: GO-2026-6677
+    Integer overflow yields an out-of-domain coordinate with nil error, causing
+    panic in github.com/xuri/excelize
+  More info: https://pkg.go.dev/vuln/GO-2026-6677
+  Module: github.com/xuri/excelize/v2
+    Found in: github.com/xuri/excelize/v2@v2.11.0
+    Fixed in: github.com/xuri/excelize/v2@v2.11.1-0.20260910071107-696050fbf14e
+    Example traces found:
+      #1: api/export.go:314:18: api.renderStyledSheet calls excelize.File.AutoFilter
+      #2: api/export.go:153:2: api.ExportAnalyticsToExcel calls excelize.File.Close
+      #3: api/export.go:181:12: api.ExportAnalyticsToExcel calls excelize.File.NewSheet
+      #4: api/export.go:210:20: api.ExportAnalyticsToExcel calls excelize.File.SaveAs
+      #5: api/export.go:208:18: api.ExportAnalyticsToExcel calls excelize.File.SetActiveSheet
+      #6: api/export.go:415:20: api.renderAnalyticsSummarySheet calls excelize.File.SetCellStyle
+      #7: api/export.go:414:20: api.renderAnalyticsSummarySheet calls excelize.File.SetCellValue
+      #8: api/export.go:575:19: api.renderAnalyticsSummarySheet calls excelize.File.SetColWidth
+      #9: api/export.go:315:16: api.renderStyledSheet calls excelize.File.SetPanes
+      #10: api/export.go:416:20: api.renderAnalyticsSummarySheet calls excelize.File.SetRowHeight
+      #11: api/export.go:329:21: api.renderAnalyticsSummarySheet calls excelize.File.SetSheetProps
+      #12: api/export.go:152:23: api.ExportAnalyticsToExcel calls excelize.NewFile
+      #13: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.xlsxMergeCell.Rect
+
+Vulnerability #8: GO-2026-6676
+    Panic on out-of-order cell column references when reading worksheets in
+    github.com/xuri/excelize
+  More info: https://pkg.go.dev/vuln/GO-2026-6676
+  Module: github.com/xuri/excelize/v2
+    Found in: github.com/xuri/excelize/v2@v2.11.0
+    Fixed in: github.com/xuri/excelize/v2@v2.11.1-0.20260816084418-46a5eb289448
+    Example traces found:
+      #1: api/export.go:314:18: api.renderStyledSheet calls excelize.File.AutoFilter
+      #2: api/export.go:181:12: api.ExportAnalyticsToExcel calls excelize.File.NewSheet
+      #3: api/export.go:208:18: api.ExportAnalyticsToExcel calls excelize.File.SetActiveSheet
+      #4: api/export.go:415:20: api.renderAnalyticsSummarySheet calls excelize.File.SetCellStyle
+      #5: api/export.go:414:20: api.renderAnalyticsSummarySheet calls excelize.File.SetCellValue
+      #6: api/export.go:575:19: api.renderAnalyticsSummarySheet calls excelize.File.SetColWidth
+      #7: api/export.go:315:16: api.renderStyledSheet calls excelize.File.SetPanes
+      #8: api/export.go:416:20: api.renderAnalyticsSummarySheet calls excelize.File.SetRowHeight
+      #9: api/export.go:329:21: api.renderAnalyticsSummarySheet calls excelize.File.SetSheetProps
+      #10: api/export.go:152:23: api.ExportAnalyticsToExcel calls excelize.NewFile
+
+Vulnerability #9: GO-2026-6674
+    Excelize: GetStyle panics on a negative fillId, borderId or fontId in
+    styles.xml in github.com/xuri/excelize
+  More info: https://pkg.go.dev/vuln/GO-2026-6674
+  Module: github.com/xuri/excelize/v2
+    Found in: github.com/xuri/excelize/v2@v2.11.0
+    Fixed in: github.com/xuri/excelize/v2@v2.11.1-0.20260731010303-ae2113b410e5
+    Example traces found:
+      #1: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.Close
+      #2: api/export.go:296:46: api.renderStyledSheet calls excelize.ColumnNumberToName
+      #3: api/export.go:496:44: api.renderAnalyticsSummarySheet calls excelize.CoordinatesToCellName
+      #4: api/export.go:314:18: api.renderStyledSheet calls excelize.File.AutoFilter
+      #5: api/export.go:153:2: api.ExportAnalyticsToExcel calls excelize.File.Close
+      #6: api/export.go:207:33: api.ExportAnalyticsToExcel calls excelize.File.GetSheetIndex
+      #7: api/export.go:181:12: api.ExportAnalyticsToExcel calls excelize.File.NewSheet
+      #8: api/export.go:333:29: api.renderAnalyticsSummarySheet calls excelize.File.NewStyle
+      #9: api/export.go:210:20: api.ExportAnalyticsToExcel calls excelize.File.SaveAs
+      #10: api/export.go:208:18: api.ExportAnalyticsToExcel calls excelize.File.SetActiveSheet
+      #11: api/export.go:415:20: api.renderAnalyticsSummarySheet calls excelize.File.SetCellStyle
+      #12: api/export.go:414:20: api.renderAnalyticsSummarySheet calls excelize.File.SetCellValue
+      #13: api/export.go:575:19: api.renderAnalyticsSummarySheet calls excelize.File.SetColWidth
+      #14: api/export.go:315:16: api.renderStyledSheet calls excelize.File.SetPanes
+      #15: api/export.go:416:20: api.renderAnalyticsSummarySheet calls excelize.File.SetRowHeight
+      #16: api/export.go:157:16: api.ExportAnalyticsToExcel calls excelize.File.SetSheetName
+      #17: api/export.go:329:21: api.renderAnalyticsSummarySheet calls excelize.File.SetSheetProps
+      #18: api/export.go:152:23: api.ExportAnalyticsToExcel calls excelize.NewFile
+      #19: gemini/registry.go:659:44: gemini.ModelRegistry.Get calls strings.TrimSpace, which eventually calls excelize.SplitCellName
+      #20: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.drawingsWriter
+      #21: gemini/registry.go:659:44: gemini.ModelRegistry.Get calls strings.TrimSpace, which eventually calls excelize.escapeSheetName
+      #22: api/export.go:16:2: api.init calls excelize.init
+      #23: main.go:139:22: goapi.main calls fiber.App.Listen, which eventually calls excelize.mergeExpandedCols
+      #24: main.go:139:22: goapi.main calls fiber.App.Listen, which eventually calls excelize.prepare
+      #25: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.relsWriter
+      #26: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.workSheetWriter
+      #27: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.writeToZip
+      #28: api/session.go:107:21: api.StartWebSocketBridge calls sync.Map.Range, which eventually calls excelize.writeToZip
+
+Vulnerability #10: GO-2026-4550
+    CIRCL has an incorrect calculation in secp384r1 CombinedMult in
+    github.com/cloudflare/circl
+  More info: https://pkg.go.dev/vuln/GO-2026-4550
+  Module: github.com/cloudflare/circl
+    Found in: github.com/cloudflare/circl@v1.6.2
+    Fixed in: github.com/cloudflare/circl@v1.6.3
+    Example traces found:
+      #1: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls conv.BytesLe2BigInt
+      #2: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls conv.UnmarshalBinary
+      #3: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls conv.init
+      #4: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.Add
+      #5: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.Exceeds
+      #6: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.InvNTT
+      #7: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.MulBy2toD
+      #8: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.MulHat
+      #9: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.NTT
+      #10: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.NormalizeAssumingLe2Q
+      #11: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.PackLe16
+      #12: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.ReduceLe2Q
+      #13: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.Sub
+      #14: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls dilithium.Poly.UnpackT1
+      #15: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls dilithium.init
+      #16: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls ed25519.PublicKey.Scheme
+      #17: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed25519.Scheme
+      #18: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls ed25519.Verify
+      #19: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed25519.init
+      #20: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed25519.scheme.Name
+      #21: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed25519.scheme.Oid
+      #22: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed25519.scheme.TLSIdentifier
+      #23: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls ed25519.scheme.UnmarshalBinaryPublicKey
+      #24: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls ed25519.scheme.Verify
+      #25: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls ed448.PublicKey.Scheme
+      #26: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed448.Scheme
+      #27: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls ed448.Verify
+      #28: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed448.init
+      #29: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed448.scheme.Name
+      #30: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed448.scheme.Oid
+      #31: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls ed448.scheme.TLSIdentifier
+      #32: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls ed448.scheme.UnmarshalBinaryPublicKey
+      #33: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls ed448.scheme.Verify
+      #34: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls eddilithium2.PublicKey.Scheme
+      #35: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium2.Scheme
+      #36: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium2.init
+      #37: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium2.scheme.Name
+      #38: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium2.scheme.Oid
+      #39: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium2.scheme.TLSIdentifier
+      #40: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls eddilithium2.scheme.UnmarshalBinaryPublicKey
+      #41: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls eddilithium2.scheme.Verify
+      #42: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls eddilithium3.PublicKey.Scheme
+      #43: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium3.Scheme
+      #44: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium3.init
+      #45: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium3.scheme.Name
+      #46: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium3.scheme.Oid
+      #47: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls eddilithium3.scheme.TLSIdentifier
+      #48: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls eddilithium3.scheme.UnmarshalBinaryPublicKey
+      #49: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls eddilithium3.scheme.Verify
+      #50: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.Add
+      #51: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.Inv
+      #52: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.InvSqrt
+      #53: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.IsZero
+      #54: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.Modp
+      #55: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.Mul
+      #56: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.Neg
+      #57: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.P
+      #58: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.SetOne
+      #59: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.Sqr
+      #60: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.Sub
+      #61: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp25519.ToBytes
+      #62: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls fp25519.init
+      #63: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.Add
+      #64: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.Inv
+      #65: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.InvSqrt
+      #66: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.IsZero
+      #67: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.Modp
+      #68: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.Mul
+      #69: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.Neg
+      #70: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.One
+      #71: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.P
+      #72: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.SetOne
+      #73: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.Sqr
+      #74: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.Sub
+      #75: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls fp448.ToBytes
+      #76: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls fp448.init
+      #77: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls goldilocks.Curve.CombinedMult
+      #78: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls goldilocks.Curve.Order
+      #79: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls goldilocks.FromBytes
+      #80: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls goldilocks.Point.Neg
+      #81: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls goldilocks.Point.ToBytes
+      #82: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls goldilocks.Scalar.FromBytes
+      #83: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls goldilocks.init
+      #84: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.PublicKey.Unpack
+      #85: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.PublicKey.Unpack
+      #86: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.PublicKey.Unpack
+      #87: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.PublicKey.Unpack
+      #88: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.PublicKey.Unpack
+      #89: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.PublicKey.Unpack
+      #90: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.Verify
+      #91: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.Verify
+      #92: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.Verify
+      #93: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.Verify
+      #94: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.Verify
+      #95: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls internal.Verify
+      #96: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls internal.init
+      #97: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls internal.init
+      #98: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls internal.init
+      #99: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls internal.init
+      #100: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls internal.init
+      #101: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls internal.init
+      #102: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls k12.init
+      #103: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls keccakf1600.IsEnabledX4
+      #104: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls keccakf1600.StateX4.Initialize
+      #105: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls keccakf1600.StateX4.Permute
+      #106: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls keccakf1600.init
+      #107: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls math.OmegaNAF
+      #108: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls math.init
+      #109: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mldsa44.PublicKey.Scheme
+      #110: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa44.Scheme
+      #111: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa44.init
+      #112: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa44.scheme.Name
+      #113: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa44.scheme.Oid
+      #114: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mldsa44.scheme.UnmarshalBinaryPublicKey
+      #115: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mldsa44.scheme.Verify
+      #116: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mldsa65.PublicKey.Scheme
+      #117: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa65.Scheme
+      #118: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa65.init
+      #119: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa65.scheme.Name
+      #120: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa65.scheme.Oid
+      #121: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mldsa65.scheme.UnmarshalBinaryPublicKey
+      #122: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mldsa65.scheme.Verify
+      #123: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mldsa87.PublicKey.Scheme
+      #124: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa87.Scheme
+      #125: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa87.init
+      #126: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa87.scheme.Name
+      #127: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mldsa87.scheme.Oid
+      #128: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mldsa87.scheme.UnmarshalBinaryPublicKey
+      #129: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mldsa87.scheme.Verify
+      #130: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mlsbset.init
+      #131: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode2.PublicKey.Scheme
+      #132: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode2.PublicKey.Unpack
+      #133: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mode2.Scheme
+      #134: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode2.Verify
+      #135: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mode2.init
+      #136: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mode2.scheme.Name
+      #137: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode2.scheme.UnmarshalBinaryPublicKey
+      #138: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode2.scheme.Verify
+      #139: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode3.PublicKey.Scheme
+      #140: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode3.PublicKey.Unpack
+      #141: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mode3.Scheme
+      #142: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode3.Verify
+      #143: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mode3.init
+      #144: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mode3.scheme.Name
+      #145: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode3.scheme.UnmarshalBinaryPublicKey
+      #146: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode3.scheme.Verify
+      #147: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode5.PublicKey.Scheme
+      #148: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mode5.Scheme
+      #149: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mode5.init
+      #150: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls mode5.scheme.Name
+      #151: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode5.scheme.UnmarshalBinaryPublicKey
+      #152: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls mode5.scheme.Verify
+      #153: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls params.init
+      #154: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls pki.UnmarshalPKIXPublicKey
+      #155: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls pki.init
+      #156: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls schemes.All
+      #157: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls schemes.init
+      #158: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls sha3.KeccakF1600
+      #159: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls sha3.NewShake128
+      #160: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls sha3.NewShake256
+      #161: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls sha3.ShakeSum256
+      #162: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls sha3.State.Read
+      #163: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls sha3.State.Reset
+      #164: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls sha3.State.Write
+      #165: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls sha3.init
+      #166: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls sign.init
+      #167: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls slhdsa.ID.Scheme
+      #168: gemini/client.go:1230:22: gemini.GeminiClient.CallRPC calls fmt.Sprintf, which eventually calls slhdsa.ID.String
+      #169: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls slhdsa.PublicKey.Marshal
+      #170: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls slhdsa.init
+      #171: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls slhdsa.scheme.Name
+      #172: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls slhdsa.scheme.UnmarshalBinaryPublicKey
+      #173: gemini/client.go:1689:19: gemini.GeminiClient.DownloadFile calls io.Copy, which eventually calls slhdsa.scheme.Verify
+      #174: gemini/client.go:25:2: gemini.init calls profiles.init, which eventually calls xof.init
+
+Your code is affected by 10 vulnerabilities from 4 modules.
+This scan also found 10 vulnerabilities in packages you import and 10
+vulnerabilities in modules you require, but your code doesn't appear to call
+these vulnerabilities.
+Use '-show verbose' for more details.

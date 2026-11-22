@@ -1,0 +1,6 @@
+2026/11/21 16:33:54 ⚠️  No .env file found, using system environment variables
+2026/11/21 16:33:54 🔌 free-gemini-mcp v2.2.0 starting over stdio...
+2026/11/21 16:33:54 🔗 Backend API: http://127.0.0.1:18002
+2026/11/21 16:33:54 🔧 Executing MCP tool: generate_image | prompt: audit...
+2026/11/21 16:33:54 📎 Using reference file: /tmp/opencode/mcp-root/secret.txt
+2026/11/21 16:33:54 ✅ Backend API is reachable (status: 200)

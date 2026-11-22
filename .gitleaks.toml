@@ -1,0 +1,45 @@
+# Gitleaks configuration — Free Gemini API (A-28)
+#
+# The default ruleset already covers AWS, GitHub, Google Cloud/GCP API keys,
+# private keys and generic credentials. The rules below add the Google session
+# cookies this project handles, plus its at-rest encryption key.
+title = "Free Gemini API secret scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "google-secure-psid-assignment"
+description = "Google __Secure-1PSID/__Secure-3PSID session cookie assignment"
+regex = '''(?i)__Secure-[13]PSID\s*=\s*[A-Za-z0-9._%+/=-]{20,}'''
+keywords = ["__secure-1psid", "__secure-3psid"]
+
+[[rules]]
+id = "google-secure-psid-json"
+description = "Google __Secure-1PSID/__Secure-3PSID cookie in JSON form"
+regex = '''(?is)"name"\s*:\s*"__Secure-[13]PSID"\s*,[^}]{0,200}?"value"\s*:\s*"[A-Za-z0-9._%+/=-]{20,}"'''
+keywords = ["__secure-1psid", "__secure-3psid"]
+
+[[rules]]
+id = "cookie-encryption-key"
+description = "Plaintext COOKIE_ENCRYPTION_KEY value"
+regex = '''(?i)COOKIE_ENCRYPTION_KEY\s*[:=]\s*["']?[0-9a-f]{64}["']?'''
+keywords = ["cookie_encryption_key"]
+
+# Unit tests intentionally use fake credentials and dummy keys. Runtime cookie
+# files are gitignored, but excluding them also keeps local `gitleaks dir`
+# scans focused on tracked source. The audit report contains historical
+# examples, not live secrets.
+[[allowlists]]
+description = "Test fixtures, local runtime data and historical audit examples"
+paths = [
+  '''(^|/)api/[^/]*_test\.go$''',
+  '''(^|/)gemini/[^/]*_test\.go$''',
+  '''(^|/)audit-2026-11/''',
+  '''(^|/)cookies/''',
+  '''(^|/)tuned\.cact$''',
+  '''(^|/)\.gitleaks\.toml$''',
+]
+regexes = [
+  '''change-me-to-a-secure-token''',
+]

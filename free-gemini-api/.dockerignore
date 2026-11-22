@@ -1,0 +1,23 @@
+# Secrets and runtime state
+cookies/
+data/
+output/
+.env
+.env.*
+!.env.example
+
+# Local tooling and build artefacts
+scripts/
+goapi
+*.log
+*.db
+*.db-wal
+*.db-shm
+models.json
+*.cact
+
+# Repository metadata and audit material
+.git
+.gitignore
+audit-2026-11/
+pr_body.md

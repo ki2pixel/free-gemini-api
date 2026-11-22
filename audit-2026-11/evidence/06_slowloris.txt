@@ -1,0 +1,2 @@
+HTTP API still open after 3s with incomplete headers (no header timeout)
+WS bridge still open after 3s with incomplete headers (no header timeout)

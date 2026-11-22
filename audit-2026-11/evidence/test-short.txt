@@ -1,0 +1,4 @@
+?   	goapi	[no test files]
+ok  	goapi/api	0.944s
+ok  	goapi/db	0.011s
+ok  	goapi/gemini	7.946s

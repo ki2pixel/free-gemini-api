@@ -1,0 +1,5 @@
+== Model registry poisoning (unauthenticated POST /v1/models) ==
+{"message":"Model registered successfully","model":{"id":"audit-pwn-model-2","display_name":"Pwn","mode_id":"deadbeefdeadbeef","header_template":"[1,null,null,null,\"%s\",null,null,0,[4],null,null,2]","min_tier":"free","is_default":false,"source":"custom"},"status":"success"}
+
+== Persisted across restart? models.json contains: ==
+audit-pwn-model-2

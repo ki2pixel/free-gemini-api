@@ -1,0 +1,26 @@
+ID,Titre,Vecteur CVSS,Score,Sévérité,Criticité métier,CWE,OWASP,Composant,Statut,Preuve,Priorité
+F-01,Traversée de répertoire /output/* — lecture arbitraire de fichiers,AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N,8.6,High,Critique,CWE-22,A01,api/routes.go:267-269,Confirmé,evidence/01_path_traversal.txt,P0
+F-02,Absence d'authentification sur l'API et les endpoints d'administration,AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N,9.1,Critical,Critique,CWE-306,A01/A07,"api/routes.go, main.go",Confirmé,evidence/02_unauthenticated.txt,P0
+F-03,"WebSocket cookies sans auth, CheckOrigin=true, bind 0.0.0.0",AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N,9.1,Critical,Critique,CWE-306/CWE-346,A01/A05,"gemini/monitor.go:186-191,356",Confirmé,evidence/04_websocket.txt,P0
+F-04,CORS wildcard — lecture/écriture cross-origin,AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N,9.3,Critical,Critique,CWE-942,A05,main.go:107,Confirmé,evidence/03_cors.txt,P0
+F-05,Extension : cookies Google envoyés à tout hôte du LAN répondant /health,AV:A/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N,9.3,Critical,Critique,CWE-319/CWE-522,A02/A05,"gemini-extension/background.js:28-110,130-131,255-260",Confirmé (statique),analyse statique,P0
+F-06,Cookies Google en 0644 + conteneur root,AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N,5.5,Medium,Élevée,CWE-276/CWE-522,A01/A02,"gemini/monitor.go:277, Dockerfile",Confirmé,analyse + docker inspect,P0
+F-07,DownloadFile forward le cookie sur toutes les redirections,AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N,5.9,Medium,Élevée,CWE-200/CWE-522,A01,gemini/client.go:1612-1705,Confirmé (test),poc/audit_download_test.go,P1
+F-08,"Data races (CachedImageCookies, IsInitialized, AccountPrefix)",AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L,5.6,Medium,Moyenne,CWE-362,A04,"gemini/monitor.go:287, gemini/client.go:111-128,539-543",Confirmé (-race),poc/audit_race_test.go,P0
+F-09,Répertoire temporaire partagé ./output/.temp,AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L,5.3,Medium,Moyenne,CWE-362/CWE-377,A04,api/session.go:21-47,Confirmé (test),poc/audit_concurrency_test.go,P1
+F-10,AutoExportAnalytics à chaque requête — amplification I/O,AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H,7.5,High,Élevée,CWE-400,A04,"api/export.go:22-42, api/chat_handler.go:242,330,856,1011",Confirmé,evidence/bench.txt,P0
+F-11,CountTokens sur prompt 50 Mo — CPU/mémoire,AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H,7.5,High,Élevée,CWE-400/CWE-407,A04,"api/chat_handler.go:230-234,315-316,941-942, main.go:103",Confirmé (bench),evidence/bench.txt,P0
+F-12,Pas de rate limiting ni de timeouts (Slowloris),AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L,5.3,Medium,Moyenne,CWE-770/CWE-400,A04/A05,"main.go, gemini/monitor.go",Confirmé,evidence/06_slowloris.txt,P0
+F-13,Caches UserSessions/affinityMap non bornés,AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L,5.3,Medium,Moyenne,CWE-770,A04,"api/session.go:16, api/queue.go:51",Confirmé (code),analyse statique,P1
+F-14,Exports concurrents vers le même fichier — corruption,AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L,5.3,Medium,Moyenne,CWE-362/CWE-667,A04,"api/export.go:44-62,141-215",Confirmé (stress),evidence/09_concurrent_export.txt,P1
+F-15,"Dépendances vulnérables (brotli, klauspost, excelize, x/crypto…)",AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H,5.9,Medium,Élevée,CWE-1104,A06,"go.mod, image Alpine",Confirmé,"evidence/govulncheck.txt, evidence/trivy.txt",P0
+F-16,"Conteneur root, pas de healthcheck/limits, COPY . . inclut cookies/",AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H,7.8,High,Élevée,CWE-250/CWE-732,A05,"Dockerfile, docker-compose.yml, .dockerignore",Confirmé,docker inspect + analyse,P0
+F-17,Incohérence de ports 8001/8100,AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N,3.7,Low,Faible,CWE-1188,A05,"Dockerfile:32, docker-compose.yml:8-16, main.go:126-129, background.js:8",Confirmé,analyse statique,P1
+F-18,"Extension : permissions excessives, clipboardWrite, ws/http en clair",AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N,6.5,Medium,Élevée,CWE-250/CWE-319,A02/A05,gemini-extension/manifest.json:6-13,Confirmé,analyse statique,P0
+F-19,MCP : lecture arbitraire de fichiers + exfil vers le backend,AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N,5.5,Medium,Élevée,CWE-22/CWE-200,A01,api/mcp.go:308-335,Confirmé (PoC),evidence/10_mcp_exfil_body.bin,P1
+F-20,Registre de modèles non authentifié (header_template/mode_id),AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L,6.5,Medium,Élevée,CWE-20,A04/A08,"api/routes.go:75-130, gemini/registry.go",Confirmé,evidence/05_model_poisoning.txt,P0
+F-21,Artefacts de debug et secret de prompt dans le dépôt,AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N,3.7,Low,Moyenne,CWE-538/CWE-312,A05,"data/debug_send_prompt.txt, tuned.cact",Confirmé,analyse statique,P1
+F-22,API HTTP clair sur 0.0.0.0 — sniffing LAN,AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N,6.5,Medium,Élevée,CWE-319,A02,"main.go:139, gemini/monitor.go:356",Confirmé,evidence/08_bind.txt,P0
+F-23,"Qualité/SAST : erreurs non gérées, RNG faible, code mort, couverture 28 %",AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N,3.7,Low,Faible,CWE-703/CWE-338,A04/A09,ensemble du code Go,Confirmé,"evidence/gosec.txt, evidence/staticcheck.txt",P1
+F-24,"CI/CD : pas de tests/SAST, actions non épinglées",AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L,5.6,Medium,Moyenne,CWE-1357,A06/A08,.github/workflows/docker-publish.yml,Confirmé,analyse statique,P1
+F-25,"Conformité : ToS Google, Chrome Web Store, GDPR, watermark removal",N/A,N/A,N/A,Élevée,N/A,N/A,"produit, extension, MCP",Analyse,analyse statique,P1

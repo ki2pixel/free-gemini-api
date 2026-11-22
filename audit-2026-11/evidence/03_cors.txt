@@ -1,0 +1,10 @@
+== CORS preflight from https://evil.example ==
+HTTP/1.1 204 No Content
+Vary: Access-Control-Request-Method, Access-Control-Request-Headers, Origin
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, HEAD, PUT, DELETE, PATCH, QUERY
+Access-Control-Allow-Headers: content-type
+
+== Simple GET with evil Origin ==
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *

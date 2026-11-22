@@ -1,0 +1,52 @@
+services:
+  gemini-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: free-gemini-api
+    restart: unless-stopped
+    # The image defaults to the non-root gemini user (10001). For bind-mounted
+    # runtime directories, map the host UID/GID so both the container and the
+    # local Go toolchain can read/write the same files.
+    user: "${HOST_UID:-10001}:${HOST_GID:-10001}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 256
+    ports:
+      # Keep the API and the cookie bridge off the LAN.
+      - "127.0.0.1:8100:8100"
+      - "127.0.0.1:9226:9226"
+    volumes:
+      - ./cookies:/app/cookies:rw
+      - ./data:/app/data:rw
+      - ./output:/app/output:rw
+    environment:
+      - TZ=Europe/Paris
+      - PORT=8100
+      # Inside the container the process must bind all interfaces; the host
+      # port mapping above is what restricts exposure to loopback.
+      - API_HOST=0.0.0.0
+      - WS_HOST=0.0.0.0
+      - WS_PORT=9226
+      - API_TOKEN=${API_TOKEN:?API_TOKEN must be set in .env}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - WS_TOKEN=${WS_TOKEN:-}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
+      - RATE_LIMIT_MAX=${RATE_LIMIT_MAX:-600}
+      - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS:-60}
+      - PUBLIC_HELP=${PUBLIC_HELP:-false}
+      - COOKIE_ENCRYPTION_KEY=${COOKIE_ENCRYPTION_KEY:-}
+      - REQUIRE_COOKIE_ENCRYPTION=${REQUIRE_COOKIE_ENCRYPTION:-false}
+      - PUBLIC_METRICS=${PUBLIC_METRICS:-false}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8100/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

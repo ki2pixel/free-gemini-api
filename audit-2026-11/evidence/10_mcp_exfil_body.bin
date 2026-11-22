@@ -1,0 +1,19 @@
+--908077b2841307e7cf45c262e2f15a52c13befe174049c7cb71e23c3f897
+Content-Disposition: form-data; name="prompt"
+
+audit
+--908077b2841307e7cf45c262e2f15a52c13befe174049c7cb71e23c3f897
+Content-Disposition: form-data; name="user_id"
+
+mcp_client_media
+--908077b2841307e7cf45c262e2f15a52c13befe174049c7cb71e23c3f897
+Content-Disposition: form-data; name="new_chat"
+
+true
+--908077b2841307e7cf45c262e2f15a52c13befe174049c7cb71e23c3f897
+Content-Disposition: form-data; name="image"; filename="secret.txt"
+Content-Type: application/octet-stream
+
+MCP_SECRET_MARKER_9f3a
+
+--908077b2841307e7cf45c262e2f15a52c13befe174049c7cb71e23c3f897--

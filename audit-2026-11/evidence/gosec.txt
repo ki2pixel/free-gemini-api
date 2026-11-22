@@ -1,0 +1,608 @@
+Results:
+
+
+[/tmp/opencode/audit-src/api/queue.go:378] - G115 (CWE-190): integer overflow conversion uint64 -> int (Confidence: MEDIUM, Severity: HIGH)
+    377: 				for i := 0; i < workersCount; i++ {
+  > 378: 					idx := (int(offset) + i) % workersCount
+    379: 					w := p.workers[idx]
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/queue.go:362] - G115 (CWE-190): integer overflow conversion uint64 -> int (Confidence: MEDIUM, Severity: HIGH)
+    361: 				for i := 0; i < workersCount; i++ {
+  > 362: 					idx := (int(offset) + i) % workersCount
+    363: 					w := p.workers[idx]
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/queue.go:347] - G115 (CWE-190): integer overflow conversion uint64 -> int (Confidence: MEDIUM, Severity: HIGH)
+    346: 			for i := 0; i < workersCount; i++ {
+  > 347: 				idx := (int(offset) + i) % workersCount
+    348: 				w := p.workers[idx]
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/queue.go:329] - G115 (CWE-190): integer overflow conversion uint64 -> int (Confidence: MEDIUM, Severity: HIGH)
+    328: 			for i := 0; i < workersCount; i++ {
+  > 329: 				idx := (int(offset) + i) % workersCount
+    330: 				w := p.workers[idx]
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/queue.go:304] - G115 (CWE-190): integer overflow conversion uint64 -> int (Confidence: MEDIUM, Severity: HIGH)
+    303: 			for i := 0; i < workersCount; i++ {
+  > 304: 				idx := (int(offset) + i) % workersCount
+    305: 				w := p.workers[idx]
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:288] - G404 (CWE-338): Use of weak random number generator (math/rand or math/rand/v2 instead of crypto/rand) (Confidence: MEDIUM, Severity: HIGH)
+    287: 		cookiesFile: cookiesFile,
+  > 288: 		ReqID:       rand.Intn(9000000) + 1000000,
+    289: 		convStates:  make(map[string]*ModelConversationState),
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/export.go:91-98] - G101 (CWE-798): Potential hardcoded credentials (Confidence: LOW, Severity: HIGH)
+    90: 		"generated_at": time.Now().Format(time.RFC3339),
+  > 91: 		"engine": fiber.Map{
+  > 92: 			"name":          "Free Gemini API",
+  > 93: 			"version":       "3.8",
+  > 94: 			"primary_model": "Google Gemini 3.8 Flash",
+  > 95: 			"bpe_tokenizer": "cl100k_base (tiktoken-go)",
+  > 96: 			"database":      "SQLite (WAL Mode)",
+  > 97: 			"transport":     "HTTP/3 QUIC + HTTP/2 TLS Fallback",
+  > 98: 		},
+    99: 		"summary": fiber.Map{
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/session.go:39] - G703 (CWE-22): Path traversal via taint analysis: os.WriteFile (Confidence: HIGH, Severity: HIGH)
+    38: 			moveErr = err
+  > 39: 		} else if err := os.WriteFile(outputPath, input, 0644); err != nil {
+    40: 			moveErr = err
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/registry.go:691] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    690: 		altPath := filepath.Join("gemini", r.storagePath)
+  > 691: 		if altData, altErr := os.ReadFile(altPath); altErr == nil {
+    692: 			data = altData
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/tmp/opencode/audit-src/gemini/monitor.go:273] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    272: 	// If existing cookies file is identical, skip writing and reloading sessions
+  > 273: 	if existingData, readErr := os.ReadFile(accountFilePath); readErr == nil && bytes.Equal(existingData, data) {
+    274: 		return accountFilePath, accountID, nil
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/tmp/opencode/audit-src/gemini/monitor.go:100] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    99: 	for _, fPath := range accountFiles {
+  > 100: 		data, err := os.ReadFile(fPath)
+    101: 		if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/tmp/opencode/audit-src/gemini/client.go:1683] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    1682: 
+  > 1683: 		out, err := os.Create(savePath)
+    1684: 		if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/tmp/opencode/audit-src/gemini/client.go:395] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    394: 	}
+  > 395: 	data, err := os.ReadFile(cachePath)
+    396: 	if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/tmp/opencode/audit-src/gemini/chrome_manage.go:97] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    96: 
+  > 97: 		data, err := os.ReadFile(fPath)
+    98: 		if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/tmp/opencode/audit-src/api/session.go:36] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    35: 	if err := os.Rename(tempPath, outputPath); err != nil {
+  > 36: 		input, err := os.ReadFile(tempPath)
+    37: 		if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/tmp/opencode/audit-src/api/mcp.go:579] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    578: 	if filePath != "" {
+  > 579: 		file, err := os.Open(filePath)
+    580: 		if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/tmp/opencode/audit-src/gemini/monitor.go:359-362] - G112 (CWE-400): Potential Slowloris Attack because ReadHeaderTimeout is not configured in the http.Server (Confidence: LOW, Severity: MEDIUM)
+    358: 
+  > 359: 	server := &http.Server{
+  > 360: 		Addr:    addr,
+  > 361: 		Handler: mux,
+  > 362: 	}
+    363: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/registry.go:728] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    727: 
+  > 728: 	_ = os.MkdirAll(filepath.Dir(r.storagePath), 0755)
+    729: 	data, err := json.MarshalIndent(toSave, "", "  ")
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/monitor.go:268] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    267: 
+  > 268: 	os.MkdirAll("cookies", 0755)
+    269: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:1678] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    1677: 		dir := filepath.Dir(savePath)
+  > 1678: 		if err := os.MkdirAll(dir, 0755); err != nil {
+    1679: 			resp.Body.Close()
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:437] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    436: 	if data, err := json.MarshalIndent(saved, "", "  "); err == nil {
+  > 437: 		_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
+    438: 		_ = os.WriteFile(cachePath, data, 0644)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/db/db.go:29] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    28: 		dir := filepath.Dir(DBFileName)
+  > 29: 		if err := os.MkdirAll(dir, 0755); err != nil {
+    30: 			initErr = err
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/session.go:24] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    23: 	os.MkdirAll(tempDir, 0755)
+  > 24: 	os.MkdirAll("./output", 0755)
+    25: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/session.go:23] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    22: 	tempDir := "./output/.temp"
+  > 23: 	os.MkdirAll(tempDir, 0755)
+    24: 	os.MkdirAll("./output", 0755)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/export.go:145] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    144: 	}
+  > 145: 	_ = os.MkdirAll(filepath.Dir(outputPath), 0755)
+    146: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/export.go:68] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    67: 	}
+  > 68: 	_ = os.MkdirAll(filepath.Dir(outputPath), 0755)
+    69: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/export.go:28] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    27: 		outputDir := "./output"
+  > 28: 		_ = os.MkdirAll(outputDir, 0755)
+    29: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/registry.go:750] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    749: 	}
+  > 750: 	return os.WriteFile(filePath, data, 0644)
+    751: }
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/registry.go:733] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    732: 	}
+  > 733: 	return os.WriteFile(r.storagePath, data, 0644)
+    734: }
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/monitor.go:277] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    276: 
+  > 277: 	if err := os.WriteFile(accountFilePath, data, 0644); err != nil {
+    278: 		return "", "", fmt.Errorf("failed to save %s: %w", accountFilePath, err)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:438] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    437: 		_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
+  > 438: 		_ = os.WriteFile(cachePath, data, 0644)
+    439: 		log.Printf("💾 Persisted fresh session tokens to %s (valid for 18h, Tier: %s)", cachePath, c.AccountTier)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/session.go:39] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    38: 			moveErr = err
+  > 39: 		} else if err := os.WriteFile(outputPath, input, 0644); err != nil {
+    40: 			moveErr = err
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/export.go:133] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    132: 
+  > 133: 	if err := os.WriteFile(outputPath, data, 0644); err != nil {
+    134: 		return "", nil, err
+
+Autofix: 
+
+[/tmp/opencode/audit-src/main.go:138] - G706 (CWE-117): Log injection via taint analysis: log.Printf (Confidence: HIGH, Severity: LOW)
+    137: 
+  > 138: 	log.Printf("🚀 Free Gemini API Server starting on port :%s (HTTP/3 QUIC enabled)...", port)
+    139: 	if err := app.Listen(":" + port); err != nil {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/main.go:90] - G706 (CWE-117): Log injection via taint analysis: log.Printf (Confidence: HIGH, Severity: LOW)
+    89: 			outJSON, _, _ := api.ExportAnalyticsToJSON("")
+  > 90: 			log.Printf("✅ Dual Analytics exported successfully:\n   📊 Excel: %s\n   ⚡ JSON:  %s", outXlsx, outJSON)
+    91: 		}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/main.go:83] - G706 (CWE-117): Log injection via taint analysis: log.Printf (Confidence: HIGH, Severity: LOW)
+    82: 			}
+  > 83: 			log.Printf("✅ Excel Analytics exported successfully: %s", outXlsx)
+    84: 		} else {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/main.go:77] - G706 (CWE-117): Log injection via taint analysis: log.Printf (Confidence: HIGH, Severity: LOW)
+    76: 			}
+  > 77: 			log.Printf("✅ JSON Analytics exported successfully: %s", outJSON)
+    78: 		} else if strings.HasSuffix(targetFile, ".xlsx") {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/main.go:113] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    112: 				log.Printf("⚠️ RECOVERED from panic: %v", r)
+  > 113: 				c.Status(500).JSON(fiber.Map{"error": "Internal Server Error - Recovered"})
+    114: 			}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/monitor.go:341] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    340: 			if msg.Type == "ping" {
+  > 341: 				conn.WriteJSON(map[string]string{"type": "pong"})
+    342: 				continue
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/monitor.go:315] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    314: 		defer func() {
+  > 315: 			conn.Close()
+    316: 			activeClientsMu.Lock()
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/monitor.go:268] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    267: 
+  > 268: 	os.MkdirAll("cookies", 0755)
+    269: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/monitor.go:70] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    69: 			log.Printf("⚠️ Failed to write to extension client: %v. Removing client.", err)
+  > 70: 			conn.Close()
+    71: 			activeClients = append(activeClients[:i], activeClients[i+1:]...)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:1691] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    1690: 		resp.Body.Close()
+  > 1691: 		out.Close()
+    1692: 		if err != nil {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:1690] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    1689: 		_, err = io.Copy(out, resp.Body)
+  > 1690: 		resp.Body.Close()
+    1691: 		out.Close()
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:1685] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    1684: 		if err != nil {
+  > 1685: 			resp.Body.Close()
+    1686: 			return err
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:1679] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    1678: 		if err := os.MkdirAll(dir, 0755); err != nil {
+  > 1679: 			resp.Body.Close()
+    1680: 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:1672] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    1671: 		if resp.StatusCode != 200 {
+  > 1672: 			resp.Body.Close()
+    1673: 			return fmt.Errorf("download failed: Status %d at %s", resp.StatusCode, currentURL[:min(len(currentURL), 80)])
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:1662] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    1661: 			location := resp.Header.Get("Location")
+  > 1662: 			resp.Body.Close()
+    1663: 			if location == "" {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:485] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    484: 		body, err := io.ReadAll(resp.Body)
+  > 485: 		resp.Body.Close()
+    486: 		if err != nil {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/gemini/client.go:478] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    477: 		if resp.StatusCode != 200 {
+  > 478: 			resp.Body.Close()
+    479: 			lastErr = fmt.Errorf("gemini app failed: status %d (check cookies)", resp.StatusCode)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/session.go:44] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    43: 
+  > 44: 	os.RemoveAll(tempDir)
+    45: 	if moveErr != nil {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/session.go:30] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    29: 	if err := client.DownloadFile(urlStr, tempPath); err != nil {
+  > 30: 		os.RemoveAll(tempDir)
+    31: 		return err
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/session.go:24] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    23: 	os.MkdirAll(tempDir, 0755)
+  > 24: 	os.MkdirAll("./output", 0755)
+    25: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/session.go:23] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    22: 	tempDir := "./output/.temp"
+  > 23: 	os.MkdirAll(tempDir, 0755)
+    24: 	os.MkdirAll("./output", 0755)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/routes.go:150] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    149: 		var req ResetRequest
+  > 150: 		c.Bind().JSON(&req)
+    151: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/mcp.go:633] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    632: 	os.Stdout.Write(data)
+  > 633: 	os.Stdout.Write([]byte("\n"))
+    634: }
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/mcp.go:632] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    631: 	}
+  > 632: 	os.Stdout.Write(data)
+    633: 	os.Stdout.Write([]byte("\n"))
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/mcp.go:592] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    591: 
+  > 592: 	w.Close()
+    593: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/mcp.go:589] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    588: 		}
+  > 589: 		io.Copy(part, file)
+    590: 	}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/mcp.go:575] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    574: 	if newChat {
+  > 575: 		w.WriteField("new_chat", "true")
+    576: 	}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/mcp.go:573] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    572: 	w.WriteField("prompt", prompt)
+  > 573: 	w.WriteField("user_id", userID)
+    574: 	if newChat {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/mcp.go:572] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    571: 
+  > 572: 	w.WriteField("prompt", prompt)
+    573: 	w.WriteField("user_id", userID)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/mcp.go:552] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    551: 		body, _ := io.ReadAll(resp.Body)
+  > 552: 		resp.Body.Close()
+    553: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/export.go:203] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    202: 	sheetAnalytics := "📊 Executive Analytics"
+  > 203: 	f.NewSheet(sheetAnalytics)
+    204: 	_ = renderAnalyticsSummarySheet(f, sheetAnalytics, len(messages), len(media), totalTokens, stats, mediaCounts, accounts)
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/export.go:181] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    180: 	sheetMedia := "🎨 Generated Media"
+  > 181: 	f.NewSheet(sheetMedia)
+    182: 	mediaHeaders := []string{"ID", "Media Type", "Prompt", "File Name", "Download URL", "Aspect Ratio", "Response ID", "Created At"}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/export.go:157] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    156: 	sheetMessages := "📋 Chat History"
+  > 157: 	f.SetSheetName("Sheet1", sheetMessages)
+    158: 	msgHeaders := []string{"ID", "Conv ID", "User / IP", "Role", "Model", "Account Tier", "Account ID", "Est. Tokens", "Created At", "Message Content"}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:1010] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    1009: 		}
+  > 1010: 		db.LogRequest("/v1/chat/completions", "POST", userIP, 200, resp.Elapsed*1000)
+    1011: 		AutoExportAnalytics()
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:1008] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    1007: 		if arranged.CleanText != "" {
+  > 1008: 			db.LogMessageWithTier(resp.ConversationID, sessionID, "assistant", arranged.CleanText, model, cTokens, tier, accID)
+    1009: 		}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:1006] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    1005: 		}
+  > 1006: 		db.LogMessageWithTier(resp.ConversationID, sessionID, "user", prompt, model, pTokens, tier, accID)
+    1007: 		if arranged.CleanText != "" {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:855] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    854: 				}
+  > 855: 				db.LogRequest("/v1/chat/completions", "POST", userIP, 200, float64(time.Now().Unix()-createdTime)*1000)
+    856: 				AutoExportAnalytics()
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:853] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    852: 				if finalContentForLog != "" {
+  > 853: 					db.LogMessageWithTier(convID, sessionID, "assistant", finalContentForLog, model, rTokens, tier, accID)
+    854: 				}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:851] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    850: 				}
+  > 851: 				db.LogMessageWithTier(convID, sessionID, "user", prompt, model, pTokens, tier, accID)
+    852: 				if finalContentForLog != "" {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:329] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    328: 		}
+  > 329: 		db.LogRequest("/chat", "POST", userIP, 200, resp.Elapsed*1000)
+    330: 		AutoExportAnalytics()
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:327] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    326: 			fName := filepath.Base(vidURL)
+  > 327: 			db.LogMediaGeneration("video", prompt, fName, "./output/"+fName, fmt.Sprintf("http://%s/output/%s", hostStr, fName), "16:9", resp.ResponseID)
+    328: 		}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:323] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    322: 			fName := filepath.Base(imgURL)
+  > 323: 			db.LogMediaGeneration("image", prompt, fName, "./output/"+fName, fmt.Sprintf("http://%s/output/%s", hostStr, fName), "16:9", resp.ResponseID)
+    324: 		}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:319] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    318: 		if resp.Text != "" {
+  > 319: 			db.LogMessageWithTier(resp.ConversationID, sessionID, "assistant", resp.Text, model, rTokens, tier, accID)
+    320: 		}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:317] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    316: 		rTokens := CountTokens(resp.Text)
+  > 317: 		db.LogMessageWithTier(resp.ConversationID, sessionID, "user", prompt, model, pTokens, tier, accID)
+    318: 		if resp.Text != "" {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:241] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    240: 				}
+  > 241: 				db.LogRequest("/chat", "POST", userIP, 200, elapsed*1000)
+    242: 				AutoExportAnalytics()
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:239] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    238: 				if streamResp != nil && streamResp.Text != "" {
+  > 239: 					db.LogMessageWithTier(convID, sessionID, "assistant", streamResp.Text, model, rTokens, tier, accID)
+    240: 				}
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:237] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    236: 				}
+  > 237: 				db.LogMessageWithTier(convID, sessionID, "user", prompt, model, pTokens, tier, accID)
+    238: 				if streamResp != nil && streamResp.Text != "" {
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:219] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    218: 			fmt.Fprintf(w, "data: [DONE]\n\n")
+  > 219: 			w.Flush()
+    220: 
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:185] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    184: 				fmt.Fprintf(w, "data: %s\n\n", data)
+  > 185: 				w.Flush()
+    186: 				return
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:176] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    175: 					fmt.Fprintf(w, "data: %s\n\n", data)
+  > 176: 					w.Flush()
+    177: 				})
+
+Autofix: 
+
+[/tmp/opencode/audit-src/api/chat_handler.go:93] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    92: 			data, err := io.ReadAll(file)
+  > 93: 			file.Close()
+    94: 			if err != nil {
+
+Autofix: 
+
+Summary:
+  Gosec  : dev
+  Files  : 20
+  Lines  : 8313
+  Nosec  : 0
+  Issues : 84
+

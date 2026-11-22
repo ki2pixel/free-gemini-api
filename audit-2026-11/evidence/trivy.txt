@@ -1,0 +1,139 @@
+
+Report Summary
+
+┌────────┬───────┬─────────────────┐
+│ Target │ Type  │ Vulnerabilities │
+├────────┼───────┼─────────────────┤
+│ go.mod │ gomod │       28        │
+└────────┴───────┴─────────────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+
+go.mod (gomod)
+==============
+Total: 28 (UNKNOWN: 1, LOW: 1, MEDIUM: 13, HIGH: 13, CRITICAL: 0)
+
+┌─────────────────────────────┬─────────────────┬──────────┬────────┬───────────────────┬──────────────────────────────────────┬──────────────────────────────────────────────────────────────┐
+│           Library           │  Vulnerability  │ Severity │ Status │ Installed Version │            Fixed Version             │                            Title                             │
+├─────────────────────────────┼─────────────────┼──────────┼────────┼───────────────────┼──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│ github.com/cloudflare/circl │ CVE-2026-1229   │ LOW      │ fixed  │ v1.6.2            │ 1.6.3                                │ github.com/cloudflare/circl/ecc/p384: CIRCL ecc/p384:        │
+│                             │                 │          │        │                   │                                      │ Incorrect cryptographic calculations via specific inputs     │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-1229                    │
+├─────────────────────────────┼─────────────────┼──────────┤        ├───────────────────┼──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│ github.com/xuri/excelize/v2 │ CVE-2026-107211 │ HIGH     │        │ v2.11.0           │ 2.11.1-0.20261003002531-6258dcebc4e2 │ Excelize: Unchecked pivot-cache field index in               │
+│                             │                 │          │        │                   │                                      │ extractPivotTableFields causes unrecoverable panic           │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107211                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107212 │          │        │                   │ 2.11.1-0.20260930021559-01a9ff32fb3c │ Excelize: Unbounded row number in Rows.Columns makes GetRows │
+│                             │                 │          │        │                   │                                      │ and the Rows iterator...                                     │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107212                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107213 │          │        │                   │ 2.11.1-0.20260929015830-8ffeb07ec9a3 │ Excelize: Nil-pointer dereference in GetSlicers when a       │
+│                             │                 │          │        │                   │                                      │ worksheet has extLst present but...                          │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107213                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107214 │          │        │                   │ 2.11.1-0.20260915055537-22f76f9acb94 │ Excelize Decrypt: unrecoverable panics on malformed OLE/CFB  │
+│                             │                 │          │        │                   │                                      │ encrypted workbooks                                          │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107214                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107215 │          │        │                   │ 2.11.1-0.20260912113515-5f636f9dcde5 │ Excelize: extractPart allocates attacker-controlled,         │
+│                             │                 │          │        │                   │                                      │ unbounded and negative-sized buffers from CFB directory      │
+│                             │                 │          │        │                   │                                      │ entries:...                                                  │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107215                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107216 │          │        │                   │ 2.11.1-0.20260911060113-ea12859e43c6 │ Excelize ANCHORARRAY: mutually-referencing array formulas    │
+│                             │                 │          │        │                   │                                      │ recurse unboundedly via re-entrant CalcCellValue, causing    │
+│                             │                 │          │        │                   │                                      │ a...                                                         │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107216                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107217 │          │        │                   │ 2.11.1-0.20260910071107-696050fbf14e │ Excelize ColumnNameToNumber: int64 overflow yields an        │
+│                             │                 │          │        │                   │                                      │ out-of-domain coordinate with nil error, causing...          │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107217                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107219 │          │        │                   │ 2.11.1-0.20260906004932-2badfcd5841d │ Excelize: Unbounded spinCount in agile decryption burns CPU  │
+│                             │                 │          │        │                   │                                      │ during OpenFile                                              │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107219                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107223 │          │        │                   │ 2.11.1                               │ Excelize: Unbounded <col max> attribute is loaded with no    │
+│                             │                 │          │        │                   │                                      │ MaxColumns check and...                                      │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107223                  │
+│                             ├─────────────────┼──────────┤        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107218 │ MEDIUM   │        │                   │ 2.11.1-0.20260908032718-ecd99d761fe0 │ Excelize: RIGHT() on supplementary-plane text slices with a  │
+│                             │                 │          │        │                   │                                      │ negative index and panics...                                 │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107218                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107220 │          │        │                   │ 2.11.1-0.20260820023833-99903a3240e5 │ Excelize: Panic in cellInRange on a worksheet with an empty  │
+│                             │                 │          │        │                   │                                      │ mergeCell ref...                                             │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107220                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107221 │          │        │                   │ 2.11.1-0.20260816084418-46a5eb289448 │ Excelize: a row whose earlier cell has a higher column       │
+│                             │                 │          │        │                   │                                      │ reference than...                                            │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107221                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107222 │          │        │                   │ 2.11.1-0.20260812075026-be7a16390fa6 │ Excelize: GetConditionalFormats indexes                      │
+│                             │                 │          │        │                   │                                      │ conditional-formatting rule sub-elements with no length or   │
+│                             │                 │          │        │                   │                                      │ nil check...                                                 │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107222                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107224 │          │        │                   │ 2.11.1-0.20260805032953-db93f8d89de7 │ Excelize: A Zip64 uncompressed-size of 2^63 panics           │
+│                             │                 │          │        │                   │                                      │ OpenFile/OpenReader                                          │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107224                  │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-107225 │          │        │                   │ 2.11.1-0.20260731010303-ae2113b410e5 │ Excelize: GetStyle panics on a negative fillId, borderId or  │
+│                             │                 │          │        │                   │                                      │ fontId in styles.xml...                                      │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-107225                  │
+├─────────────────────────────┼─────────────────┼──────────┤        ├───────────────────┼──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/crypto         │ CVE-2026-56854  │ HIGH     │        │ v0.54.0           │ 0.55.0                               │ golang.org/x/crypto/ssh: golang.org/x/crypto/ssh:            │
+│                             │                 │          │        │                   │                                      │ Authentication bypass due to unenforced source-address       │
+│                             │                 │          │        │                   │                                      │ restrictions                                                 │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-56854                   │
+│                             ├─────────────────┼──────────┤        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-56855  │ MEDIUM   │        │                   │ 0.56.0                               │ golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Denial of  │
+│                             │                 │          │        │                   │                                      │ Service via crafted messages                                 │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-56855                   │
+│                             ├─────────────────┤          │        │                   │                                      ├──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-78662  │          │        │                   │                                      │ golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Denial of  │
+│                             │                 │          │        │                   │                                      │ Service via channel request flooding                         │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-78662                   │
+│                             ├─────────────────┼──────────┤        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ GO-2026-5932    │ UNKNOWN  │        │                   │ 0.58.1-0.20261009181718-2f1f834330b2 │ The golang.org/x/crypto/openpgp package is unmaintained,     │
+│                             │                 │          │        │                   │                                      │ unsafe by design, and has known security...                  │
+├─────────────────────────────┼─────────────────┼──────────┤        ├───────────────────┼──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/net            │ CVE-2026-78661  │ HIGH     │        │ v0.57.0           │ 0.62.0                               │ golang.org/x/net/html: golang.org/x/net/html: Denial of      │
+│                             │                 │          │        │                   │                                      │ Service via crafted HTML input                               │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-78661                   │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-78669  │          │        │                   │ 0.60.0                               │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                             │                 │          │        │                   │                                      │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                             │                 │          │        │                   │                                      │ frames...                                                    │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+│                             ├─────────────────┼──────────┤        │                   │                                      ├──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-78659  │ MEDIUM   │        │                   │                                      │ net/http: golang.org/x/net/http2: golang: net/http: Denial   │
+│                             │                 │          │        │                   │                                      │ of Service via HTTP/2 trailer header memory...               │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-78659                   │
+│                             ├─────────────────┤          │        │                   │                                      ├──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-78660  │          │        │                   │                                      │ net/http: golang: golang.org/x/net/http2: net/http: HTTP     │
+│                             │                 │          │        │                   │                                      │ response smuggling via malformed HTTP/2 framing headers...   │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-78660                   │
+│                             ├─────────────────┤          │        │                   │                                      ├──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-78663  │          │        │                   │                                      │ net/http: net/http/internal/http2: golang:                   │
+│                             │                 │          │        │                   │                                      │ golang.org/x/net/http2: golang: flow control limit bypass    │
+│                             │                 │          │        │                   │                                      │ via double refund...                                         │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-78663                   │
+│                             ├─────────────────┤          │        │                   │                                      ├──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-97032  │          │        │                   │                                      │ net/http: net/http/internal/http2: golang:                   │
+│                             │                 │          │        │                   │                                      │ golang.org/x/net/http2: net/http: Denial of Service via      │
+│                             │                 │          │        │                   │                                      │ concurrent HPACK encoder...                                  │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-97032                   │
+│                             ├─────────────────┤          │        │                   ├──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│                             │ CVE-2026-97045  │          │        │                   │ 0.62.0                               │ golang.org/x/net/html: golang.org/x/net/html: Cross-Site     │
+│                             │                 │          │        │                   │                                      │ Scripting via improper namespace handling during HTML        │
+│                             │                 │          │        │                   │                                      │ rendering                                                    │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-97045                   │
+├─────────────────────────────┼─────────────────┼──────────┤        ├───────────────────┼──────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/text           │ CVE-2026-56851  │ HIGH     │        │ v0.40.0           │ 0.41.0                               │ golang.org/x/text: golang.org/x/text: Denial of Service via  │
+│                             │                 │          │        │                   │                                      │ out-of-bounds slice error in Nickname profile...             │
+│                             │                 │          │        │                   │                                      │ https://avd.aquasec.com/nvd/cve-2026-56851                   │
+└─────────────────────────────┴─────────────────┴──────────┴────────┴───────────────────┴──────────────────────────────────────┴──────────────────────────────────────────────────────────────┘

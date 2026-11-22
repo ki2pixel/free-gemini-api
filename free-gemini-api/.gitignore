@@ -1,0 +1,39 @@
+# Binaries
+*.dylib
+*.so
+*.dll
+*.exe
+gemini-mcp
+gemini-api
+main
+goapi
+
+# Private session cookies (never commit active Google credentials)
+cookies/*.json
+!cookies/.gitkeep
+
+# SQLite database and runtime model registry
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/models.json
+
+# Generated output media
+output/
+output/*
+
+# Environment variables
+.env
+config.env
+
+# Test and scan artefacts
+coverage.out
+results.sarif
+data/debug_*
+*.cact
+pr_body.md
+
+
+# OS files
+.DS_Store
+Thumbs.db

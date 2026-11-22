@@ -1,0 +1,5 @@
+api/chat_handler.go:689:16: string literal contains the Unicode control character U+009D, consider using the '\u009d' escape sequence instead (ST1018)
+api/session.go:83:16: error strings should not be capitalized (ST1005)
+api/session.go:83:16: error strings should not end with punctuation or newlines (ST1005)
+gemini/client.go:186:24: func (*GeminiClient).getConvState is unused (U1000)
+gemini/client.go:638:24: func (*GeminiClient).executeStreamRequest is unused (U1000)

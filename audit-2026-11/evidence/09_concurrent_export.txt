@@ -1,0 +1,5 @@
+/health: n=100 ok=100 errors=0 invalid=0 total=0.06s p50=0.006s p95=0.011s max=0.018s
+/history: n=100 ok=100 errors=0 invalid=0 total=0.05s p50=0.006s p95=0.011s max=0.015s
+/v1/analytics: n=30 ok=30 errors=0 invalid=0 total=0.02s p50=0.005s p95=0.006s max=0.007s
+/export/excel: n=30 ok=26 errors=4 invalid=4 total=0.05s p50=0.022s p95=0.031s max=0.035s
+  sample errors: ["RemoteDisconnected('Remote end closed connection without response')", "RemoteDisconnected('Remote end closed connection without response')"]

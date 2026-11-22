@@ -1,0 +1,8 @@
+== /export/excel latency (3 runs, empty DB) ==
+run1: 0.007937s 9812 bytes
+run2: 0.007369s 9812 bytes
+run3: 0.004683s 9812 bytes
+
+== /api/sync-cookies latency (triggers InitSession + 5s sleep) ==
+status=200 time=6.223929s
+{"account_id":"profile_998","count":1,"file_path":"cookies/account_profile_998.json","profile_id":998,"status":"success"}

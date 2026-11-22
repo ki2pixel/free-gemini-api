@@ -1,0 +1,48 @@
+# Binaries
+*.dylib
+*.so
+*.dll
+*.exe
+goapi
+gemini-mcp
+gemini-api
+gemini-core
+main
+
+# Private session cookies
+**/cookies/*.json
+!**/cookies/.gitkeep
+
+# SQLite databases
+**/*.db
+**/*.db-wal
+**/*.db-shm
+
+# Generated output media
+**/output/
+**/output/*
+
+# Environment variables
+.env
+config.env
+**/.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Scratch, debug and nested repos
+browser-cdp/
+**/engines/
+**/__pycache__/
+*.pyc
+find_model_context.py
+**/models.json
+debug/
+**/debug_*.txt
+*.cact
+coverage.out
+results.sarif
+task-*.txt
+pr_body.md
+

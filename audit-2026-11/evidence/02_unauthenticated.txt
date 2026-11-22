@@ -1,0 +1,16 @@
+== Unauthenticated endpoints (no Authorization header) ==
+/history -> HTTP 200, 38 bytes
+/history/search?q=AUDIT -> HTTP 200, 152 bytes
+/media -> HTTP 200, 14 bytes
+/stats -> HTTP 200, 729 bytes
+/v1/workers -> HTTP 200, 787 bytes
+/v1/analytics -> HTTP 200, 2384 bytes
+/export/excel -> HTTP 200, 9812 bytes
+/export/json -> HTTP 200, 2384 bytes
+/status -> HTTP 200, 41 bytes
+
+== Sample: /history ==
+{"conversation_id":"audit-conv-1","messages":[{"content":"AUDIT_SECRET_CHAT_MESSAGE","created_at":"2026-11-21T14:56:07Z","model":"gemini-3.8-flash","role":"user"}]}
+
+== Sample: /v1/workers (first 300 bytes) ==
+{"total_workers":3,"active_workers":3,"free_workers":1,"subscription_workers":2,"total_in_flight":0,"max_concurrency_per_worker":3,"workers":[{"id":"AUDITFAKEC","cookie_path":"cookies/account_AUDITFAKEC.json","status":"active","tier":"subscription","in_flight":0,"total_served":0,"total_errors":0,"co

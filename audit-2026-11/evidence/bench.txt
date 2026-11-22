@@ -1,0 +1,12 @@
+2026/11/21 16:10:20 🗄️  SQLite Database initialized successfully at data/gemini.db (WAL Mode)
+goos: linux
+goarch: amd64
+pkg: goapi/api
+cpu: AMD Ryzen Threadripper 1920X 12-Core Processor 
+BenchmarkAuditExportJSON5000-24        	       1	 130898783 ns/op	28431872 B/op	  325028 allocs/op
+BenchmarkAuditExportExcel5000-24       	       1	 407331436 ns/op	78006032 B/op	  820967 allocs/op
+2026/11/21 16:10:21 ⚡ Initialized Industry-Standard BPE Tokenizer Engine (cl100k_base / 99.5% accuracy)
+BenchmarkAuditCountTokens100k-24       	       1	  45373907 ns/op	12044384 B/op	  133364 allocs/op
+BenchmarkAuditEstimateTokens100k-24    	       1	    423630 ns/op	  327680 B/op	       1 allocs/op
+PASS
+ok  	goapi/api	1.149s

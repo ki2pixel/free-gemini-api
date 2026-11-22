@@ -1,0 +1,363 @@
+2026/11/21 16:30:06 ⚠️  No .env file found, using system environment variables
+2026/11/21 16:30:06 🗄️  SQLite Database initialized successfully at data/gemini.db (WAL Mode)
+2026/11/21 16:30:06 📡 Cookie WebSocket Server listening on 0.0.0.0:19226
+2026/11/21 16:30:06 Loading cookies in JSON array format (2 cookies)
+2026/11/21 16:30:06 🛡️ Passive Cookie Health Monitor started (logs status every 30m, on-demand sync only)
+2026/11/21 16:30:07 InitSession attempt 1: status 200, body length 983214, snippet: <!doctype html><html lang="en-US" dir="ltr"><head><base href="https://gemini.google.com/"><link rel="preconnect" href="//www.gstatic.com"><meta name="referrer" content="origin"><meta name="viewport" content="initial-scale=1,minimum-scale=1,width=device-width,interactive-widget=resizes-content,viewpo
+2026/11/21 16:30:07 ⚠️ Session expired detected. Requesting Chrome Extension to proactively rotate cookies...
+2026/11/21 16:30:07 ℹ️ No Chrome Extension workers currently connected to receive trigger_sync
+2026/11/21 16:30:12 Loading cookies in JSON array format (2 cookies)
+2026/11/21 16:30:12 InitSession attempt 2: status 200, body length 983234, snippet: <!doctype html><html lang="en-US" dir="ltr"><head><base href="https://gemini.google.com/"><link rel="preconnect" href="//www.gstatic.com"><meta name="referrer" content="origin"><meta name="viewport" content="initial-scale=1,minimum-scale=1,width=device-width,interactive-widget=resizes-content,viewpo
+2026/11/21 16:30:12 🚀 [WorkerPool] Registered new Account Worker [AUDITFAKEC] (Tier: subscription) from cookies/account_AUDITFAKEC.json
+2026/11/21 16:30:12 Loading cookies in JSON array format (1 cookies)
+2026/11/21 16:30:14 InitSession attempt 1: status 200, body length 983137, snippet: <!doctype html><html lang="en-US" dir="ltr"><head><base href="https://gemini.google.com/"><link rel="preconnect" href="//www.gstatic.com"><meta name="referrer" content="origin"><meta name="viewport" content="initial-scale=1,minimum-scale=1,width=device-width,interactive-widget=resizes-content,viewpo
+2026/11/21 16:30:14 ⚠️ Session expired detected. Requesting Chrome Extension to proactively rotate cookies...
+2026/11/21 16:30:14 ℹ️ No Chrome Extension workers currently connected to receive trigger_sync
+2026/11/21 16:30:19 Loading cookies in JSON array format (1 cookies)
+2026/11/21 16:30:19 InitSession attempt 2: status 200, body length 983137, snippet: <!doctype html><html lang="en-US" dir="ltr"><head><base href="https://gemini.google.com/"><link rel="preconnect" href="//www.gstatic.com"><meta name="referrer" content="origin"><meta name="viewport" content="initial-scale=1,minimum-scale=1,width=device-width,interactive-widget=resizes-content,viewpo
+2026/11/21 16:30:19 🚀 [WorkerPool] Registered new Account Worker [profile_999] (Tier: subscription) from cookies/account_profile_999.json
+2026/11/21 16:30:19 🌐 [GeminiClient] Running in Guest/Anonymous mode (no cookies required).
+2026/11/21 16:30:19 🌐 [GeminiClient] Initialized in Guest / Anonymous Mode (no login required for Free tier models).
+2026/11/21 16:30:19 🌐 [WorkerPool] Registered Guest Worker [guest] (Tier: free) — Ready out-of-the-box without login!
+2026/11/21 16:30:19 ✨ [WorkerPool] Pool reloaded: 3 active account worker(s) available
+2026/11/21 16:30:19 🚀 Free Gemini API Server starting on port :18001 (HTTP/3 QUIC enabled)...
+
+    _______ __
+   / ____(_) /_  ___  _____
+  / /_  / / __ \/ _ \/ ___/
+ / __/ / / /_/ /  __/ /
+/_/   /_/_.___/\___/_/          v3.4.0
+--------------------------------------------------
+INFO Server started on: 	http://127.0.0.1:18001 (bound on host 0.0.0.0 and port 18001)
+INFO Application name: 		Gemini Go API (HTTP/3 QUIC + Gemini Models + Arranger Engine)
+INFO Total handlers: 		40
+INFO Prefork: 			Disabled
+INFO PID: 			271759
+INFO Total process count: 	1
+
+16:30:42 | 200 |    1.536149ms |       127.0.0.1 | GET     | /output/%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd 
+16:30:42 | 200 |      65.153µs |       127.0.0.1 | GET     | /output/%2e%2e%2fcookies%2faccount_profile_999.json 
+16:30:42 | 200 |      78.418µs |       127.0.0.1 | GET     | /output/%2e%2e%2fdata%2fgemini.db-wal 
+16:30:42 | 200 |     353.037µs |       127.0.0.1 | GET     | /history             
+16:30:42 | 200 |      259.48µs |       127.0.0.1 | GET     | /history/search      
+16:30:42 | 200 |     334.912µs |       127.0.0.1 | GET     | /media               
+16:30:42 | 200 |    1.089056ms |       127.0.0.1 | GET     | /stats               
+16:30:42 | 200 |      99.208µs |       127.0.0.1 | GET     | /v1/workers          
+16:30:42 | 200 |    1.376718ms |       127.0.0.1 | GET     | /v1/analytics        
+16:30:42 | 200 |    4.599291ms |       127.0.0.1 | GET     | /export/excel        
+16:30:42 | 200 |    1.368083ms |       127.0.0.1 | GET     | /export/json         
+16:30:42 | 200 |      28.273µs |       127.0.0.1 | GET     | /status              
+16:30:42 | 200 |     214.044µs |       127.0.0.1 | GET     | /history             
+16:30:42 | 200 |      34.174µs |       127.0.0.1 | GET     | /v1/workers          
+16:30:42 | 200 |     159.952µs |       127.0.0.1 | GET     | /health              
+2026/11/21 16:30:42 🔌 Chrome Extension connected to cookie bridge (Active Workers: 1)
+2026/11/21 16:30:42 🍪 Received 2 cookies for Account [AUDITWSCOO]
+2026/11/21 16:30:42 💾 Stored account profile: cookies/account_AUDITWSCOO.json
+2026/11/21 16:30:42 ♻️  Extension pushed new cookies. Reloading active sessions across all workers...
+2026/11/21 16:30:42 Loading cookies in JSON array format (2 cookies)
+2026/11/21 16:30:42 ♻️  Cookies reloaded in memory. Session marked for lazy re-initialization.
+2026/11/21 16:30:42 Loading cookies in JSON array format (2 cookies)
+2026/11/21 16:30:44 InitSession attempt 1: status 200, body length 983134, snippet: <!doctype html><html lang="en-US" dir="ltr"><head><base href="https://gemini.google.com/"><link rel="preconnect" href="//www.gstatic.com"><meta name="referrer" content="origin"><meta name="viewport" content="initial-scale=1,minimum-scale=1,width=device-width,interactive-widget=resizes-content,viewpo
+2026/11/21 16:30:44 ⚠️ Session expired detected. Requesting Chrome Extension to proactively rotate cookies...
+2026/11/21 16:30:44 📢 Triggering memory sync to 1 connected Chrome Extension worker(s)...
+2026/11/21 16:30:47 🤖 [ModelRegistry] Loaded 1 custom/discovered models from models.json
+2026/11/21 16:30:47 🤖 [ModelRegistry] Registered model: audit-pwn-model-2 (Pwn, ModeID: deadbeefdeadbeef)
+16:30:46 | 200 |     544.127µs |       127.0.0.1 | POST    | /v1/models           
+2026/11/21 16:30:49 Loading cookies in JSON array format (2 cookies)
+2026/11/21 16:30:49 InitSession attempt 2: status 200, body length 983134, snippet: <!doctype html><html lang="en-US" dir="ltr"><head><base href="https://gemini.google.com/"><link rel="preconnect" href="//www.gstatic.com"><meta name="referrer" content="origin"><meta name="viewport" content="initial-scale=1,minimum-scale=1,width=device-width,interactive-widget=resizes-content,viewpo
+2026/11/21 16:30:49 🚀 [WorkerPool] Registered new Account Worker [AUDITWSCOO] (Tier: subscription) from cookies/account_AUDITWSCOO.json
+2026/11/21 16:30:49 Loading cookies in JSON array format (1 cookies)
+2026/11/21 16:30:49 ♻️  Cookies reloaded in memory. Session marked for lazy re-initialization.
+2026/11/21 16:30:49 🌐 [GeminiClient] Running in Guest/Anonymous mode (no cookies required).
+2026/11/21 16:30:49 🌐 [GeminiClient] Initialized in Guest / Anonymous Mode (no login required for Free tier models).
+2026/11/21 16:30:49 🌐 [WorkerPool] Registered Guest Worker [guest] (Tier: free) — Ready out-of-the-box without login!
+2026/11/21 16:30:49 ✨ [WorkerPool] Pool reloaded: 4 active account worker(s) available
+2026/11/21 16:30:49 🔌 Chrome Extension disconnected (Active Workers: 0)
+16:30:49 | 200 |         781ns |       127.0.0.1 | GET     | /                    
+16:30:52 | 200 |    7.403544ms |       127.0.0.1 | GET     | /export/excel        
+16:30:52 | 200 |    6.813009ms |       127.0.0.1 | GET     | /export/excel        
+16:30:52 | 200 |    4.291109ms |       127.0.0.1 | GET     | /export/excel        
+2026/11/21 16:30:53 🍪 Received 1 cookies for Account [profile_998]
+2026/11/21 16:30:53 💾 Stored account profile: cookies/account_profile_998.json
+2026/11/21 16:30:53 ♻️  Extension pushed new cookies. Reloading active sessions across all workers...
+2026/11/21 16:30:53 Loading cookies in JSON array format (2 cookies)
+2026/11/21 16:30:53 ♻️  Cookies reloaded in memory. Session marked for lazy re-initialization.
+2026/11/21 16:30:53 Loading cookies in JSON array format (2 cookies)
+2026/11/21 16:30:53 ♻️  Cookies reloaded in memory. Session marked for lazy re-initialization.
+2026/11/21 16:30:53 Loading cookies in JSON array format (1 cookies)
+2026/11/21 16:30:54 InitSession attempt 1: status 200, body length 983033, snippet: <!doctype html><html lang="en-US" dir="ltr"><head><base href="https://gemini.google.com/"><link rel="preconnect" href="//www.gstatic.com"><meta name="referrer" content="origin"><meta name="viewport" content="initial-scale=1,minimum-scale=1,width=device-width,interactive-widget=resizes-content,viewpo
+2026/11/21 16:30:54 ⚠️ Session expired detected. Requesting Chrome Extension to proactively rotate cookies...
+2026/11/21 16:30:54 ℹ️ No Chrome Extension workers currently connected to receive trigger_sync
+2026/11/21 16:30:59 Loading cookies in JSON array format (1 cookies)
+2026/11/21 16:30:59 InitSession attempt 2: status 200, body length 983032, snippet: <!doctype html><html lang="en-US" dir="ltr"><head><base href="https://gemini.google.com/"><link rel="preconnect" href="//www.gstatic.com"><meta name="referrer" content="origin"><meta name="viewport" content="initial-scale=1,minimum-scale=1,width=device-width,interactive-widget=resizes-content,viewpo
+2026/11/21 16:30:59 🚀 [WorkerPool] Registered new Account Worker [profile_998] (Tier: subscription) from cookies/account_profile_998.json
+2026/11/21 16:30:59 Loading cookies in JSON array format (1 cookies)
+2026/11/21 16:30:59 ♻️  Cookies reloaded in memory. Session marked for lazy re-initialization.
+2026/11/21 16:30:59 🌐 [GeminiClient] Running in Guest/Anonymous mode (no cookies required).
+2026/11/21 16:30:59 🌐 [GeminiClient] Initialized in Guest / Anonymous Mode (no login required for Free tier models).
+2026/11/21 16:30:59 🌐 [WorkerPool] Registered Guest Worker [guest] (Tier: free) — Ready out-of-the-box without login!
+2026/11/21 16:30:59 ✨ [WorkerPool] Pool reloaded: 5 active account worker(s) available
+16:30:52 | 200 |   6.22330385s |       127.0.0.1 | POST    | /api/sync-cookies    
+16:31:29 | 200 |     256.845µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     351.804µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     151.406µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     221.388µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     193.064µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     270.931µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |       148.1µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     213.833µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     170.031µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     104.647µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     118.213µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     106.562µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     127.961µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     173.738µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     172.155µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     164.861µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     140.846µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     128.914µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     130.957µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     113.724µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     133.913µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     157.778µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     134.113µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     274.308µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     117.021µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     144.473µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     143.531µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     278.956µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     519.441µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |      778.74µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     412.328µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     166.825µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     251.525µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     219.795µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     132.209µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     162.547µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     145.064µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     140.084µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     130.436µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     123.863µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     211.409µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     166.063µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     155.052µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     134.103µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     133.572µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     168.959µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     141.517µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |      132.47µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     108.205µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     123.282µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     126.298µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     104.768µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     115.779µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     118.814µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     130.747µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     194.226µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     129.144µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     117.051µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     113.835µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     201.531µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     115.377µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     103.796µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     100.299µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     114.295µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     114.225µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     183.938µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     255.462µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     177.725µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     133.862µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     120.337µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     119.615µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     113.794µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     113.023µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     119.245µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     158.139µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     118.955µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     128.924µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     109.236µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     127.341µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     118.684µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     104.076µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     109.677µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     123.573µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     122.962µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     154.262µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     121.339µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     160.573µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     194.918µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |      243.56µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     183.787µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |      185.66µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     280.048µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     192.203µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     194.617µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     126.979µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     202.172µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     204.886µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     126.619µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |      111.17µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     108.014µs |       127.0.0.1 | GET     | /health              
+16:31:29 | 200 |     277.243µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     113.815µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      88.637µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      296.57µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     234.853µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      80.131µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     502.198µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      75.743µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     107.152µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |       69.05µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      70.153µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      83.277µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      87.956µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     533.757µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      76.685µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      66.315µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     161.204µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      95.189µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     170.702µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      77.446µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      82.004µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      73.198µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      98.556µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      83.037µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      88.918µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      87.395µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      75.623µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |       74.27µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     204.486µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     146.076µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      75.723µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     113.824µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      99.197µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      80.382µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      82.586µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      96.632µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      78.659µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      82.045µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      65.103µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      81.254µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      99.598µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     200.739µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     104.558µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      99.658µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      69.602µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      67.027µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      71.625µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |        84.7µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      85.331µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      73.789µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     179.749µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      70.473µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      90.411µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     131.418µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     114.076µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     196.571µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      81.524µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     133.612µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |       89.86µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |       69.05µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      73.208µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     107.613µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      82.375µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      88.407µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      86.934µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      76.024µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     109.237µs |       127.0.0.1 | GET     16:31:29 | 200 |     124.315µs |       127.0.0.1 | GET     | /history             
+| /history             
+16:31:29 | 200 |       90.18µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      64.161µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     115.208µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     192.093µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      89.278µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      91.423µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      83.377µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     103.836µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     112.142µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |       79.43µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      80.372µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      78.398µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      87.015µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      91.543µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      86.413µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     148.571µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      90.922µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     165.312µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     374.817µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      93.467µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      79.269µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      815.56µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     107.693µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      91.763µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      78.298µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |       74.33µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      69.702µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      89.349µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      72.858µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      148.81µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      87.074µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |      66.756µs |       127.0.0.1 | GET     | /history             
+16:31:29 | 200 |     909.536µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     787.176µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     995.439µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.193603ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.300575ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     764.623µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     952.287µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.312337ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.377239ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     717.474µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     918.083µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.178765ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.325322ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.219482ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     853.421µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.026898ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     1.00653ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.339458ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.283773ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.298541ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     735.698µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     715.861µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     675.484µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     1.46243ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     759.614µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.009466ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |     971.553µs |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.233919ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.283652ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |    1.490293ms |       127.0.0.1 | GET     | /v1/analytics        
+16:31:29 | 200 |   11.036551ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |    18.24695ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   16.788478ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   17.699837ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   17.975418ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   19.063712ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   15.008808ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   19.232901ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   12.238941ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   11.766769ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |    17.37253ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   13.074007ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   13.316485ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   10.165397ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   28.368003ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   30.724531ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   33.576184ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   29.246161ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   31.837372ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   28.194155ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   32.254409ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   24.518017ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |    7.785415ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   10.585069ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |     10.6123ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   10.620957ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   11.406149ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   11.888159ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   11.958381ms |       127.0.0.1 | GET     | /export/excel        
+16:31:29 | 200 |   11.882427ms |       127.0.0.1 | GET     | /export/excel        
+2026/11/21 16:34:03 
+⚠️ Interrupted by user (SIGINT/SIGTERM)! Finalizing in-flight requests and shutting down cleanly...
+2026/11/21 16:34:03 🏁 Free Gemini API server exited cleanly.

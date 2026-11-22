@@ -1,0 +1,11 @@
+Unable to find image 'hadolint/hadolint:latest' locally
+latest: Pulling from hadolint/hadolint
+83cf56c1bf8f: Pulling fs layer
+83cf56c1bf8f: Download complete
+3c27a54fbbc3: Download complete
+83cf56c1bf8f: Pull complete
+Digest: sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+Status: Downloaded newer image for hadolint/hadolint:latest
+-:7 DL3018 [1m[93mwarning[0m: Pin versions in apk add. Instead of `apk add <package>` use `apk add <package>=<version>`
+-:23 DL3018 [1m[93mwarning[0m: Pin versions in apk add. Instead of `apk add <package>` use `apk add <package>=<version>`
+-:26 DL3059 [92minfo[0m: Multiple consecutive `RUN` instructions. Consider consolidation.

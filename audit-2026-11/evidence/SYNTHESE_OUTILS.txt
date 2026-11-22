@@ -1,0 +1,147 @@
+SYNTHÈSE DES OUTILS — Audit Free Gemini API (21/11/2026)
+=========================================================
+
+Environnement
+-------------
+- Copie isolée : /tmp/opencode/audit-src (cookies/data/output/tuned.cact exclus)
+- Runtime : /tmp/opencode/audit-run, ports 18001/19226, cookies factices AUDIT_*
+- Go : 1.27.4 pour le build initial, GOTOOLCHAIN=go1.26.0 pour tests/outils
+- Docker 29.1.3 ; trivy/hadolint via conteneurs
+- Aucune donnée de production utilisée
+
+Build / tests
+-------------
+$ go build ./...            -> OK
+$ go vet ./...              -> OK
+$ go test -short ./...      -> OK (api 0.94s, db 0.01s, gemini 7.95s)
+$ go test -race -short -skip TestAudit ./... -> OK
+$ go test -shuffle=on ./... -> OK
+$ go mod verify             -> all modules verified
+$ go list -m all | wc -l    -> 79 modules
+
+Couverture
+----------
+total: 28.2% of statements
+api: 18.6% ; db: 44.1% ; gemini: 37.2%
+Fonctions à 0% : HandleUnifiedChat, HandleOpenAIChatCompletions, AutoExportAnalytics,
+HandleExcelExport, ExportAnalyticsToExcel, RunMCPServer, handleMCPRequest, etc.
+
+gosec
+-----
+Total : 84 constats
+  8 HIGH, 25 MEDIUM, 51 LOW
+Règles :
+  47 G104 (CWE-703) erreurs non gérées
+  10 G301 (CWE-276) permissions répertoire 0755
+   8 G304 (CWE-22)  fichier par variable
+   6 G306 (CWE-276) écriture 0644
+   5 G115 (CWE-190) overflow uint64 -> int
+   4 G706 (CWE-117) log injection
+   1 G703 (CWE-22)  path traversal (os.WriteFile)
+   1 G404 (CWE-338) math/rand (ReqID)
+   1 G112 (CWE-400) Slowloris (pas de ReadHeaderTimeout)
+   1 G101 (CWE-798) faux positif (chaîne "Free Gemini API")
+Fichier : evidence/gosec.txt
+
+staticcheck
+-----------
+5 constats :
+  api/chat_handler.go:689 ST1018 (U+009D)
+  api/session.go:83 ST1005 x2 (erreur capitalisée/ponctuation)
+  gemini/client.go:186 U1000 (getConvState inutilisé)
+  gemini/client.go:638 U1000 (executeStreamRequest inutilisé)
+Fichier : evidence/staticcheck.txt
+
+govulncheck
+-----------
+10 vulnérabilités, 2 reachables :
+  GO-2026-6888 brotli v1.2.2 -> 1.2.7 (DownloadFile -> io.Copy -> brotli.Reader.Read)
+  GO-2026-6865 klauspost/compress v1.19.0 -> 1.20.2 (DownloadFile -> io.Copy -> fse.Decompress)
+  GO-2026-6688/6684/6680/6678/6677/6676/6674 excelize v2.11.0 -> 2.11.1+
+  GO-2026-4550 circl v1.6.2 -> 1.6.3
+Fichier : evidence/govulncheck.txt
+
+trivy
+-----
+go.mod (gomod) : 28 (UNKNOWN 1, LOW 1, MEDIUM 13, HIGH 13, CRITICAL 0)
+  HIGH : excelize, x/crypto, x/net, x/text (13 entrées)
+Image audit-fga:latest (alpine 3.20.10) : 2 HIGH
+  musl / musl-utils CVE-2026-107891 (fix 1.2.5-r4)
+Taille image : 55.8 MB ; User="" (root) ; Healthcheck=null
+Exposed : 8001/tcp, 9226/tcp
+Fichiers : evidence/trivy.txt, evidence/trivy-image.txt
+
+hadolint
+--------
+3 avertissements :
+  DL3018 x2 (apk add sans version)
+  DL3059 (RUN consécutifs)
+Fichier : evidence/hadolint.txt
+
+Benchmarks
+----------
+BenchmarkAuditExportJSON5000-24     130.9 ms/op   28.4 MB/op   325 028 allocs/op
+BenchmarkAuditExportExcel5000-24    407.3 ms/op   78.0 MB/op   820 967 allocs/op
+BenchmarkAuditCountTokens100k-24     45.4 ms/op   12.0 MB/op   133 364 allocs/op
+BenchmarkAuditEstimateTokens100k-24   0.42 ms/op   0.33 MB/op         1 alloc/op
+Fichier : evidence/bench.txt
+
+SQLite
+------
+32 goroutines x 50 écritures = 1 600 écritures en 1.98 s
+=> 807 écritures/s, 0 échec, total_messages=1600
+WAL, busy_timeout=5000, synchronous=NORMAL, MaxOpenConns=25
+
+Stress local (sans Google)
+--------------------------
+/health          100 req parallèles -> 100/100, p50 6 ms, p95 11 ms
+/history         100 req parallèles -> 100/100, p50 6 ms, p95 11 ms
+/v1/analytics     30 req parallèles -> 30/30
+/export/excel     30 req parallèles -> 26/30, 4 RemoteDisconnected, 4 XLSX invalides
+Fichier : evidence/09_concurrent_export.txt
+
+DAST local
+----------
+- Traversal /etc/passwd : 200, 3 946 octets
+- Traversal cookie jar   : 200, 175 octets
+- Traversal WAL SQLite   : 200, 185 432 octets, marqueur AUDIT_SECRET_CHAT_MESSAGE
+- Endpoints sans auth    : /history, /stats, /v1/workers, /v1/analytics, /export/* -> 200
+- CORS preflight evil    : 204, ACAO *, méthodes GET/POST/PUT/DELETE/PATCH/QUERY
+- WS origine evil        : handshake accepté, ping/pong, cookies_payload accepté
+- Modèle malveillant     : POST /v1/models -> success, persisté dans models.json
+- Sync cookies HTTP      : 200 en 6.22 s (InitSession + sleep 5 s)
+- Slowloris              : HTTP et WS restent ouverts > 3 s sans en-têtes complets
+- Bind                   : 0.0.0.0:18001 et *:19226
+Fichiers : evidence/01..08
+
+MCP
+---
+- initialize 2025-06-18 -> réponse 2024-11-05 (version ignorée)
+- generate_image avec ref_image_path=/tmp/opencode/mcp-root/secret.txt
+- Backend mock reçoit le fichier : marqueur MCP_SECRET_MARKER_9f3a présent
+Fichiers : evidence/10_mcp_response.txt, evidence/10_mcp_exfil_body.bin
+
+Docker
+------
+$ docker image inspect audit-fga:latest
+User= Healthcheck=null Exposed={"8001/tcp":{},"9226/tcp":{}}
+$ docker run --rm --entrypoint /bin/sh audit-fga:latest -c id
+uid=0(root) gid=0(root)
+.dockerignore : data/ output/ scripts/ goapi *.log .git
+  -> cookies/ et tuned.cact NON exclus ; COPY . . les envoie au builder
+
+Extension
+---------
+permissions : cookies, storage, alarms, clipboardWrite
+host_permissions : *.google.com, *.google.co, *.googleusercontent.com, http://*/*, https://*/*
+
+Découverte LAN : 127.0.0.1, localhost, host.docker.internal, IP codées en dur
+(192.168.1.x, 10.56.65.x), puis balayage 192.168.1.1-254.
+probeServer accepte tout JSON avec status=online OU engine.
+Transport : ws://host:9226 et http://host:8100/api/sync-cookies (clair).
+
+CI
+--
+.github/workflows/docker-publish.yml : build + push GHCR, aucun test/SAST,
+actions épinglées par tag (checkout@v4, login-action@v3, etc.),
+publication automatique sur main.
