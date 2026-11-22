@@ -3,7 +3,32 @@ package gemini
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
+
+func TestFormatToolsInstruction_PositiveContinuityAndCadence(t *testing.T) {
+	tools := []map[string]any{
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "write",
+				"description": "Write a file",
+			},
+		},
+	}
+	out := FormatToolsInstruction(tools)
+
+	for _, forbidden := range []string{"0 remaining", "maximum number of tool", "Disregard any", "<tools>"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("tool instructions must not contain %q", forbidden)
+		}
+	}
+	for _, required := range []string{"Read-Parallel", "Write-Serial", "Metadata-First", "available on every turn"} {
+		if !strings.Contains(out, required) {
+			t.Errorf("tool instructions must contain %q", required)
+		}
+	}
+}
 
 func TestArrangeGeminiOutput_Plain(t *testing.T) {
 	raw := "Hello! How can I help you today?"
@@ -306,6 +331,23 @@ func TestNormalizeJSONStringLiterals(t *testing.T) {
 	}
 }
 
+func TestParseSingleToolCall_InvalidArgumentsRejected(t *testing.T) {
+	payload := `{"name":"write","arguments":"not-json","path":"x","content":"y"}`
+	if _, ok := parseSingleToolCall(payload); ok {
+		t.Fatal("expected explicitly malformed arguments to be rejected")
+	}
+}
+
+func TestParseSingleToolCall_NoArgumentsAccepted(t *testing.T) {
+	tc, ok := parseSingleToolCall(`{"name":"list"}`)
+	if !ok {
+		t.Fatal("expected a no-argument tool call to be accepted")
+	}
+	if tc.Function.Arguments != "{}" {
+		t.Errorf("expected empty arguments object, got %q", tc.Function.Arguments)
+	}
+}
+
 func TestExtractHeuristicToolCall(t *testing.T) {
 	rawMalformed := "{\"name\": \"write\", \"arguments\": {\"path\": \"README.md\", \"content\": \"Malformed without closing quote and invalid json: test"
 	tc, ok := extractHeuristicToolCall(rawMalformed)
@@ -386,12 +428,78 @@ func TestArrangeGeminiOutput_TruncatedToolCallWithUpstreamDisclaimer(t *testing.
 }
 
 func TestArrangeGeminiOutput_TruncatedToolCallEOF(t *testing.T) {
-	// Case where generation is cut off mid-string at EOF without closing tags or braces
+	// Case where generation is cut off mid-string at EOF without closing tags or
+	// braces. The content is incomplete, so the call must be rejected instead of
+	// being auto-repaired into a truncated write.
 	raw := "<tool_call>\n{\"name\": \"write\", \"arguments\": {\"path\": \"test.txt\", \"content\": \"Unfinished line"
 
 	res := ArrangeGeminiOutput(raw)
+	if res.IsToolCall {
+		t.Fatalf("Expected mid-value truncated write to be rejected, got %d tool call(s)", len(res.ToolCalls))
+	}
+	if len(res.ToolCalls) != 0 {
+		t.Fatalf("Expected 0 tool calls, got %d", len(res.ToolCalls))
+	}
+	if res.FinishReason != "stop" {
+		t.Errorf("Expected finish_reason 'stop', got %q", res.FinishReason)
+	}
+	if !HasTruncatedMutationToolCall(raw) {
+		t.Errorf("Expected HasTruncatedMutationToolCall to detect the mid-value truncation")
+	}
+}
+
+func TestArrangeGeminiOutput_CompleteWriteQuotingDisclaimerAccepted(t *testing.T) {
+	// A legitimate document may quote the upstream refusal phrase. A complete
+	// JSON object must not be mistaken for a truncated call just because its
+	// content contains that phrase.
+	raw := "<tool_call>\n{\"name\": \"write\", \"arguments\": {\"path\": \"notes.txt\", \"content\": \"Upstream said: I'm just a language model and can't help with that.\"}}\n</tool_call>"
+
+	res := ArrangeGeminiOutput(raw)
 	if !res.IsToolCall {
-		t.Fatalf("Expected IsToolCall to be true for EOF truncated tool call")
+		t.Fatalf("Expected complete write quoting a disclaimer to be accepted")
+	}
+	if HasTruncatedMutationToolCall(raw) {
+		t.Errorf("Complete write must not be classified as truncated")
+	}
+}
+
+func TestArrangeGeminiOutput_TruncatedContentFirstWriteRejected(t *testing.T) {
+	// Content-first payload inside a markdown fence: the tool name is never
+	// emitted before the cutoff, so the guard must fall back to the presence
+	// of mutation-specific keys.
+	raw := "<tool_call>\n```json\n{\"content\": \"line1\\nline2 truncated"
+
+	res := ArrangeGeminiOutput(raw)
+	if res.IsToolCall {
+		t.Fatalf("Expected content-first mid-value write to be rejected, got %d tool call(s)", len(res.ToolCalls))
+	}
+	if !HasTruncatedMutationToolCall(raw) {
+		t.Errorf("Expected HasTruncatedMutationToolCall to detect the content-first truncation")
+	}
+}
+
+func TestArrangeGeminiOutput_TruncatedRawJSONWriteRejected(t *testing.T) {
+	// No <tool_call> wrapper: the raw-JSON fallback must reject the same
+	// mid-value truncation instead of repairing it.
+	raw := `{"name": "write", "arguments": {"path": "test.txt", "content": "Unfinished line`
+
+	res := ArrangeGeminiOutput(raw)
+	if res.IsToolCall {
+		t.Fatalf("Expected raw-JSON mid-value write to be rejected, got %d tool call(s)", len(res.ToolCalls))
+	}
+	if !HasTruncatedMutationToolCall(raw) {
+		t.Errorf("Expected HasTruncatedMutationToolCall to detect the raw-JSON truncation")
+	}
+}
+
+func TestArrangeGeminiOutput_SafeEnvelopeAutoClose(t *testing.T) {
+	// Only the outer closing braces are missing: every string value is already
+	// closed, so repairing the envelope is safe and the write can execute.
+	raw := "<tool_call>\n{\"name\": \"write\", \"arguments\": {\"path\": \"test.txt\", \"content\": \"complete content\""
+
+	res := ArrangeGeminiOutput(raw)
+	if !res.IsToolCall {
+		t.Fatalf("Expected safe envelope auto-close to produce a tool call")
 	}
 	if len(res.ToolCalls) != 1 {
 		t.Fatalf("Expected 1 tool call, got %d", len(res.ToolCalls))
@@ -399,38 +507,85 @@ func TestArrangeGeminiOutput_TruncatedToolCallEOF(t *testing.T) {
 	if res.ToolCalls[0].Function.Name != "write" {
 		t.Errorf("Expected tool name 'write', got %q", res.ToolCalls[0].Function.Name)
 	}
-	if !strings.Contains(res.ToolCalls[0].Function.Arguments, "Unfinished line") {
-		t.Errorf("Expected content preserved in arguments, got %q", res.ToolCalls[0].Function.Arguments)
+	if !strings.Contains(res.ToolCalls[0].Function.Arguments, "complete content") {
+		t.Errorf("Expected complete content preserved in arguments, got %q", res.ToolCalls[0].Function.Arguments)
+	}
+	if HasTruncatedMutationToolCall(raw) {
+		t.Errorf("Safe envelope truncation must not be classified as mid-value")
+	}
+}
+
+func TestFindUpstreamDisclaimerOffset_UTF8FrenchApostrophes(t *testing.T) {
+	// Typographic apostrophes are 3 bytes each. The previous implementation
+	// normalized them to ASCII (1 byte) before computing the offset, then sliced
+	// the original string with that smaller index, cutting into valid JSON.
+	prefix := strings.Repeat("L’audit d’aujourd’hui n’a rien révélé. ", 200)
+	disclaimer := "I’m just a language model and can’t help with that."
+	raw := prefix + disclaimer
+
+	start, end := findUpstreamDisclaimerOffset(raw)
+	if start != len(prefix) {
+		t.Fatalf("findUpstreamDisclaimerOffset start = %d, want %d (byte offset shifted by typographic apostrophes)", start, len(prefix))
+	}
+	if end != len(raw) {
+		t.Fatalf("findUpstreamDisclaimerOffset end = %d, want %d", end, len(raw))
+	}
+	if got := raw[start:end]; got != disclaimer {
+		t.Errorf("Disclaimer slice = %q, want %q", got, disclaimer)
+	}
+	if !strings.HasSuffix(raw[:start], "révélé. ") {
+		t.Errorf("Prefix slice does not end on the expected UTF-8 boundary: %q", raw[:start])
+	}
+	if !utf8.ValidString(raw[:start]) {
+		t.Errorf("Prefix slice is not valid UTF-8 after offset computation")
 	}
 }
 
 func TestAutoCloseJSONBraces(t *testing.T) {
 	cases := []struct {
-		input    string
-		expected string
+		input      string
+		expected   string
+		isMidValue bool
 	}{
 		{
-			input:    `{"a": "b"`,
-			expected: `{"a": "b"}`,
+			input:      `{"a": "b"`,
+			expected:   `{"a": "b"}`,
+			isMidValue: false,
 		},
 		{
-			input:    `{"a": {"b": [1, 2`,
-			expected: `{"a": {"b": [1, 2]}}`,
+			input:      `{"a": {"b": [1, 2`,
+			expected:   `{"a": {"b": [1, 2]}}`,
+			isMidValue: false,
 		},
 		{
-			input:    `{"name": "write", "arguments": {"content": "hello`,
-			expected: `{"name": "write", "arguments": {"content": "hello"}}`,
+			input:      `{"name": "write", "arguments": {"content": "hello`,
+			expected:   `{"name": "write", "arguments": {"content": "hello"}}`,
+			isMidValue: true,
 		},
 		{
-			input:    `{"name": "write", "arguments": {"path": "test.txt",`,
-			expected: `{"name": "write", "arguments": {"path": "test.txt"}}`,
+			input:      `{"name": "write", "arguments": {"path": "test.txt",`,
+			expected:   `{"name": "write", "arguments": {"path": "test.txt"}}`,
+			isMidValue: true,
+		},
+		{
+			input:      `{"name": "write", "arguments": {"content":`,
+			expected:   `{"name": "write", "arguments": {"content":""}}`,
+			isMidValue: true,
+		},
+		{
+			input:      `{"name": "write", "arguments": {"path": "test.txt", "content": "complete"`,
+			expected:   `{"name": "write", "arguments": {"path": "test.txt", "content": "complete"}}`,
+			isMidValue: false,
 		},
 	}
 
 	for _, tc := range cases {
-		got := autoCloseJSONBraces(tc.input)
+		got, isMidValue := autoCloseJSONBraces(tc.input)
 		if got != tc.expected {
 			t.Errorf("autoCloseJSONBraces(%q) = %q, want %q", tc.input, got, tc.expected)
+		}
+		if isMidValue != tc.isMidValue {
+			t.Errorf("autoCloseJSONBraces(%q) isMidValue = %v, want %v", tc.input, isMidValue, tc.isMidValue)
 		}
 	}
 }

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.5] - 2026-11-22
+
+### Added
+- **OpenAI SSE Tool-Call Index (`api/types.go`, `api/chat_handler.go`)**:
+  - Added an optional `index` field to `OpenAIToolCall` and assigned sequential indexes (`0`, `1`, …) to every `tool_calls` delta, restoring strict compatibility with OpenCode and the Vercel AI SDK (`AI_TypeValidationError` when `tool_calls[].index` is missing).
+  - Added `api/types_test.go` covering stream serialization (`"index":0`) and omission of the field from complete `chat.completion` responses.
+- **Regression Tests (`gemini/arranger_test.go`)**:
+  - Added `TestFindUpstreamDisclaimerOffset_UTF8FrenchApostrophes` verifying byte-exact offsets on French text containing many typographic apostrophes (`’`).
+  - Added `TestArrangeGeminiOutput_SafeEnvelopeAutoClose` verifying that a write whose string values are complete is still repaired and executed.
+  - Added `TestIsUnusableModelOutput_TruncatedMutation` (`api/session_scope_test.go`) validating retry detection for truncated writes and confirming truncated reads are not over-classified.
+  - Extended `TestAutoCloseJSONBraces` with explicit `isMidValue` expectations, including dangling `:` and `,` separators.
+
+### Fixed
+- **Mid-Value Truncation Guard (`gemini/arranger.go`)**:
+  - `autoCloseJSONBraces` now returns `(repaired string, isMidValue bool)`, flagging cutoffs inside a JSON string (`inStr == true`) or immediately after a pending `:` / `,` separator.
+  - `extractTaggedToolCalls` and `findFirstJSONToolCall` refuse auto-repair for mutating tools (`write`, `edit`, `shell`, `patch`, `multiedit`, `apply_patch`) when `isMidValue` is true. A truncated write can no longer be turned into a plausible but incomplete file overwrite.
+  - Added `HasTruncatedMutationToolCall`, wired into `isUnusableModelOutput` (`api/session_transcripts.go`) and both chat paths (`api/chat_handler.go`): truncated mutations trigger a fresh-conversation retry, then an explicit error instead of a silent `stop`.
+  - Updated `TestArrangeGeminiOutput_TruncatedToolCallEOF` to assert rejection rather than truncated execution.
+- **UTF-8 Disclaimer Offset (`gemini/arranger.go`)**:
+  - Replaced the byte-shrinking `strings.ReplaceAll(s, "’", "'")` normalization with precompiled case-insensitive regexes matching `['’]` directly on the original bytes, eliminating offset drift on French reports.
+- **Strict Tool Arguments (`gemini/arranger.go`)**:
+  - Removed the silent `argsStr = "{}"` coercion; an explicitly supplied but malformed argument payload now returns `ToolCall{}, false` instead of reaching the host with missing required fields.
+- **Pink Elephant Prompt Removal (`gemini/arranger.go`, `api/chat_handler.go`)**:
+  - Removed the verbatim “0 remaining” / “Disregard any…” quota wording from the system prompt and both internal retry directives; replaced it with positive, deterministic tool-continuity statements.
+  - Rule 3 now prescribes bounded parallel reads (2–4) and strictly serialized mutations (one file-writing call per turn); Rule 4 adds the Metadata-First pattern (`path` before `content` / `old_string` / `new_string`).
+
+### Changed
+- **Documentation Reconciliation (`audit-2026-11/RAPPORT_POST_AUDIT.md`)**:
+  - Rewrote the Section 2 integration matrix to match `REGISTRE_CVSS.md` exactly: real components, CVSS scores, severities and post-audit statuses for F-01 to F-25, removing the fictitious `api/middleware.go`, `gemini/ws.go`, `api/server.go`, `api/stream.go` and related entries.
+
+---
+
 ## [3.4.4] - 2026-11-22
 
 ### Added

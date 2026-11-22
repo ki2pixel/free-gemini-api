@@ -40,6 +40,24 @@ func TestContentScopeKey_PerChatStability(t *testing.T) {
 	}
 }
 
+func TestIsUnusableModelOutput_TruncatedMutation(t *testing.T) {
+	truncatedWrite := `<tool_call>{"name":"write","arguments":{"path":"x","content":"unfinished`
+	if !isUnusableModelOutput(truncatedWrite, true) {
+		t.Fatal("expected a mid-value truncated write to be unusable and retried")
+	}
+
+	completeWrite := `<tool_call>{"name":"write","arguments":{"path":"x","content":"done"}}</tool_call>`
+	if isUnusableModelOutput(completeWrite, true) {
+		t.Fatal("expected a complete write to be usable")
+	}
+
+	// A truncated read cannot corrupt a file, so it must not force a retry.
+	truncatedRead := `<tool_call>{"name":"read","arguments":{"path":"unfinished`
+	if isUnusableModelOutput(truncatedRead, true) {
+		t.Fatal("expected a truncated read not to be classified as a mutation")
+	}
+}
+
 func TestIsToolRefusalOutput(t *testing.T) {
 	// Must detect tool refusal when model claims zero calls or asks user to save
 	refusals := []string{

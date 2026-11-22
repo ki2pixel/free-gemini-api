@@ -11,8 +11,12 @@ type OpenAIToolCallFunction struct {
 }
 
 type OpenAIToolCall struct {
-	ID       string                 `json:"id"`
-	Type     string                 `json:"type"`
+	// Index is set only on streaming deltas. OpenAI-compatible clients
+	// (OpenCode / Vercel AI SDK) require it to reassemble tool calls; it is
+	// omitted from complete chat.completion responses.
+	Index    *int                   `json:"index,omitempty"`
+	ID       string                 `json:"id,omitempty"`
+	Type     string                 `json:"type,omitempty"`
 	Function OpenAIToolCallFunction `json:"function"`
 }
 

@@ -26,7 +26,7 @@ Suite à la mise en œuvre rigoureuse du **Plan de Remédiation P0 & P1**, ainsi
 | **INDICE GLOBAL PONDÉRÉ** | **100%** | **38,00 / 100** | **74,25 / 100** | **+36,25 (Niveau 4/5)** |
 
 ### Verdict Actualisé
-- **GO LOCAL MONO-UTILISATEUR & INTÉGRATION OPENCODE / IDE** : Validé sans réserve. L'architecture actuelle garantit l'isolation des flux, l'authentification stricte par jeton Bearer, la protection contre les injections / traversées de chemins, et une excellente stabilité des tests unitaires (couverture : `api` 64.7%, `db` 78.6%, `gemini` 68.1%).
+- **GO LOCAL MONO-UTILISATEUR & INTÉGRATION OPENCODE / IDE** : Validé sans réserve. L'architecture actuelle garantit l'isolation des flux, l'authentification stricte par jeton Bearer, la protection contre les injections / traversées de chemins, et une excellente stabilité des tests unitaires (couverture : `api` 64.5%, `db` 78.6%, `gemini` 70.8%).
 - **NO-GO MAINTENU POUR EXPOSITION PUBLIQUE / MULTI-TENANT SANS HARDENING COMPLÉMENTAIRE** : Toute mise en production sur une interface publique ouverte à Internet nécessite des investissements additionnels en matière de rate-limiting distribué (Redis), de rotation avancée de comptes Google et de sandboxing renforcé des tool-calls.
 
 ---
@@ -35,33 +35,33 @@ Suite à la mise en œuvre rigoureuse du **Plan de Remédiation P0 & P1**, ainsi
 
 L'intégralité des 25 constats a été revue et testée via le runner local unifié `scripts/audit_check.sh` exécuté dans l'environnement conteneurisé Docker (`golang:1.26-alpine`).
 
-| ID | Intitulé du Constat | Sévérité Initiale | Statut Post-Audit | Composant Cible / Fichiers Modifiés | Vérification & Preuve |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **F-01** | Path Traversal dans l'export/import | Élevée (CVSS 7.5) | **Résolu (P0)** | `api/export.go`, `gemini/client.go` | Implémentation de `safeOutputPath` + validation stricte des extensions et des chemins absolus. |
-| **F-02** | Absence d'authentification sur les routes Admin | Critique (CVSS 9.8) | **Résolu (P0)** | `api/middleware.go` | `AdminAuthMiddleware` généralisé avec comparaison en temps constant des jetons Bearer. |
-| **F-03** | WebSocket bridge non authentifié | Critique (CVSS 9.1) | **Résolu (P0)** | `gemini/ws.go` | Validation obligatoire du jeton de couplage et écriture sur interface loopback (`127.0.0.1`). |
-| **F-04** | CORS permissif (`*`) | Critique (CVSS 8.8) | **Résolu (P0)** | `api/server.go` | Restriction stricte des origines autorisées et interdiction du wildcard global. |
-| **F-05** | Extension Chrome - Balayage réseau LAN | Critique (CVSS 8.5) | **Résolu (P0)** | `gemini-extension/` | Suppression du balayage automatique et limitation aux connexions sécurisées locales. |
-| **F-06** | Stockage en clair des secrets et cookies | Élevée (CVSS 7.8) | **Résolu (P0 / P2)** | `api/auth.go`, `db/` | Anticipation action P2 A-24 : Chiffrement AES-256-GCM des cookies via `COOKIE_ENCRYPTION_KEY`. |
-| **F-07** | Absence de limites sur les requêtes SSE | Moyenne (CVSS 5.3) | **Résolu (P1)** | `api/stream.go` | Mise en place de timeouts stricts et de buffers de taille bornée pour les flux d'événements. |
-| **F-08** | Race conditions dans la gestion des sessions | Élevée (CVSS 7.2) | **Résolu (P0)** | `gemini/session.go` | Utilisation de mutex (`sync.RWMutex`) et structures thread-safe pour les pools de cookies. |
-| **F-09** | Vulnérabilité de dépendance indirecte | Moyenne (CVSS 5.9) | **Résolu (P1)** | `free-gemini-api/go.mod` | Mise à jour des modules critiques Fiber v3, SQLite modernc.org, et TLS-client. |
-| **F-10** | Exposition excessive des métriques SQLite | Moyenne (CVSS 5.5) | **Résolu (P0)** | `api/metrics.go` | Filtrage des informations sensibles dans les endpoints de télémétrie et métriques anonymisées. |
-| **F-11** | Risque de DoS par payloads JSON massifs | Élevée (CVSS 7.5) | **Résolu (P0)** | `api/parser.go` | Limitation de la taille maximale des requêtes entrantes à 10 Mo et troncature des tokens. |
-| **F-12** | Fuite de logs contenant des jetons d'accès | Moyenne (CVSS 6.5) | **Résolu (P0)** | `api/logger.go` | Masquage systématique (`[REDACTED]`) des en-têtes Authorization et cookies WIZ (`thykhd`). |
-| **F-13** | Absence de tests unitaires sur les parseurs | Moyenne (CVSS 4.8) | **Résolu (P1)** | `gemini/*_test.go` | Ajout de batteries de tests unitaires (couverture package gemini > 68%). |
-| **F-14** | Couplage fort entre persistance et requêtes HTTP | Moyenne (CVSS 4.3) | **Résolu (P1)** | `api/`, `db/` | Isolation de la couche d'accès aux données avec gestion en mode WAL pour SQLite. |
-| **F-15** | Absence de validation des entêtes HTTP entrants | Moyenne (CVSS 5.5) | **Résolu (P0)** | `api/middleware.go` | Validation rigoureuse des en-têtes Content-Type, Accept et User-Agent. |
-| **F-16** | Conteneur Docker exécuté en root | Élevée (CVSS 7.0) | **Résolu (P0)** | `free-gemini-api/Dockerfile` | Configuration d'un utilisateur non-privilégié (`USER 10001:10001`) dans l'image finale. |
-| **F-17** | Gestion des erreurs amont non standardisée | Moyenne (CVSS 5.0) | **Résolu (P1)** | `gemini/client.go` | Normalisation des codes d'erreur et tolérance aux déconnexions amont de Google. |
-| **F-18** | Absence de nettoyage des sessions expirées | Moyenne (CVSS 5.3) | **Résolu (P0)** | `db/cleanup.go` | Tâche d'arrière-plan purgeant périodiquement les sessions inactives depuis plus de 30 jours. |
-| **F-19** | Documentation insuffisante du protocole proxy | Faible (CVSS 3.5) | **Résolu (P1)** | `AGENTS.md`, READMEs | Constitution d'un référentiel technique unifié pour les agents et développeurs. |
-| **F-20** | Absence de gestion du taux d'erreur amont (Circuit Breaker) | Moyenne (CVSS 5.8) | **Résolu (P0)** | `gemini/client.go` | Implémentation d'un mécanisme de bascule et d'attente exponentielle en cas d'erreur 429/503. |
-| **F-21** | Fichiers temporaires persistés dans le dépôt git | Faible (CVSS 2.5) | **Résolu (P1 / v3.4.3)** | `.gitignore` | Durcissement complet du `.gitignore` pour exclure les bases SQLite, logs et binaires. |
-| **F-22** | Absence de chiffrement des exports Excel/CSV | Moyenne (CVSS 5.3) | **Résolu (P0)** | `api/export.go` | Anonymisation des données sensibles dans les exports comptables et statistiques. |
-| **F-23** | Manque de traçabilité des exécutions de tool calls | Moyenne (CVSS 5.5) | **Résolu (P1)** | `gemini/arranger.go` | Journalisation structurée de chaque appel d'outil et extraction propre des balises de pensée et d'outils. |
-| **F-24** | Dépendance aux workflows cloud CI/CD GitHub | Moyenne (CVSS 5.0) | **Adapté (Local-First)** | `scripts/audit_check.sh` | Retrait des workflows `.github/` (v3.4.3) et création d'un runner local conteneurisé Docker. |
-| **F-25** | Non-conformité potentielle aux ToS Google Gemini | Moyenne (CVSS 5.0) | **Résolu (P1)** | `gemini/client.go` | Respect des quotas, rotation propre et masquage des headers de télémétrie navigateur. |
+| ID | Intitulé du Constat | CVSS | Sévérité | Statut Post-Audit | Composant Cible / Fichiers | Vérification & Preuve |
+| :--- | :--- | :---: | :--- | :--- | :--- | :--- |
+| **F-01** | Traversée de répertoire `/output/*` | **8.6** | High | **Résolu (P0)** | `api/routes.go:267-269` | Canonicalisation `safeOutputPath` et rejet des segments `..` ; le PoC `%2e%2e%2f` ne lit plus `/etc/passwd`. |
+| **F-02** | Absence d'authentification | **9.1** | Critical | **Résolu (P0)** | `api/routes.go`, `main.go` | Middleware Bearer / `X-API-Token` en comparaison temps constant sur toutes les routes sauf `/health`. |
+| **F-03** | WebSocket cookies non authentifié | **9.1** | Critical | **Résolu (P0)** | `gemini/monitor.go:186-191, 296-364` | Allowlist d'origines, jeton de couplage et bind loopback ; handshake non autorisé rejeté. |
+| **F-04** | CORS wildcard | **9.3** | Critical | **Résolu (P0)** | `main.go:107` | Origines restreintes (extension + loopback), méthodes et en-têtes limités, aucun `*`. |
+| **F-05** | Extension : exfiltration cookies vers le LAN | **9.3** | Critical | **Résolu (P0)** | `gemini-extension/background.js:28-110, 130-131, 255-260` | Balayage LAN supprimé ; URL serveur configurée, loopback par défaut et challenge de couplage. |
+| **F-06** | Cookies Google en 0644 + root | **5.5** | Medium | **Résolu (P0/P2)** | `gemini/monitor.go:277`, `Dockerfile` | Répertoire `0700`, fichiers `0600`, chiffrement AES-256-GCM au repos et conteneur non-root. |
+| **F-07** | Cookie forwarding sur redirections | **5.9** | Medium | **Résolu (P1)** | `gemini/client.go:1612-1705` | Cookies transmis uniquement vers un hôte HTTPS identique ou sous-domaine de l'hôte d'origine. |
+| **F-08** | Data races session/cookies | **5.6** | Medium | **Résolu (P0)** | `gemini/monitor.go:287`, `gemini/client.go:111-128, 539-543` | Verrous `sync.RWMutex` / `atomic` autour de `CachedImageCookies`, `IsInitialized` et `AccountPrefix` ; `go test -race` propre. |
+| **F-09** | Répertoire temporaire partagé | **5.3** | Medium | **Résolu (P1)** | `api/session.go:21-47` | `os.MkdirTemp` par téléchargement, nom de fichier validé et `os.Rename` atomique. |
+| **F-10** | Auto-export à chaque requête | **7.5** | High | **Résolu (P0)** | `api/export.go:22-42`, `api/chat_handler.go:242, 330, 856, 1011`, `api/media_handler.go:85` | `AutoExportAnalytics` retiré du chemin de requête ; export dédié, coalescé et débouncé. |
+| **F-11** | Tokenizer CPU/mémoire sur 50 Mo | **7.5** | High | **Résolu (P0)** | `api/chat_handler.go:230-234, 315-316, 845-846, 941-942`, `main.go:103` | `BodyLimit` ramené à 10 MiB et `CountTokensLimited` / estimation au-delà du seuil. |
+| **F-12** | Pas de rate limit/timeouts | **5.3** | Medium | **Résolu (P0)** | `main.go`, `gemini/monitor.go` | Rate limiter, `ReadTimeout`/`IdleTimeout` HTTP et timeouts de handshake sur le pont WS (Slowloris). |
+| **F-13** | Caches non bornés | **5.3** | Medium | **Résolu (P1)** | `api/session.go:16`, `api/queue.go:51` | Caches LRU/TTL bornés avec fermeture des clients évincés et purge de l'affinité. |
+| **F-14** | Exports concurrents corrompus | **5.3** | Medium | **Résolu (P1)** | `api/export.go:44-62, 141-215` | Génération dans un fichier temporaire unique puis `os.Rename` ; exports sérialisés. |
+| **F-15** | Dépendances vulnérables | **5.9** | Medium | **Résolu (P0)** | `go.mod`, image Alpine | Modules critiques mis à jour (brotli, compress, excelize, x/crypto, x/net, x/text, circl). |
+| **F-16** | Conteneur root / build non durci | **7.8** | High | **Résolu (P0)** | `Dockerfile`, `docker-compose.yml` | `USER 10001:10001`, `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, limites mémoire/PID et healthcheck. |
+| **F-17** | Incohérence de ports | **3.7** | Low | **Résolu (P1)** | `Dockerfile:32`, `docker-compose.yml:8-16`, `main.go:126-129`, `gemini-extension/background.js:8` | Port unique `8100` aligné entre serveur, Docker, compose et extension. |
+| **F-18** | Extension permissions/transport | **6.5** | Medium | **Résolu (P0)** | `gemini-extension/manifest.json:6-13`, `background.js`, `popup.js` | `host_permissions` restreintes, `clipboardWrite` retiré et collecte de cookies minimisée. |
+| **F-19** | MCP lecture fichiers + exfil | **5.5** | Medium | **Résolu (P1)** | `api/mcp.go:308-335`, `postMCPMultipart` | `os.OpenRoot` / `filepath.IsLocal`, rejet des symlinks, allowlist MIME et limite de taille. |
+| **F-20** | Registre de modèles non validé | **6.5** | Medium | **Résolu (P0)** | `api/routes.go:75-130`, `gemini/registry.go` | Validation de `id`, `mode_id`, `min_tier` et du `header_template` ; route protégée par authentification admin. |
+| **F-21** | Artefacts de debug / secret de prompt | **3.7** | Low | **Résolu (P1/v3.4.3)** | `data/debug_send_prompt.txt`, `data/debug_system_prompt.txt`, `pr_body.md`, `tuned.cact` | `.gitignore` durci et artefacts de debug retirés du suivi Git. |
+| **F-22** | HTTP clair sur 0.0.0.0 | **6.5** | Medium | **Résolu (P0)** | `main.go:139`, `gemini/monitor.go:356` | Bind loopback par défaut et avertissement explicite si exposition non-loopback sans TLS. |
+| **F-23** | Qualité/SAST | **3.7** | Low | **Résolu (P1)** | Ensemble du code Go | Constats gosec/staticcheck triés, erreurs gérées, `math/rand` remplacé et couverture de tests renforcée. |
+| **F-24** | CI/CD sans qualité | **5.6** | Medium | **Adapté (Local-First)** | `.github/workflows/docker-publish.yml` | Workflows cloud retirés (v3.4.3) et runner local `scripts/audit_check.sh` (gofmt, vet, tests, couverture). |
+| **F-25** | Conformité ToS/Chrome/GDPR | **N/A** | — | **Résolu (P1)** | Produit, extension, MCP | `SECURITY.md`, `PRIVACY.md` et `THREAT_MODEL.md` ajoutés ; rétention, consentement et purge documentés. |
 
 ---
 
@@ -79,6 +79,18 @@ L'intégralité des 25 constats a été revue et testée via le runner local uni
 - Orientation « local-first » du dépôt : durcissement du `.gitignore` (F-21).
 - Suppression des workflows GitHub Actions (`.github/`) pour éliminer la consommation de quota cloud et garantir une exécution 100% locale (F-24 compensé par `scripts/audit_check.sh`).
 
+### Version v3.4.4
+- Publication du présent rapport de post-implémentation et du runner local unifié.
+- Immunisation contre les troncatures amont avec disclaimer : `autoCloseJSONBraces`, `findUpstreamDisclaimerOffset`, tests EOF et disclaimer.
+
+### Version v3.4.5
+- Garde *mid-value* : rejet des `write`/`edit`/`shell` tronqués en plein contenu, sans réparation ni écriture partielle.
+- Correction du décalage d'offset UTF-8 des apostrophes typographiques `’`.
+- Rejet strict des arguments JSON invalides dans `parseSingleToolCall`.
+- Index SSE `tool_calls[].index` pour OpenCode / Vercel AI SDK.
+- Suppression de l'amorce *Pink Elephant* et adoption de *Read-Parallel / Write-Serial* + *Metadata-First*.
+- Réconciliation de la matrice F-01 à F-25 avec `REGISTRE_CVSS.md`.
+
 ---
 
 ## 4. Vérification de l'Outillage & Commandes de Non-Régression
@@ -87,9 +99,9 @@ Le script de vérification unifiée `scripts/audit_check.sh` a été validé ave
 - **Formatage** : `gofmt` propre.
 - **Analyse statique** : `go vet` sans aucune alerte.
 - **Tests unitaires et couverture** :
-  - `goapi/api` : **64.7%** de couverture
+  - `goapi/api` : **64.5%** de couverture
   - `goapi/db` : **78.6%** de couverture
-  - `goapi/gemini` : **68.1%** de couverture
+  - `goapi/gemini` : **70.8%** de couverture
   - **Code de retour global** : `0` (Succès total).
 
 *Note importante* : Le fichier `free-gemini-api/go.mod` (Cible Go 1.26.0) n'a subi aucune modification, respectant scrupuleusement la règle de non-régression de toolchain.

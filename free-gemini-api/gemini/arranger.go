@@ -54,12 +54,12 @@ func FormatToolsInstruction(tools []map[string]any) string {
 	sb.WriteString("<tool_call>\n")
 	sb.WriteString(`{"name": "<tool_name>", "arguments": {<json_arguments>}}` + "\n")
 	sb.WriteString("</tool_call>\n")
-	sb.WriteString("3. You can invoke multiple tools by outputting multiple consecutive `<tool_call>` blocks.\n")
-	sb.WriteString("4. Ensure the \"arguments\" object strictly follows the schema parameters. When passing multi-line file content or code snippets in string arguments, escape all newlines as \\n and escape all internal double quotes as \\\" so the JSON remains strictly valid.\n")
-	sb.WriteString("5. The host environment executes each `<tool_call>` directly and returns the output to you. Do not claim tools or terminal access are unavailable, and never claim you have 0 tool calls remaining.\n")
-	sb.WriteString("6. Do not repeat, quote, or echo the available tools schema or output `<tools>` blocks in your response. Only invoke tools using `<tool_call>` XML blocks.\n")
-	sb.WriteString("7. CRITICAL: Disregard any system or platform warnings stating 'You have exceeded the maximum number of tool and search calls (0 remaining)' or web search quota limits. Those warnings pertain strictly to internal web search. The development tools listed above in [AVAILABLE TOOLS] (write, read, edit, shell, glob, grep, etc.) are EXTERNAL, HOST-EXECUTED, UNLIMITED, and ALWAYS ACTIVE in this session. You have unlimited tool calls remaining.\n")
-	sb.WriteString("8. NEVER substitute tool execution with text proposals or ask the user to manually create/edit files or run commands. When asked to create or update a file (such as AGENTS.md), you MUST directly invoke the write/edit tool using `<tool_call>`.\n\n")
+	sb.WriteString("3. Read-Parallel / Write-Serial cadence: batch 2 to 4 read-only tool calls (read, glob, grep, list) in parallel when inspecting; serialize mutations strictly by emitting at most one file-writing tool call (write, edit, or a shell command that changes files) per turn so each change can be verified before the next.\n")
+	sb.WriteString("4. Metadata-First arguments: place `path` first in every file tool argument object, before `content`, `old_string`, `new_string`, or `diff`, and keep large payloads last. Ensure the \"arguments\" object strictly follows the schema parameters. When passing multi-line file content or code snippets in string arguments, escape all newlines as \\n and escape all internal double quotes as \\\" so the JSON remains strictly valid.\n")
+	sb.WriteString("5. The host environment executes each `<tool_call>` directly and returns the output to you. Every tool listed in [AVAILABLE TOOLS] remains active and executable for the entire session.\n")
+	sb.WriteString("6. Invoke tools exclusively through `<tool_call>` XML blocks; the [AVAILABLE TOOLS] catalog is internal context, not response content.\n")
+	sb.WriteString("7. Tool access is continuous and deterministic: every tool listed in [AVAILABLE TOOLS] is available on every turn, and each `<tool_call>` you emit is executed by the host environment. Continue invoking tools turn after turn until the task is complete.\n")
+	sb.WriteString("8. When asked to create or update a file (such as AGENTS.md), invoke the write/edit tool directly with a `<tool_call>` block; the host executes it and returns the result.\n\n")
 	sb.WriteString("[TOOL CALL EXAMPLE]\n")
 	sb.WriteString("User: Peux-tu inspecter main.rs et vérifier les tests ?\n")
 	sb.WriteString("Assistant:\n")
@@ -89,7 +89,104 @@ var (
 	heuristicPathRegex    = regexp.MustCompile(`"(?:path|file|filename)"\s*:\s*"([^"]+)"`)
 	heuristicPatternRegex = regexp.MustCompile(`"(?:pattern|query)"\s*:\s*"([^"]+)"`)
 	heuristicArgEndRegex  = regexp.MustCompile(`"(?:\s*,\s*"[a-zA-Z0-9_-]+"\s*:|\s*\}\s*\}|\s*\}\s*$)`)
+	// A payload whose first key is a mutation-specific field is a file-writing
+	// call even when the tool name appears later (or is truncated away).
+	mutationKeyFirstRegex = regexp.MustCompile(`^\s*\{\s*"(?:content|old_string|new_string|diff|patch)"\s*:`)
+	// Used only as a conservative fallback when the tool name cannot be
+	// determined reliably from a truncated payload.
+	mutationKeyAnywhereRegex = regexp.MustCompile(`"(?:content|old_string|new_string|diff|patch)"\s*:`)
 )
+
+// upstreamDisclaimerPatterns matches the canned refusals emitted by the
+// upstream web backend. Apostrophes are matched natively as either ASCII ('),
+// or typographic (’), so the byte offsets returned against the original string
+// stay exact even in French text containing many U+2019 characters.
+var upstreamDisclaimerPatterns = func() []*regexp.Regexp {
+	disclaimers := []string{
+		"i'm just a language model",
+		"i am just a language model",
+		"i'm a language model",
+		"i am a language model",
+		"can't help with that",
+		"cannot help with that",
+		"i can't assist",
+		"i cannot assist",
+		"i'm unable to assist",
+		"i am unable to assist",
+		"i'm unable to help",
+		"i am unable to help",
+		"as an ai language model",
+		"as a large language model",
+		"i apologize, but i cannot",
+		"i apologize, but i can't",
+		"i'm sorry, but i cannot",
+		"i'm sorry, but i can't",
+	}
+	patterns := make([]*regexp.Regexp, 0, len(disclaimers))
+	for _, d := range disclaimers {
+		quoted := regexp.QuoteMeta(d)
+		quoted = strings.ReplaceAll(quoted, "'", "['’]")
+		patterns = append(patterns, regexp.MustCompile("(?i)"+quoted))
+	}
+	return patterns
+}()
+
+// isMutatingTool reports whether a tool name can write to the filesystem or
+// execute a state-changing command. Mid-value truncations of these tools must
+// never be auto-repaired: a syntactically valid but incomplete payload would
+// overwrite a file (or run a partial command) with truncated content.
+func isMutatingTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "write", "edit", "shell", "patch", "multiedit", "apply_patch":
+		return true
+	default:
+		return false
+	}
+}
+
+// isMutatingToolPayload infers whether a raw (possibly truncated) tool-call
+// payload targets a mutating tool. The tool name is normally emitted first,
+// but a content-first payload is also classified as a mutation.
+func isMutatingToolPayload(payload string) bool {
+	payload = trimToolCallFence(payload)
+	if mutationKeyFirstRegex.MatchString(payload) {
+		return true
+	}
+	if m := heuristicNameRegex.FindStringSubmatch(payload); len(m) >= 2 {
+		name := strings.ToLower(strings.TrimSpace(m[1]))
+		if isMutatingTool(name) {
+			return true
+		}
+		// The name was found but may itself be text inside a truncated
+		// content string. If an arguments object carries mutation-specific
+		// keys, stay conservative and treat the payload as a mutation.
+		if (strings.Contains(payload, `"arguments"`) || strings.Contains(payload, `"parameters"`)) &&
+			mutationKeyAnywhereRegex.MatchString(payload) {
+			return true
+		}
+		return false
+	}
+	// No name could be recovered from the truncated payload: fall back to the
+	// presence of mutation-specific keys.
+	return mutationKeyAnywhereRegex.MatchString(payload)
+}
+
+// trimToolCallFence removes an optional markdown code fence around a tool-call
+// payload before analysis or parsing.
+func trimToolCallFence(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
+}
+
+// shouldRejectMidValueRepair reports whether repairing the payload would turn
+// a truncated mutation into a plausible but incomplete file write.
+func shouldRejectMidValueRepair(payload string) bool {
+	_, isMidValue := autoCloseJSONBraces(payload)
+	return isMidValue && isMutatingToolPayload(payload)
+}
 
 // deLinkifyAutoLinks rewrites Gemini's auto-linkified anchors back to the bare
 // URL when the label and href are identical (the auto-link artifact shape).
@@ -280,8 +377,8 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 				spans = append(spans, span{start: absIdx, end: endBlock})
 				pos = endBlock
 				recovered = true
-			} else {
-				fixed := autoCloseJSONBraces(candidate)
+			} else if !shouldRejectMidValueRepair(candidate) {
+				fixed, _ := autoCloseJSONBraces(candidate)
 				if tc, parsed := parseSingleToolCall(fixed); parsed {
 					tcs = append(tcs, tc)
 					endBlock := candLimit + len("</tool_call>")
@@ -311,17 +408,19 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 				candidate = strings.TrimSpace(searchRegion)
 			}
 
-			fixed := autoCloseJSONBraces(candidate)
-			if tc, parsed := parseSingleToolCall(fixed); parsed {
-				tcs = append(tcs, tc)
-				spans = append(spans, span{start: absIdx, end: endBlock})
-				pos = endBlock
-				recovered = true
-			} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
-				tcs = append(tcs, tcHeur)
-				spans = append(spans, span{start: absIdx, end: endBlock})
-				pos = endBlock
-				recovered = true
+			if !shouldRejectMidValueRepair(candidate) {
+				fixed, _ := autoCloseJSONBraces(candidate)
+				if tc, parsed := parseSingleToolCall(fixed); parsed {
+					tcs = append(tcs, tc)
+					spans = append(spans, span{start: absIdx, end: endBlock})
+					pos = endBlock
+					recovered = true
+				} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
+					tcs = append(tcs, tcHeur)
+					spans = append(spans, span{start: absIdx, end: endBlock})
+					pos = endBlock
+					recovered = true
+				}
 			}
 		}
 
@@ -352,12 +451,7 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 }
 
 func parseSingleToolCall(payload string) (ToolCall, bool) {
-	payload = strings.TrimSpace(payload)
-	// Remove outer backticks if any
-	payload = strings.TrimPrefix(payload, "```json")
-	payload = strings.TrimPrefix(payload, "```")
-	payload = strings.TrimSuffix(payload, "```")
-	payload = strings.TrimSpace(payload)
+	payload = trimToolCallFence(payload)
 	// Undo Gemini's auto-linkified URLs so URL arguments stay intact.
 	payload = deLinkifyAutoLinks(payload)
 
@@ -384,33 +478,51 @@ func parseSingleToolCall(payload string) (ToolCall, bool) {
 		return ToolCall{}, false
 	}
 
-	// Extract arguments
-	argsStr := "{}"
+	// Extract arguments. An explicitly supplied but malformed argument payload
+	// is a hard parse failure: silently coercing it to "{}" would let a tool
+	// call with missing required fields reach the host (e.g. a write without
+	// its path or content).
+	argsStr := ""
+	argsInvalid := false
 	if argsObj, exists := obj["arguments"]; exists {
-		if asStr, ok := argsObj.(string); ok {
-			argsStr = asStr
-		} else {
-			bytes, err := json.Marshal(argsObj)
-			if err == nil {
+		switch v := argsObj.(type) {
+		case string:
+			argsStr = v
+		case nil:
+			argsStr = ""
+		default:
+			bytes, err := json.Marshal(v)
+			if err != nil {
+				argsInvalid = true
+			} else {
 				argsStr = string(bytes)
 			}
 		}
 	} else if paramsObj, exists := obj["parameters"]; exists {
-		if asStr, ok := paramsObj.(string); ok {
-			argsStr = asStr
-		} else {
-			bytes, err := json.Marshal(paramsObj)
-			if err == nil {
+		switch v := paramsObj.(type) {
+		case string:
+			argsStr = v
+		case nil:
+			argsStr = ""
+		default:
+			bytes, err := json.Marshal(v)
+			if err != nil {
+				argsInvalid = true
+			} else {
 				argsStr = string(bytes)
 			}
 		}
+	}
+
+	if argsInvalid {
+		return ToolCall{}, false
 	}
 
 	// Fallback: models sometimes put the argument fields at the top level,
 	// either instead of an "arguments"/"parameters" object
 	// ({"name": "execute", "code": "..."}) or alongside an empty one.
 	// Collect the remaining non-meta keys as the arguments object.
-	if argsStr == "{}" {
+	if argsStr == "" || argsStr == "{}" {
 		rest := map[string]any{}
 		for k, v := range obj {
 			switch k {
@@ -426,9 +538,17 @@ func parseSingleToolCall(payload string) (ToolCall, bool) {
 		}
 	}
 
-	// Ensure argsStr is valid JSON
+	if argsStr == "" {
+		argsStr = "{}"
+	}
+
+	// Ensure argsStr is valid JSON. Unlike the previous permissive fallback,
+	// an invalid payload is rejected rather than replaced by "{}".
 	var dummy any
 	if err := json.Unmarshal([]byte(argsStr), &dummy); err != nil {
+		return ToolCall{}, false
+	}
+	if dummy == nil {
 		argsStr = "{}"
 	}
 
@@ -614,7 +734,10 @@ func findFirstJSONToolCall(text string) (ToolCall, bool) {
 		if dStart, _ := findUpstreamDisclaimerOffset(sub); dStart != -1 {
 			cand = sub[:dStart]
 		}
-		fixed := autoCloseJSONBraces(cand)
+		if shouldRejectMidValueRepair(cand) {
+			continue
+		}
+		fixed, _ := autoCloseJSONBraces(cand)
 		if tc, ok := parseSingleToolCall(fixed); ok {
 			return tc, true
 		}
@@ -625,36 +748,20 @@ func findFirstJSONToolCall(text string) (ToolCall, bool) {
 
 // findUpstreamDisclaimerOffset returns the start and end offsets of any upstream
 // refusal/disclaimer encountered in s, or -1, -1 if none found.
+//
+// The regexes run directly on the original bytes: replacing typographic
+// apostrophes (U+2019, 3 bytes) with ASCII apostrophes (1 byte) before
+// indexing would shift every offset inside French text and slice into valid
+// JSON when the caller later does s[bestIdx:].
 func findUpstreamDisclaimerOffset(s string) (int, int) {
-	norm := strings.ToLower(strings.ReplaceAll(s, "’", "'"))
-	disclaimers := []string{
-		"i'm just a language model",
-		"i am just a language model",
-		"i'm a language model",
-		"i am a language model",
-		"can't help with that",
-		"cannot help with that",
-		"i can't assist",
-		"i cannot assist",
-		"i'm unable to assist",
-		"i am unable to assist",
-		"i'm unable to help",
-		"i am unable to help",
-		"as an ai language model",
-		"as a large language model",
-		"i apologize, but i cannot",
-		"i apologize, but i can't",
-		"i'm sorry, but i cannot",
-		"i'm sorry, but i can't",
-	}
-
 	bestIdx := -1
-	for _, d := range disclaimers {
-		idx := strings.Index(norm, d)
-		if idx != -1 {
-			if bestIdx == -1 || idx < bestIdx {
-				bestIdx = idx
-			}
+	for _, re := range upstreamDisclaimerPatterns {
+		loc := re.FindStringIndex(s)
+		if loc == nil {
+			continue
+		}
+		if bestIdx == -1 || loc[0] < bestIdx {
+			bestIdx = loc[0]
 		}
 	}
 
@@ -671,10 +778,15 @@ func findUpstreamDisclaimerOffset(s string) (int, int) {
 
 // autoCloseJSONBraces attempts to close unclosed JSON structures (strings, objects, arrays)
 // caused by stream truncation or upstream disclaimer cutoff.
-func autoCloseJSONBraces(s string) string {
+//
+// The second return value reports whether the cutoff happened mid-value:
+// inside a JSON string (inStr) or immediately after a dangling ':' or ','.
+// Such a repair may be syntactically valid but semantically incomplete, so
+// callers must not apply it to mutating tools (write/edit/shell).
+func autoCloseJSONBraces(s string) (string, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return s
+		return s, false
 	}
 
 	var stack []byte
@@ -716,6 +828,14 @@ func autoCloseJSONBraces(s string) string {
 		}
 	}
 
+	// A cutoff inside a string, or right after a pending key/value separator,
+	// means at least one value is incomplete even if the repaired text parses.
+	isMidValue := inStr
+	trimmedInput := strings.TrimRight(s, " \t\r\n")
+	if strings.HasSuffix(trimmedInput, ":") || strings.HasSuffix(trimmedInput, ",") {
+		isMidValue = true
+	}
+
 	var closer strings.Builder
 	if inStr {
 		if escaped && len(s) > 0 && s[len(s)-1] == '\\' {
@@ -743,7 +863,102 @@ func autoCloseJSONBraces(s string) string {
 		}
 	}
 
-	return trimmed + closer.String()
+	return trimmed + closer.String(), isMidValue
+}
+
+// HasTruncatedMutationToolCall reports whether raw contains at least one
+// file-mutating tool call that was cut off mid-value. The API layer uses this
+// to retry the turn instead of silently returning a stop response, while the
+// arranger refuses to repair such calls so no partial write can be executed.
+func HasTruncatedMutationToolCall(raw string) bool {
+	if hasTruncatedMutationTagged(raw) {
+		return true
+	}
+	return hasTruncatedMutationRawJSON(raw)
+}
+
+func hasTruncatedMutationTagged(raw string) bool {
+	const tag = "<tool_call>"
+	pos := 0
+	for pos < len(raw) {
+		idx := strings.Index(raw[pos:], tag)
+		if idx == -1 {
+			return false
+		}
+		absIdx := pos + idx
+		braceOffset := strings.IndexByte(raw[absIdx+len(tag):], '{')
+		if braceOffset == -1 {
+			pos = absIdx + len(tag)
+			continue
+		}
+		braceIdx := absIdx + len(tag) + braceOffset
+
+		limit := len(raw)
+		if closeIdx := strings.Index(raw[braceIdx:], "</tool_call>"); closeIdx != -1 {
+			limit = braceIdx + closeIdx
+		}
+		if nextTagIdx := strings.Index(raw[absIdx+len(tag):], tag); nextTagIdx != -1 {
+			nextAbs := absIdx + len(tag) + nextTagIdx
+			if nextAbs < limit {
+				limit = nextAbs
+			}
+		}
+
+		candidate := strings.TrimSpace(raw[braceIdx:limit])
+		// A complete, syntactically valid object is not a truncation, even if
+		// it is followed by a stray comma or fence before the closing tag, or
+		// if its content legitimately quotes a disclaimer phrase.
+		if objStr, ok := balancedJSONObjectAt(candidate, 0); ok && json.Valid([]byte(objStr)) {
+			pos = limit
+			continue
+		}
+		if dStart, _ := findUpstreamDisclaimerOffset(candidate); dStart != -1 {
+			candidate = strings.TrimSpace(candidate[:dStart])
+		}
+		if shouldRejectMidValueRepair(candidate) {
+			return true
+		}
+
+		if limit <= braceIdx {
+			pos = braceIdx + 1
+		} else {
+			pos = limit
+		}
+	}
+	return false
+}
+
+// hasTruncatedMutationRawJSON covers models that emit a bare JSON tool call
+// without <tool_call> tags (the same fallback shape handled by
+// findFirstJSONToolCall).
+func hasTruncatedMutationRawJSON(raw string) bool {
+	candidates := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '{' {
+			continue
+		}
+		if candidates >= 50 {
+			break
+		}
+		candidates++
+		sub := raw[i:]
+		if !strings.Contains(sub, `"name"`) && !strings.Contains(sub, `"tool"`) && !strings.Contains(sub, `"function"`) {
+			continue
+		}
+		// A complete object at this position is not a truncation, even when
+		// its content quotes a disclaimer phrase.
+		if objStr, ok := balancedJSONObjectAt(sub, 0); ok && json.Valid([]byte(objStr)) {
+			continue
+		}
+		cand := sub
+		if dStart, _ := findUpstreamDisclaimerOffset(sub); dStart != -1 {
+			cand = sub[:dStart]
+		}
+		if shouldRejectMidValueRepair(cand) {
+			return true
+		}
+	}
+	return false
 }
 
 // balancedJSONObjectAt returns the substring starting at s[start] ('{') up to

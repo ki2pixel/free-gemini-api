@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"strings"
 	"sync"
+
+	"goapi/gemini"
 )
 
 // Per-session transcript bookkeeping for the OpenAI-compatible endpoint.
@@ -227,6 +229,11 @@ func isUnusableModelOutput(text string, hasTools bool) bool {
 		}
 	}
 	if hasTools && isToolRefusalOutput(text) {
+		return true
+	}
+	// A mutating tool call cut off mid-value must never be repaired and
+	// executed. Retry on a fresh upstream conversation instead.
+	if hasTools && gemini.HasTruncatedMutationToolCall(text) {
 		return true
 	}
 	return false
