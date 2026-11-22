@@ -10,7 +10,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
 	github.com/pkoukk/tiktoken-go v0.1.8
-	github.com/quic-go/quic-go v0.62.0
+	github.com/quic-go/quic-go v0.65.0
 	github.com/xuri/excelize/v2 v2.11.1
 	modernc.org/sqlite v1.58.0
 )
