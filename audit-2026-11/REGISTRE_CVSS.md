@@ -6,33 +6,33 @@
 
 ## Tableau récapitulatif
 
-| ID | Titre | CVSS | Sévérité | Criticité métier | CWE | OWASP | Statut |
-|---|---|---:|---|---|---|---|---|
-| F-01 | Traversée de répertoire `/output/*` | 8.6 | High | Critique | CWE-22 | A01 | Confirmé |
-| F-02 | Absence d'authentification | 9.1 | Critical | Critique | CWE-306 | A01/A07 | Confirmé |
-| F-03 | WebSocket cookies non authentifié | 9.1 | Critical | Critique | CWE-306/CWE-346 | A01/A05 | Confirmé |
-| F-04 | CORS wildcard | 9.3 | Critical | Critique | CWE-942 | A05 | Confirmé |
-| F-05 | Extension : exfiltration cookies vers le LAN | 9.3 | Critical | Critique | CWE-319/CWE-522 | A02/A05 | Confirmé (statique) |
-| F-06 | Cookies Google en 0644 + root | 5.5 | Medium | Élevée | CWE-276/CWE-522 | A01/A02 | Confirmé |
-| F-07 | Cookie forwarding sur redirections | 5.9 | Medium | Élevée | CWE-200/CWE-522 | A01 | Confirmé (test) |
-| F-08 | Data races session/cookies | 5.6 | Medium | Moyenne | CWE-362 | A04 | Confirmé (`-race`) |
-| F-09 | Répertoire temporaire partagé | 5.3 | Medium | Moyenne | CWE-362/CWE-377 | A04 | Confirmé (test) |
-| F-10 | Auto-export à chaque requête | 7.5 | High | Élevée | CWE-400 | A04 | Confirmé |
-| F-11 | Tokenizer CPU/mémoire sur 50 Mo | 7.5 | High | Élevée | CWE-400/CWE-407 | A04 | Confirmé (bench) |
-| F-12 | Pas de rate limit/timeouts | 5.3 | Medium | Moyenne | CWE-770/CWE-400 | A04/A05 | Confirmé |
-| F-13 | Caches non bornés | 5.3 | Medium | Moyenne | CWE-770 | A04 | Confirmé (code) |
-| F-14 | Exports concurrents corrompus | 5.3 | Medium | Moyenne | CWE-362/CWE-667 | A04 | Confirmé (stress) |
-| F-15 | Dépendances vulnérables | 5.9 | Medium | Élevée | CWE-1104 | A06 | Confirmé |
-| F-16 | Conteneur root / build non durci | 7.8 | High | Élevée | CWE-250/CWE-732 | A05 | Confirmé |
-| F-17 | Incohérence de ports | 3.7 | Low | Faible | CWE-1188 | A05 | Confirmé |
-| F-18 | Extension permissions/transport | 6.5 | Medium | Élevée | CWE-250/CWE-319 | A02/A05 | Confirmé |
-| F-19 | MCP lecture fichiers + exfil | 5.5 | Medium | Élevée | CWE-22/CWE-200 | A01 | Confirmé (PoC) |
-| F-20 | Registre de modèles non validé | 6.5 | Medium | Élevée | CWE-20 | A04/A08 | Confirmé |
-| F-21 | Artefacts de debug / secret de prompt | 3.7 | Low | Moyenne | CWE-538/CWE-312 | A05 | Confirmé |
-| F-22 | HTTP clair sur 0.0.0.0 | 6.5 | Medium | Élevée | CWE-319 | A02 | Confirmé |
-| F-23 | Qualité/SAST | 3.7 | Low | Faible | CWE-703/CWE-338 | A04/A09 | Confirmé |
-| F-24 | CI/CD sans qualité | 5.6 | Medium | Moyenne | CWE-1357 | A06/A08 | Confirmé |
-| F-25 | Conformité ToS/Chrome/GDPR | N/A | — | Élevée | — | — | Analyse |
+| ID | Titre | CVSS | Sévérité | Criticité métier | CWE | OWASP | Statut | Statut Post-Audit |
+|---|---|---:|---|---|---|---|---|---|
+| F-01 | Traversée de répertoire `/output/*` | 8.6 | High | Critique | CWE-22 | A01 | Confirmé | **Résolu (P0)** |
+| F-02 | Absence d'authentification | 9.1 | Critical | Critique | CWE-306 | A01/A07 | Confirmé | **Résolu (P0)** |
+| F-03 | WebSocket cookies non authentifié | 9.1 | Critical | Critique | CWE-306/CWE-346 | A01/A05 | Confirmé | **Résolu (P0)** |
+| F-04 | CORS wildcard | 9.3 | Critical | Critique | CWE-942 | A05 | Confirmé | **Résolu (P0)** |
+| F-05 | Extension : exfiltration cookies vers le LAN | 9.3 | Critical | Critique | CWE-319/CWE-522 | A02/A05 | Confirmé (statique) | **Résolu (P0)** |
+| F-06 | Cookies Google en 0644 + root | 5.5 | Medium | Élevée | CWE-276/CWE-522 | A01/A02 | Confirmé | **Résolu (P0/P2)** |
+| F-07 | Cookie forwarding sur redirections | 5.9 | Medium | Élevée | CWE-200/CWE-522 | A01 | Confirmé (test) | **Résolu (P1)** |
+| F-08 | Data races session/cookies | 5.6 | Medium | Moyenne | CWE-362 | A04 | Confirmé (`-race`) | **Résolu (P0)** |
+| F-09 | Répertoire temporaire partagé | 5.3 | Medium | Moyenne | CWE-362/CWE-377 | A04 | Confirmé (test) | **Résolu (P1)** |
+| F-10 | Auto-export à chaque requête | 7.5 | High | Élevée | CWE-400 | A04 | Confirmé | **Résolu (P0)** |
+| F-11 | Tokenizer CPU/mémoire sur 50 Mo | 7.5 | High | Élevée | CWE-400/CWE-407 | A04 | Confirmé (bench) | **Résolu (P0)** |
+| F-12 | Pas de rate limit/timeouts | 5.3 | Medium | Moyenne | CWE-770/CWE-400 | A04/A05 | Confirmé | **Résolu (P0)** |
+| F-13 | Caches non bornés | 5.3 | Medium | Moyenne | CWE-770 | A04 | Confirmé (code) | **Résolu (P1)** |
+| F-14 | Exports concurrents corrompus | 5.3 | Medium | Moyenne | CWE-362/CWE-667 | A04 | Confirmé (stress) | **Résolu (P1)** |
+| F-15 | Dépendances vulnérables | 5.9 | Medium | Élevée | CWE-1104 | A06 | Confirmé | **Résolu (P0)** |
+| F-16 | Conteneur root / build non durci | 7.8 | High | Élevée | CWE-250/CWE-732 | A05 | Confirmé | **Résolu (P0)** |
+| F-17 | Incohérence de ports | 3.7 | Low | Faible | CWE-1188 | A05 | Confirmé | **Résolu (P1)** |
+| F-18 | Extension permissions/transport | 6.5 | Medium | Élevée | CWE-250/CWE-319 | A02/A05 | Confirmé | **Résolu (P0)** |
+| F-19 | MCP lecture fichiers + exfil | 5.5 | Medium | Élevée | CWE-22/CWE-200 | A01 | Confirmé (PoC) | **Résolu (P1)** |
+| F-20 | Registre de modèles non validé | 6.5 | Medium | Élevée | CWE-20 | A04/A08 | Confirmé | **Résolu (P0)** |
+| F-21 | Artefacts de debug / secret de prompt | 3.7 | Low | Moyenne | CWE-538/CWE-312 | A05 | Confirmé | **Résolu (P1/v3.4.3)** |
+| F-22 | HTTP clair sur 0.0.0.0 | 6.5 | Medium | Élevée | CWE-319 | A02 | Confirmé | **Résolu (P0)** |
+| F-23 | Qualité/SAST | 3.7 | Low | Faible | CWE-703/CWE-338 | A04/A09 | Confirmé | **Résolu (P1)** |
+| F-24 | CI/CD sans qualité | 5.6 | Medium | Moyenne | CWE-1357 | A06/A08 | Confirmé | **Adapté (Local-First)** |
+| F-25 | Conformité ToS/Chrome/GDPR | N/A | — | Élevée | — | — | Analyse | **Résolu (P1)** |
 
 ---
 

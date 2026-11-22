@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.4] - 2026-11-22
+
+### Added
+- **Unified Local Quality Runner (`scripts/audit_check.sh`)**:
+  - Added standalone root bash script (`scripts/audit_check.sh`) compensating for the removal of `.github/` workflows.
+  - Automatically runs Go code formatting verification (`gofmt`), static analysis (`go vet` via Docker `golang:1.26-alpine`), and unit test suite execution with statement coverage calculation (`go test -short -cover ./...`), exiting with code 0 on clean runs.
+- **Post-Implementation Audit & Integration Validation (`audit-2026-11/RAPPORT_POST_AUDIT.md`)**:
+  - Published comprehensive post-implementation audit report evaluating the remediation of all 25 security and robustness findings (F-01 to F-25) from the November 2026 audit.
+  - Validated progression of Global Maturity Index from **38/100 (Level 2/5 — NO-GO)** to **74.25/100 (Level 4/5 — GO Local-First / IDE Validated)** across all 6 maturity axes.
+  - Updated CVSS registry ([REGISTRE_CVSS.md](audit-2026-11/REGISTRE_CVSS.md), [REGISTRE_CVSS.csv](audit-2026-11/REGISTRE_CVSS.csv)) and audit summary ([audit-2026-11/README.md](audit-2026-11/README.md)) with explicit post-audit remediation statuses.
+- **Agent Workflow Insights on Long-Horizon Multi-Turn Tasks**:
+  - Documented empirical performance differentials between `gemini-4-neon` and `gemini-4-hydrogen-task` when executing complex multi-turn plans:
+    - `gemini-4-neon` exhibits zero vulnerability hallucination, correct path resolution, and accurate test interpretation, but can encounter cognitive saturation on mega-turns (omitting keys like `path`) or succumb to read-only confirmation bias when resuming partial tasks.
+    - `gemini-4-hydrogen-task` executes rapidly but suffers from directory drift and hallucinated CVE identifiers when operating without strict constraints.
+
+### Fixed
+- **Upstream Safety Disclaimer Truncation & Automatic JSON Repair (`gemini/arranger.go`)**:
+  - Implemented `autoCloseJSONBraces` and `findUpstreamDisclaimerOffset` in `gemini/arranger.go` to immunize the proxy engine against tool call truncations caused by Google's upstream web safety filters.
+  - When safety classifiers trigger at the end of large write payloads, omitting the closing `}` or `</tool_call>` and appending canned refusals (*"I'm just a language model and can't help with that"*), the arranger now isolates the unclosed JSON, automatically balances unclosed braces and string quotes, extracts the tool call, and swallows the disclaimer from `CleanText`.
+  - Added unit test suite in `gemini/arranger_test.go` (`TestArrangeGeminiOutput_TruncatedToolCallWithUpstreamDisclaimer`, `TestArrangeGeminiOutput_TruncatedToolCallEOF`, `TestAutoCloseJSONBraces`).
+
+---
+
 ## [3.4.3] - 2026-11-22
 
 ### Changed

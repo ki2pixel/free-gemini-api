@@ -7,8 +7,9 @@ Ce dossier contient les livrables de l'audit de sécurité et de maturité réal
 | Fichier | Contenu |
 |---|---|
 | [`RAPPORT_AUDIT.md`](RAPPORT_AUDIT.md) | Rapport principal : synthèse exécutive, architecture, 6 axes, indice de maturité, conformité, conclusion |
-| [`REGISTRE_CVSS.md`](REGISTRE_CVSS.md) | 25 fiches de vulnérabilité avec vecteur CVSS v3.1, CWE/OWASP, preuves, impact, correctif |
-| [`REGISTRE_CVSS.csv`](REGISTRE_CVSS.csv) | Même registre, format tableur/ticketing |
+| [`RAPPORT_POST_AUDIT.md`](RAPPORT_POST_AUDIT.md) | **Rapport de post-implémentation (22/11/2026)** : contrôle d'intégration des 25 constats, indice réévalué à **74,25/100 (GO local)** |
+| [`REGISTRE_CVSS.md`](REGISTRE_CVSS.md) | 25 fiches de vulnérabilité avec vecteur CVSS v3.1, CWE/OWASP, preuves, impact, correctif et statut post-audit |
+| [`REGISTRE_CVSS.csv`](REGISTRE_CVSS.csv) | Même registre, format tableur/ticketing avec statut de remédiation |
 | [`CAHIER_POC.md`](CAHIER_POC.md) | 18 PoC avec commandes exactes et résultats observés |
 | [`PLAN_REMEDIATION.md`](PLAN_REMEDIATION.md) | Roadmap P0/P1/P2, patches, Docker/CI durcis, plan de vérification |
 | [`evidence/`](evidence/) | Sorties brutes : SAST, scans, benchmarks, stress, logs, preuves PoC |
@@ -16,9 +17,10 @@ Ce dossier contient les livrables de l'audit de sécurité et de maturité réal
 
 ## Verdict
 
-> **Indice global de maturité : 38/100 (niveau 2/5).**  
-> **NO-GO** pour une exposition réseau, un usage multi-utilisateur ou une publication Chrome Web Store en l'état.  
-> **GO local mono-utilisateur** après les quick wins P0.
+> **Indice global de maturité initial (21/11/2026) : 38/100 (niveau 2/5 - NO-GO).**  
+> **Indice global de maturité actualisé (22/11/2026) : 74,25/100 (niveau 4/5 - GO Local-First Validé).**  
+> **GO local mono-utilisateur & intégration OpenCode / IDE validé sans réserve.**  
+> **NO-GO maintenu pour exposition publique / multi-tenant sans hardening complémentaire.**  
 
 ## Chiffres clés
 
@@ -28,7 +30,7 @@ Ce dossier contient les livrables de l'audit de sécurité et de maturité réal
 | Vulnérabilités Go (trivy) | 28, dont 13 HIGH |
 | Vulnérabilités reachables (govulncheck) | 2 (brotli, klauspost/compress) |
 | Constats gosec | 84 (8 HIGH, 25 MEDIUM, 51 LOW) |
-| Couverture de tests | 28,2 % |
+| Couverture de tests initiale | 28,2 % (portée à **68,1%** gemini, **64,7%** api, **78,6%** db en post-audit) |
 | Écritures SQLite concurrentes | 807/s, 0 échec |
 | Export Excel 5 000 messages | 407 ms, 78 Mo alloués |
 | Tokenizer 100 000 caractères | 45 ms, 12 Mo alloués |
@@ -43,11 +45,14 @@ Ce dossier contient les livrables de l'audit de sécurité et de maturité réal
 4. **CORS `*` + WebSocket `CheckOrigin=true`** → drive-by et injection de cookies (F-03/F-04, CVSS 9.1/9.3).
 5. **DoS non authentifié** : export analytics à chaque requête, tokenizer 50 Mo, pas de rate limit (F-10/F-11, CVSS 7.5).
 
-## Reproductibilité
+## Reproductibilité & Runner Local
 
+Le runner local autonome conteneurisé sous Docker permet de rejouer l'ensemble des vérifications qualité et non-régression en une commande :
 ```bash
-cd audit-2026-11/poc
-chmod +x prepare_audit_env.sh
+./scripts/audit_check.sh
+```
+
+Pour rejouer l'environnement d'audit initial et les PoC :
 ./prepare_audit_env.sh /home/kidpixel/free-gemini-api-main
 # puis suivre CAHIER_POC.md
 ```

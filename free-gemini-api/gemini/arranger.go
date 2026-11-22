@@ -219,61 +219,117 @@ func extractTaggedToolCalls(text string) ([]ToolCall, string) {
 		braceIdx := absIdx + tagLen + braceOffset
 
 		objStr, ok := balancedJSONObjectAt(text, braceIdx)
-		if !ok {
-			// If balancedJSONObjectAt couldn't balance braces due to unescaped characters,
-			// check if an explicit </tool_call> tag exists!
-			if closeIdx := strings.Index(text[absIdx+tagLen:], "</tool_call>"); closeIdx != -1 {
-				candidate := strings.TrimSpace(text[absIdx+tagLen : absIdx+tagLen+closeIdx])
-				if tc, parsed := parseSingleToolCall(candidate); parsed {
-					tcs = append(tcs, tc)
-					endBlock := absIdx + tagLen + closeIdx + len("</tool_call>")
-					spans = append(spans, span{start: absIdx, end: endBlock})
-					pos = endBlock
-					continue
-				}
-			}
-			pos = braceIdx + 1
-			continue
-		}
-
-		endObjIdx := braceIdx + len(objStr)
-		tc, parsed := parseSingleToolCall(objStr)
-		if !parsed {
-			// If parsing objStr failed (e.g. premature brace cutoff), try candidate between <tool_call> and </tool_call>
-			if closeIdx := strings.Index(text[absIdx+tagLen:], "</tool_call>"); closeIdx != -1 {
-				candidate := strings.TrimSpace(text[absIdx+tagLen : absIdx+tagLen+closeIdx])
-				if tcCand, parsedCand := parseSingleToolCall(candidate); parsedCand {
-					tc = tcCand
-					parsed = true
-					endObjIdx = absIdx + tagLen + closeIdx
-				} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
+		if ok {
+			endObjIdx := braceIdx + len(objStr)
+			tc, parsed := parseSingleToolCall(objStr)
+			if !parsed {
+				// If parsing objStr failed (e.g. premature brace cutoff), try candidate between <tool_call> and </tool_call>
+				if closeIdx := strings.Index(text[absIdx+tagLen:], "</tool_call>"); closeIdx != -1 {
+					candidate := strings.TrimSpace(text[absIdx+tagLen : absIdx+tagLen+closeIdx])
+					if tcCand, parsedCand := parseSingleToolCall(candidate); parsedCand {
+						tc = tcCand
+						parsed = true
+						endObjIdx = absIdx + tagLen + closeIdx
+					} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
+						tc = tcHeur
+						parsed = true
+						endObjIdx = absIdx + tagLen + closeIdx
+					}
+				} else if tcHeur, okHeur := extractHeuristicToolCall(objStr); okHeur {
 					tc = tcHeur
 					parsed = true
-					endObjIdx = absIdx + tagLen + closeIdx
 				}
-			} else if tcHeur, okHeur := extractHeuristicToolCall(objStr); okHeur {
-				tc = tcHeur
-				parsed = true
+			}
+
+			if parsed {
+				tcs = append(tcs, tc)
+				endBlock := endObjIdx
+				rest := text[endObjIdx:]
+				trimmed := strings.TrimLeft(rest, " \t\r\n")
+				wsLen := len(rest) - len(trimmed)
+				if strings.HasPrefix(trimmed, "</tool_call>") {
+					endBlock = endObjIdx + wsLen + len("</tool_call>")
+				} else if strings.HasPrefix(trimmed, "```") {
+					endBlock = endObjIdx + wsLen + len("```")
+				}
+				// Also swallow any immediate trailing upstream refusal/disclaimer if present
+				if dStart, dEnd := findUpstreamDisclaimerOffset(text[endBlock:]); dStart == 0 {
+					endBlock += dEnd
+				}
+				spans = append(spans, span{start: absIdx, end: endBlock})
+				pos = endBlock
+				continue
 			}
 		}
 
-		if parsed {
-			tcs = append(tcs, tc)
-			endBlock := endObjIdx
-			rest := text[endObjIdx:]
-			trimmed := strings.TrimLeft(rest, " \t\r\n")
-			wsLen := len(rest) - len(trimmed)
-			if strings.HasPrefix(trimmed, "</tool_call>") {
-				endBlock = endObjIdx + wsLen + len("</tool_call>")
-			} else if strings.HasPrefix(trimmed, "```") {
-				endBlock = endObjIdx + wsLen + len("```")
+		// If balancedJSONObjectAt failed OR parseSingleToolCall failed on objStr:
+		// Recover from an unclosed or truncated tool call (e.g. cut off by upstream disclaimer or EOF).
+		recovered := false
+		limit := len(text)
+		if nextTagIdx := strings.Index(text[absIdx+tagLen:], tag); nextTagIdx != -1 {
+			limit = absIdx + tagLen + nextTagIdx
+		}
+
+		// 1. Check if an explicit </tool_call> tag exists before limit
+		if closeIdx := strings.Index(text[absIdx+tagLen:limit], "</tool_call>"); closeIdx != -1 {
+			candLimit := absIdx + tagLen + closeIdx
+			candidate := strings.TrimSpace(text[absIdx+tagLen : candLimit])
+			if tc, parsed := parseSingleToolCall(candidate); parsed {
+				tcs = append(tcs, tc)
+				endBlock := candLimit + len("</tool_call>")
+				spans = append(spans, span{start: absIdx, end: endBlock})
+				pos = endBlock
+				recovered = true
+			} else {
+				fixed := autoCloseJSONBraces(candidate)
+				if tc, parsed := parseSingleToolCall(fixed); parsed {
+					tcs = append(tcs, tc)
+					endBlock := candLimit + len("</tool_call>")
+					spans = append(spans, span{start: absIdx, end: endBlock})
+					pos = endBlock
+					recovered = true
+				} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
+					tcs = append(tcs, tcHeur)
+					endBlock := candLimit + len("</tool_call>")
+					spans = append(spans, span{start: absIdx, end: endBlock})
+					pos = endBlock
+					recovered = true
+				}
 			}
-			spans = append(spans, span{start: absIdx, end: endBlock})
-			pos = endBlock
+		}
+
+		// 2. If no explicit </tool_call> tag, check if an upstream disclaimer or EOF truncated the call
+		if !recovered {
+			searchRegion := text[braceIdx:limit]
+			dStart, dEnd := findUpstreamDisclaimerOffset(searchRegion)
+			var candidate string
+			endBlock := limit
+			if dStart != -1 {
+				candidate = strings.TrimSpace(searchRegion[:dStart])
+				endBlock = braceIdx + dEnd
+			} else {
+				candidate = strings.TrimSpace(searchRegion)
+			}
+
+			fixed := autoCloseJSONBraces(candidate)
+			if tc, parsed := parseSingleToolCall(fixed); parsed {
+				tcs = append(tcs, tc)
+				spans = append(spans, span{start: absIdx, end: endBlock})
+				pos = endBlock
+				recovered = true
+			} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
+				tcs = append(tcs, tcHeur)
+				spans = append(spans, span{start: absIdx, end: endBlock})
+				pos = endBlock
+				recovered = true
+			}
+		}
+
+		if recovered {
 			continue
 		}
 
-		pos = absIdx + tagLen
+		pos = braceIdx + 1
 	}
 
 	if len(tcs) == 0 {
@@ -544,7 +600,150 @@ func findFirstJSONToolCall(text string) (ToolCall, bool) {
 			return tc, true
 		}
 	}
+
+	// Fallback for truncated raw JSON cut off by disclaimer or EOF
+	for i := 0; i < len(text); i++ {
+		if text[i] != '{' {
+			continue
+		}
+		sub := text[i:]
+		if !strings.Contains(sub, `"name"`) && !strings.Contains(sub, `"tool"`) && !strings.Contains(sub, `"function"`) {
+			continue
+		}
+		cand := sub
+		if dStart, _ := findUpstreamDisclaimerOffset(sub); dStart != -1 {
+			cand = sub[:dStart]
+		}
+		fixed := autoCloseJSONBraces(cand)
+		if tc, ok := parseSingleToolCall(fixed); ok {
+			return tc, true
+		}
+	}
+
 	return ToolCall{}, false
+}
+
+// findUpstreamDisclaimerOffset returns the start and end offsets of any upstream
+// refusal/disclaimer encountered in s, or -1, -1 if none found.
+func findUpstreamDisclaimerOffset(s string) (int, int) {
+	norm := strings.ToLower(strings.ReplaceAll(s, "’", "'"))
+	disclaimers := []string{
+		"i'm just a language model",
+		"i am just a language model",
+		"i'm a language model",
+		"i am a language model",
+		"can't help with that",
+		"cannot help with that",
+		"i can't assist",
+		"i cannot assist",
+		"i'm unable to assist",
+		"i am unable to assist",
+		"i'm unable to help",
+		"i am unable to help",
+		"as an ai language model",
+		"as a large language model",
+		"i apologize, but i cannot",
+		"i apologize, but i can't",
+		"i'm sorry, but i cannot",
+		"i'm sorry, but i can't",
+	}
+
+	bestIdx := -1
+	for _, d := range disclaimers {
+		idx := strings.Index(norm, d)
+		if idx != -1 {
+			if bestIdx == -1 || idx < bestIdx {
+				bestIdx = idx
+			}
+		}
+	}
+
+	if bestIdx == -1 {
+		return -1, -1
+	}
+
+	nextTag := strings.Index(s[bestIdx:], "<tool_call>")
+	if nextTag != -1 {
+		return bestIdx, bestIdx + nextTag
+	}
+	return bestIdx, len(s)
+}
+
+// autoCloseJSONBraces attempts to close unclosed JSON structures (strings, objects, arrays)
+// caused by stream truncation or upstream disclaimer cutoff.
+func autoCloseJSONBraces(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+
+	var stack []byte
+	inStr := false
+	escaped := false
+	n := len(s)
+
+	for i := 0; i < n; i++ {
+		c := s[i]
+		if inStr {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+
+		if c == '"' {
+			inStr = true
+			continue
+		}
+		if c == '{' || c == '[' {
+			stack = append(stack, c)
+		} else if c == '}' {
+			if len(stack) > 0 && stack[len(stack)-1] == '{' {
+				stack = stack[:len(stack)-1]
+			}
+		} else if c == ']' {
+			if len(stack) > 0 && stack[len(stack)-1] == '[' {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+
+	var closer strings.Builder
+	if inStr {
+		if escaped && len(s) > 0 && s[len(s)-1] == '\\' {
+			s = s[:len(s)-1]
+		}
+		closer.WriteByte('"')
+	}
+
+	trimmed := s + closer.String()
+	closer.Reset()
+
+	t := strings.TrimRight(trimmed, " \t\r\n")
+	if strings.HasSuffix(t, ":") {
+		closer.WriteString(`""`)
+	} else if strings.HasSuffix(t, ",") {
+		t = strings.TrimRight(t[:len(t)-1], " \t\r\n")
+		trimmed = t
+	}
+
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i] == '{' {
+			closer.WriteByte('}')
+		} else if stack[i] == '[' {
+			closer.WriteByte(']')
+		}
+	}
+
+	return trimmed + closer.String()
 }
 
 // balancedJSONObjectAt returns the substring starting at s[start] ('{') up to
@@ -591,6 +790,7 @@ var (
 	schemaEchoRegex         = regexp.MustCompile(`(?s)(?:^|\n)\s*\[\s*\{\s*"(?:function|type)"\s*:\s*[\s\S]*`)
 	toolResultOutputRegex   = regexp.MustCompile(`(?s)<output>[\s\S]*?</output>`)
 	subagentTagRegex        = regexp.MustCompile(`(?s)<subagent\b[^>]*/>|<subagent\b[^>]*>[\s\S]*?</subagent>`)
+	upstreamDisclaimerRegex = regexp.MustCompile(`(?i)(?:^|\n|\.\s*)\s*(?:I'm just a language model|I am just a language model|I'm a language model|I am a language model|can't help with that|cannot help with that|I can't assist with that|I cannot assist with that|I'm unable to assist with that|I am unable to assist with that|I'm unable to help with that|I am unable to help with that|As an AI language model|As a large language model|I apologize, but I (?:can't|cannot)|I'm sorry, but I (?:can't|cannot))[\s\S]*`)
 )
 
 func sanitizeGeminiContent(text string) string {
@@ -605,6 +805,8 @@ func sanitizeGeminiContent(text string) string {
 	cleaned = schemaEchoRegex.ReplaceAllString(cleaned, "")
 	cleaned = toolResultOutputRegex.ReplaceAllString(cleaned, "")
 	cleaned = subagentTagRegex.ReplaceAllString(cleaned, "")
+	// Clean upstream disclaimers / refusals
+	cleaned = upstreamDisclaimerRegex.ReplaceAllString(cleaned, "")
 	// Normalize excessive newlines
 	cleaned = multiNewlineRegex.ReplaceAllString(cleaned, "\n\n")
 	cleaned = strings.TrimSpace(cleaned)

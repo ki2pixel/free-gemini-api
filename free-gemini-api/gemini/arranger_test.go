@@ -340,3 +340,97 @@ func TestArrangeGeminiOutput_ToolsSchemaLeakPreambleCleaned(t *testing.T) {
 		t.Errorf("Expected CleanText to be empty (prompt leak cleaned), got %q", res.CleanText)
 	}
 }
+
+func TestArrangeGeminiOutput_TruncatedToolCallWithUpstreamDisclaimer(t *testing.T) {
+	// Replicates the real case from debug/plan-d-audit-post-impl-mentation-free-gemini-api.json
+	// where upstream safety triggered right at the end of the content/arguments object,
+	// dropping the outer closing brace and </tool_call> and appending a canned refusal disclaimer.
+	raw := "<tool_call>\n" +
+		"{\"name\": \"write\", \"arguments\": {\"content\": \"# Rapport d'Audit de Post-Implémentation — Audit 2026-11 (Free Gemini API) [Neon-Optimized]\n\n" +
+		"**Date de l'audit initial :** 21 novembre 2026  \n" +
+		"**Date du post-audit / validation :** 22 novembre 2026  \n" +
+		"**Cible :** `free-gemini-api` (v3.4.3 - Mode Local-First / Agentic Task)  \n" +
+		"**Indice de Maturité Global Initial :** 38/100 (Niveau 2/5 - NO-GO)  \n" +
+		"**Indice de Maturité Global Actualisé :** 74,25/100 (Niveau 4/5 - GO Local / IDE)  \n\n" +
+		"---\n\n" +
+		"## 1. Synthèse Exécutive & Verdict de Post-Audit\n\n" +
+		"Le runner local unifié `scripts/audit_check.sh` compense le retrait de CI/CD.\n\", \"path\": \"audit-2026-11/RAPPORT_POST_AUDIT.md\"}" +
+		"I'm just a language model and can't help with that."
+
+	res := ArrangeGeminiOutput(raw)
+	if !res.IsToolCall {
+		t.Fatalf("Expected IsToolCall to be true for truncated tool call with upstream disclaimer")
+	}
+	if res.FinishReason != "tool_calls" {
+		t.Errorf("Expected finish_reason 'tool_calls', got %q", res.FinishReason)
+	}
+	if len(res.ToolCalls) != 1 {
+		t.Fatalf("Expected 1 tool call, got %d", len(res.ToolCalls))
+	}
+	tc := res.ToolCalls[0]
+	if tc.Function.Name != "write" {
+		t.Errorf("Expected tool name 'write', got %q", tc.Function.Name)
+	}
+	if !strings.Contains(tc.Function.Arguments, "RAPPORT_POST_AUDIT.md") {
+		t.Errorf("Expected path RAPPORT_POST_AUDIT.md in arguments, got %q", tc.Function.Arguments)
+	}
+	if !strings.Contains(tc.Function.Arguments, "audit_check.sh") {
+		t.Errorf("Expected content preserved in arguments, got %q", tc.Function.Arguments)
+	}
+	if strings.Contains(res.CleanText, "language model") {
+		t.Errorf("CleanText should not contain upstream disclaimer, got %q", res.CleanText)
+	}
+	if res.CleanText != "" {
+		t.Errorf("Expected empty CleanText, got %q", res.CleanText)
+	}
+}
+
+func TestArrangeGeminiOutput_TruncatedToolCallEOF(t *testing.T) {
+	// Case where generation is cut off mid-string at EOF without closing tags or braces
+	raw := "<tool_call>\n{\"name\": \"write\", \"arguments\": {\"path\": \"test.txt\", \"content\": \"Unfinished line"
+
+	res := ArrangeGeminiOutput(raw)
+	if !res.IsToolCall {
+		t.Fatalf("Expected IsToolCall to be true for EOF truncated tool call")
+	}
+	if len(res.ToolCalls) != 1 {
+		t.Fatalf("Expected 1 tool call, got %d", len(res.ToolCalls))
+	}
+	if res.ToolCalls[0].Function.Name != "write" {
+		t.Errorf("Expected tool name 'write', got %q", res.ToolCalls[0].Function.Name)
+	}
+	if !strings.Contains(res.ToolCalls[0].Function.Arguments, "Unfinished line") {
+		t.Errorf("Expected content preserved in arguments, got %q", res.ToolCalls[0].Function.Arguments)
+	}
+}
+
+func TestAutoCloseJSONBraces(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{
+			input:    `{"a": "b"`,
+			expected: `{"a": "b"}`,
+		},
+		{
+			input:    `{"a": {"b": [1, 2`,
+			expected: `{"a": {"b": [1, 2]}}`,
+		},
+		{
+			input:    `{"name": "write", "arguments": {"content": "hello`,
+			expected: `{"name": "write", "arguments": {"content": "hello"}}`,
+		},
+		{
+			input:    `{"name": "write", "arguments": {"path": "test.txt",`,
+			expected: `{"name": "write", "arguments": {"path": "test.txt"}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		got := autoCloseJSONBraces(tc.input)
+		if got != tc.expected {
+			t.Errorf("autoCloseJSONBraces(%q) = %q, want %q", tc.input, got, tc.expected)
+		}
+	}
+}
