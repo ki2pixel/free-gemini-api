@@ -480,6 +480,16 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		log.Printf("⚠️ Doom-loop warning for session %q: %s", sessionKey, loopDetail)
 	}
 
+	// Counter-S7 ground truth: when the client replays a tool result that
+	// reports a failure, inject an explicit recovery directive at maximum
+	// recency. This makes it much harder for the model to ignore the failure
+	// and declare a false success on the next turn.
+	if groundTruth := formatRecentToolErrorDirective(nonSystemMessages); groundTruth != "" {
+		RecordGroundTruthDirective()
+		antiLoopDirective += groundTruth
+		log.Printf("🧪 Ground-truth recovery directive injected for session %q", sessionKey)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 

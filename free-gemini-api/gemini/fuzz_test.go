@@ -61,3 +61,14 @@ func FuzzBuildRequestStruct(f *testing.F) {
 		}
 	})
 }
+
+func FuzzHasTruncatedMutationToolCall(f *testing.F) {
+	f.Add(`<tool_call>{"name":"edit","arguments":{"path":"a.txt","oldString":"x","newString":"y"}}</tool_call>`)
+	f.Add("<thought>I will emit a <tool_call> block.</thought>")
+	f.Add(`<tool_call>{"name":"write","arguments":{"path":"a.txt","content":"unterminated`)
+	f.Add("")
+
+	f.Fuzz(func(t *testing.T, raw string) {
+		_ = HasTruncatedMutationToolCall(raw)
+	})
+}

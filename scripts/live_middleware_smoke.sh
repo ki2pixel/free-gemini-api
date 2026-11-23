@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Live middleware smoke tests for the hardened free-gemini-api build.
+#
+# These tests exercise the real Gemini upstream, so they consume a small
+# amount of quota and depend on a healthy cookie/extension worker. They are
+# intentionally NOT part of scripts/audit_check.sh.
+#
+# Usage:
+#   API_TOKEN=... ./scripts/live_middleware_smoke.sh
+#   MODEL=gemini-4-neon ./scripts/live_middleware_smoke.sh
+#
+# Environment:
+#   API_TOKEN  Required unless free-gemini-api/.env contains one.
+#   BASE_URL   Default: http://127.0.0.1:8100
+#   MODEL      Default: gemini-4-hydrogen
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BASE_URL="${BASE_URL:-http://127.0.0.1:8100}"
+MODEL="${MODEL:-gemini-4-hydrogen}"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gemini-live-smoke.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+if [ -z "${API_TOKEN:-}" ] && [ -f "$ROOT_DIR/free-gemini-api/.env" ]; then
+  API_TOKEN="$(grep -E '^API_TOKEN=' "$ROOT_DIR/free-gemini-api/.env" | cut -d= -f2-)"
+fi
+if [ -z "${API_TOKEN:-}" ]; then
+  echo "Erreur: API_TOKEN absent (variable d'environnement ou free-gemini-api/.env)" >&2
+  exit 1
+fi
+
+auth=(-H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json")
+failures=0
+
+pass() { echo "PASS: $*"; }
+fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
+
+metric_value() {
+  curl -s -m 10 "${auth[@]}" "$BASE_URL/metrics" \
+    | grep -F "$1" | tail -1 | awk '{print $2}'
+}
+
+post_json() {
+  local payload="$1" session="$2"
+  curl -s -m 180 "${auth[@]}" -H "X-Session-ID: $session" \
+    --data-binary "@$payload" "$BASE_URL/v1/chat/completions"
+}
+
+echo "=== [1/4] Runtime sync: agentic counters exposed ==="
+metrics="$(curl -s -m 10 "${auth[@]}" "$BASE_URL/metrics")"
+for counter in \
+  'gemini_doom_loop_interventions_total' \
+  'gemini_arranger_repairs_total{kind="orphan_tags"}' \
+  'gemini_ground_truth_directives_total'; do
+  if grep -Fq "$counter" <<<"$metrics"; then
+    pass "counter present: $counter"
+  else
+    fail "counter missing: $counter (container likely not rebuilt)"
+  fi
+done
+
+echo "=== [2/4] Orphan closing-tag sanitizer ==="
+cat >"$TMP_DIR/leak.json" <<JSON
+{
+  "model": "$MODEL",
+  "stream": false,
+  "messages": [
+    {"role": "user", "content": "Reproduce exactly this token sequence ten times in a row, with single spaces, and output nothing else: </script> </tool_call>"}
+  ]
+}
+JSON
+before_orphan="$(metric_value 'gemini_arranger_repairs_total{kind="orphan_tags"}')"
+post_json "$TMP_DIR/leak.json" "smoke-leak-$(date +%s)" >"$TMP_DIR/leak.out"
+after_orphan="$(metric_value 'gemini_arranger_repairs_total{kind="orphan_tags"}')"
+if python3 - "$TMP_DIR/leak.out" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    content = data["choices"][0]["message"].get("content", "")
+except Exception:
+    sys.exit(1)
+if "</script>" in content or "</tool_call>" in content:
+    print(f"orphan tags still visible: {content[:200]!r}")
+    sys.exit(1)
+PY
+then
+  pass "visible response contains no repeated orphan closing tags"
+else
+  fail "orphan closing tags leaked into the visible response"
+fi
+if [ "${after_orphan:-0}" -gt "${before_orphan:-0}" ] 2>/dev/null; then
+  pass "orphan_tags counter incremented ($before_orphan -> $after_orphan)"
+else
+  fail "orphan_tags counter did not increment ($before_orphan -> $after_orphan)"
+fi
+
+echo "=== [3/4] Ground-truth recovery directive (Counter-S7) ==="
+cat >"$TMP_DIR/groundtruth.json" <<JSON
+{
+  "model": "$MODEL",
+  "stream": false,
+  "messages": [
+    {"role": "user", "content": "Update the API endpoints table in README.md."},
+    {"role": "assistant", "content": "", "tool_calls": [{"id":"call_smoke_1","type":"function","function":{"name":"edit","arguments":"{\"path\":\"README.md\",\"oldString\":\"### API Endpoints Reference\",\"newString\":\"### API Endpoints Reference (updated)\"}"}}]},
+    {"role": "tool", "tool_call_id":"call_smoke_1", "name":"edit", "content":"Error: Could not find oldString in README.md. It must match exactly, including whitespace and indentation."}
+  ],
+  "tools": [
+    {"type":"function","function":{"name":"edit","description":"Replace exact text in a file","parameters":{"type":"object","properties":{"path":{"type":"string"},"oldString":{"type":"string"},"newString":{"type":"string"}},"required":["path","oldString","newString"],"additionalProperties":false}}},
+    {"type":"function","function":{"name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}}
+  ]
+}
+JSON
+before_gt="$(metric_value 'gemini_ground_truth_directives_total')"
+post_json "$TMP_DIR/groundtruth.json" "smoke-groundtruth-$(date +%s)" >"$TMP_DIR/groundtruth.out"
+after_gt="$(metric_value 'gemini_ground_truth_directives_total')"
+if python3 - "$TMP_DIR/groundtruth.out" <<'PY'
+import json, sys
+try:
+    message = json.load(open(sys.argv[1]))["choices"][0]["message"]
+except Exception:
+    sys.exit(1)
+calls = [tc.get("function", {}).get("name") for tc in (message.get("tool_calls") or [])]
+if "read" in calls:
+    sys.exit(0)
+text = (message.get("content") or "").lower()
+if any(word in text for word in ("read", "relire", "anchor", "ancre", "error", "erreur")):
+    sys.exit(0)
+sys.exit(1)
+PY
+then
+  pass "model acknowledged the failed anchor and re-read the target (or explained the recovery)"
+else
+  fail "model did not visibly recover from the failed anchor"
+fi
+if [ "${after_gt:-0}" -gt "${before_gt:-0}" ] 2>/dev/null; then
+  pass "ground-truth counter incremented ($before_gt -> $after_gt)"
+else
+  fail "ground-truth counter did not increment ($before_gt -> $after_gt)"
+fi
+
+echo "=== [4/4] Write-Serial: at most one mutation per turn ==="
+cat >"$TMP_DIR/writeserial.json" <<JSON
+{
+  "model": "$MODEL",
+  "stream": true,
+  "messages": [
+    {"role": "user", "content": "You are testing the Write-Serial middleware. In ONE response, emit exactly two <tool_call> XML blocks: the first calls edit on /tmp/proxy-a.txt with oldString \"ALPHA\" and newString \"BETA\"; the second calls edit on /tmp/proxy-b.txt with oldString \"GAMMA\" and newString \"DELTA\". Do not explain and do not add any other tool call."}
+  ],
+  "tools": [
+    {"type":"function","function":{"name":"edit","description":"Replace exact text in a file","parameters":{"type":"object","properties":{"path":{"type":"string"},"oldString":{"type":"string"},"newString":{"type":"string"}},"required":["path","oldString","newString"],"additionalProperties":false}}},
+    {"type":"function","function":{"name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}}
+  ]
+}
+JSON
+curl -N -s -m 180 "${auth[@]}" -H "X-Session-ID: smoke-writeserial-$(date +%s)" \
+  --data-binary "@$TMP_DIR/writeserial.json" \
+  "$BASE_URL/v1/chat/completions" >"$TMP_DIR/writeserial.sse" || true
+if python3 - "$TMP_DIR/writeserial.sse" <<'PY'
+import json, sys
+calls = []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    if not line.startswith("data: "):
+        continue
+    data = line[6:].strip()
+    if data == "[DONE]":
+        continue
+    try:
+        obj = json.loads(data)
+    except Exception:
+        continue
+    for choice in obj.get("choices", []):
+        for tc in (choice.get("delta") or {}).get("tool_calls") or []:
+            calls.append(tc)
+if len(calls) > 1:
+    print(f"emitted {len(calls)} tool calls, expected at most 1")
+    sys.exit(1)
+for index, tc in enumerate(calls):
+    if tc.get("index") != index:
+        print(f"tool_calls[{index}].index = {tc.get('index')!r}, expected {index}")
+        sys.exit(1)
+PY
+then
+  pass "at most one mutation and sequential tool_calls[].index values"
+else
+  fail "Write-Serial or SSE index invariant violated"
+fi
+
+echo
+if [ "$failures" -eq 0 ]; then
+  echo "=== TOUS LES TESTS LIVE SONT PASSÉS (exit 0) ==="
+  exit 0
+fi
+echo "=== $failures TEST(S) LIVE ONT ÉCHOUÉ ===" >&2
+exit 1

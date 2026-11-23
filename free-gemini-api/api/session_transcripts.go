@@ -240,6 +240,13 @@ func isToolRefusalOutput(text string) bool {
 		"no access to local",
 		"no access to the filesystem",
 		"tools are not available",
+		"not available in this environment",
+		"are not available in this environment",
+		"share the current contents",
+		"apply it directly",
+		"so you can apply it",
+		"draft the updated",
+		"i would be happy to draft",
 		"cannot execute shell",
 		"cannot run shell",
 		"cannot access local",
@@ -248,6 +255,27 @@ func isToolRefusalOutput(text string) bool {
 		"0 tool calls remaining",
 		"cannot call tools anymore",
 		"cannot invoke any tools",
+		"i must refuse",
+		"i refuse to",
+		"i cannot comply",
+		"i can't comply",
+		"i will not comply",
+		"unable to comply",
+		"not able to comply",
+		"i must decline",
+		"i decline to",
+		"i won't do that",
+		"i will not do that",
+		"je dois refuser",
+		"je refuse de",
+		"je ne peux pas donner suite",
+		"je ne suis pas en mesure de",
+		"je ne peux pas procéder",
+		"je ne peux pas effectuer",
+		"je ne peux pas modifier",
+		"je ne peux pas créer",
+		"je ne peux pas écrire",
+		"je ne peux pas exécuter",
 		"which you can save to",
 		"which you can save as",
 		"save this to",
@@ -270,6 +298,87 @@ func isToolRefusalOutput(text string) bool {
 func isSchemaInvalidOutput(text string, tools []map[string]any) bool {
 	invalid, _ := gemini.HasInvalidSchemaToolCall(text, tools)
 	return invalid
+}
+
+// recentToolErrorMarkers are the failure shapes a coding host returns when a
+// tool call is malformed or its anchor cannot be found. They are deliberately
+// specific: ordinary tool output (test logs, source code) may contain words
+// like "error", but only these phrases indicate an unresolved tool-call
+// failure that the model must acknowledge before claiming completion.
+var recentToolErrorMarkers = []string{
+	"could not find oldstring",
+	"could not find old_string",
+	"oldstring must not be empty",
+	"old_string must not be empty",
+	"invalid arguments for tool",
+	"arguments provided:",
+	"tool execution failed",
+	"tool.execution",
+	"failed to apply patch",
+	"patch failed",
+	"schema validation failed",
+	"no such file or directory",
+	"exit status 1",
+	"exit code 1",
+	"command failed",
+}
+
+// formatRecentToolErrorDirective inspects the trailing block of tool results
+// (the results of the assistant's most recent tool calls) and returns a
+// maximum-recency recovery directive when any of them reports an error. It is
+// the deterministic counter to the "record-world split" / S7 bias: the model
+// cannot silently convert a failed tool call into a success report on the next
+// turn without seeing this reminder in its prompt.
+func formatRecentToolErrorDirective(messages []OpenAIChatMessage) string {
+	var snippets []string
+	seen := map[string]struct{}{}
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		if role == "system" {
+			continue
+		}
+		if role != "tool" {
+			break
+		}
+		content := strings.TrimSpace(FlattenContent(message.Content))
+		if content == "" {
+			continue
+		}
+		lower := strings.ToLower(content)
+		for _, marker := range recentToolErrorMarkers {
+			if !strings.Contains(lower, marker) {
+				continue
+			}
+			snippet := compactToolErrorSnippet(content)
+			if _, exists := seen[snippet]; !exists {
+				seen[snippet] = struct{}{}
+				snippets = append(snippets, snippet)
+			}
+			break
+		}
+		if len(snippets) >= 3 {
+			break
+		}
+	}
+	if len(snippets) == 0 {
+		return ""
+	}
+	return "\nUser: [GROUND-TRUTH DIRECTIVE: The most recent tool result(s) report an error: " +
+		strings.Join(snippets, " | ") +
+		". Do not claim completion or success for the affected files. Re-read the target with the read tool, correct the exact arguments (for edit, oldString must be a non-empty exact verbatim substring), retry the mutation, and only report success once the tool result confirms it.]\n"
+}
+
+// compactToolErrorSnippet collapses a tool result to one short line so the
+// recovery directive stays inside a bounded prompt budget.
+func compactToolErrorSnippet(content string) string {
+	compact := strings.Join(strings.Fields(content), " ")
+	runes := []rune(compact)
+	const maxRunes = 220
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "..."
+	}
+	return compact
 }
 
 // isUnusableModelOutput reports whether the model output is empty, one of

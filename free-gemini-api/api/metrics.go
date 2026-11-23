@@ -30,6 +30,7 @@ var (
 	arrangerRejections    sync.Map // reason string -> *atomic.Uint64
 	rateLimitDrops        atomic.Uint64
 	refusalRetries        atomic.Uint64
+	groundTruthDirectives atomic.Uint64
 )
 
 // RecordHTTPRequest increments the HTTP status counter exposed on /metrics.
@@ -60,9 +61,15 @@ func RecordDoomLoopIntervention(signal string) {
 }
 
 // RecordArrangerRepair increments the arranger repair counter for a kind
-// ("control_chars", "brace_envelope" or "disclaimer").
+// ("control_chars", "brace_envelope", "disclaimer" or "orphan_tags").
 func RecordArrangerRepair(kind string) {
 	incrementCounter(&arrangerRepairs, normalizeMetricLabel(kind), 1)
+}
+
+// RecordGroundTruthDirective counts recovery directives injected after the
+// most recent tool result block reported an error.
+func RecordGroundTruthDirective() {
+	groundTruthDirectives.Add(1)
 }
 
 // RecordArrangerRejection increments the arranger rejection counter for a
@@ -191,7 +198,7 @@ func writeAgenticMetrics(b *strings.Builder) {
 		"Tool-call repairs applied by the output arranger.",
 		"kind",
 		&arrangerRepairs,
-		[]string{"control_chars", "brace_envelope", "disclaimer"},
+		[]string{"control_chars", "brace_envelope", "disclaimer", "orphan_tags"},
 	)
 	writeLabeledCounter(
 		b,
@@ -205,6 +212,10 @@ func writeAgenticMetrics(b *strings.Builder) {
 	b.WriteString("# HELP gemini_refusal_retries_total Transparent conversation resets triggered by a false tool refusal.\n")
 	b.WriteString("# TYPE gemini_refusal_retries_total counter\n")
 	fmt.Fprintf(b, "gemini_refusal_retries_total %d\n", refusalRetries.Load())
+
+	b.WriteString("# HELP gemini_ground_truth_directives_total Recovery directives injected after a recent tool result reported an error.\n")
+	b.WriteString("# TYPE gemini_ground_truth_directives_total counter\n")
+	fmt.Fprintf(b, "gemini_ground_truth_directives_total %d\n", groundTruthDirectives.Load())
 }
 
 // writeLabeledCounter renders a counter family, keeping the known label values

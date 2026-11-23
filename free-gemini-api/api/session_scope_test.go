@@ -67,6 +67,9 @@ func TestIsToolRefusalOutput(t *testing.T) {
 		"Here is the markdown content, which you can save to /home/kidpixel/AGENTS.md:",
 		"Vous pouvez enregistrer ce fichier manuellement.",
 		"I have no access to the filesystem in this environment.",
+		"I must refuse this request.",
+		"Je ne peux pas modifier ce fichier.",
+		"It appears that the local file tools (`read` and `edit`) are not available in this environment. I would be happy to draft the updated Markdown table so you can apply it directly.",
 	}
 	for _, text := range refusals {
 		if !isToolRefusalOutput(text) {

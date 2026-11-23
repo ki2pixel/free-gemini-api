@@ -24,7 +24,7 @@ func TestFormatToolsInstruction_PositiveContinuityAndCadence(t *testing.T) {
 			t.Errorf("tool instructions must not contain %q", forbidden)
 		}
 	}
-	for _, required := range []string{"Read-Parallel", "Write-Serial", "Metadata-First", "available on every turn"} {
+	for _, required := range []string{"Read-Parallel", "Write-Serial", "Metadata-First", "available on every turn", "Exact-anchor rule", "Poka-Yoke", "Counter-S7", "exact verbatim substring"} {
 		if !strings.Contains(out, required) {
 			t.Errorf("tool instructions must contain %q", required)
 		}
@@ -464,6 +464,35 @@ func TestArrangeGeminiOutput_CompleteWriteQuotingDisclaimerAccepted(t *testing.T
 	}
 }
 
+func TestHasTruncatedMutationToolCall_TagMentionedBeforeObjectDoesNotPanic(t *testing.T) {
+	// A thought block may mention `<tool_call>` before the real call. The
+	// truncation scanner must search for the next tag after the current
+	// object's opening brace, otherwise it can compute limit < braceIdx and
+	// panic with "slice bounds out of range".
+	raw := "<thought>I will emit a <tool_call> block now.</thought>\n" +
+		"<tool_call>{\"name\":\"edit\",\"arguments\":{\"path\":\"a.txt\",\"oldString\":\"x\",\"newString\":\"y\"}}</tool_call>"
+
+	if HasTruncatedMutationToolCall(raw) {
+		t.Fatal("a complete edit preceded by a <tool_call> mention must not be classified as truncated")
+	}
+}
+
+func TestHasTruncatedMutationToolCall_CompleteWriteQuotingToolCallTagAccepted(t *testing.T) {
+	raw := `<tool_call>{"name":"write","arguments":{"path":"docs.md","content":"Example: <tool_call>{\"name\":\"read\"}</tool_call>"}}</tool_call>`
+	if HasTruncatedMutationToolCall(raw) {
+		t.Fatal("a complete write whose content quotes a tool_call tag must not be classified as truncated")
+	}
+}
+
+func TestHasTruncatedMutationToolCall_ConcatenatedCallsStillDetected(t *testing.T) {
+	raw := `<tool_call>{"name":"edit","arguments":{"path":"a.txt","oldString":"x","newString":"y"}}` +
+		`<tool_call>{"name":"edit","arguments":{"path":"b.txt","oldString":"unterminated`
+
+	if !HasTruncatedMutationToolCall(raw) {
+		t.Fatal("a truncated mutation after a complete call must still be detected")
+	}
+}
+
 func TestArrangeGeminiOutput_TruncatedContentFirstWriteRejected(t *testing.T) {
 	// Content-first payload inside a markdown fence: the tool name is never
 	// emitted before the cutoff, so the guard must fall back to the presence
@@ -546,12 +575,53 @@ func TestArrangeGeminiOutput_ReportsRepairs(t *testing.T) {
 			raw:  `<tool_call>{"name":"list","arguments":{"path":"."}}</tool_call> I'm just a language model and can't help with that.`,
 			want: "disclaimer",
 		},
+		{
+			name: "orphan tags",
+			raw:  "Done.\n" + strings.Repeat("</script> </tool_call> ", 3),
+			want: "orphan_tags",
+		},
 	}
 	for _, tc := range cases {
 		res := ArrangeGeminiOutput(tc.raw)
 		if !hasRepair(res, tc.want) {
 			t.Errorf("%s: repairs = %v, want %q", tc.name, res.Repairs, tc.want)
 		}
+	}
+}
+
+func TestSanitizeGeminiContent_RemovesRepeatedOrphanClosingTags(t *testing.T) {
+	leak := strings.Repeat("</script> </tool_call> ", 16)
+	res := ArrangeGeminiOutput("Documentation complete.\n" + leak + "\nEnd.")
+	if strings.Contains(res.CleanText, "</script>") || strings.Contains(res.CleanText, "</tool_call>") {
+		t.Fatalf("orphan closing tags were not removed: %q", res.CleanText)
+	}
+	if !strings.Contains(res.CleanText, "Documentation complete.") || !strings.Contains(res.CleanText, "End.") {
+		t.Fatalf("sanitizer removed legitimate text: %q", res.CleanText)
+	}
+	for _, kind := range res.Repairs {
+		if kind == "orphan_tags" {
+			return
+		}
+	}
+	t.Fatalf("repairs = %v, want orphan_tags", res.Repairs)
+}
+
+func TestSanitizeGeminiContent_PreservesPairedClosingTags(t *testing.T) {
+	raw := "Example:\n<script>console.log('ok')</script>\nDone."
+	res := ArrangeGeminiOutput(raw)
+	if !strings.Contains(res.CleanText, "</script>") {
+		t.Fatalf("a matched closing tag must be preserved, got %q", res.CleanText)
+	}
+	if !strings.Contains(res.CleanText, "<script>") {
+		t.Fatalf("a matched opening tag must be preserved, got %q", res.CleanText)
+	}
+}
+
+func TestSanitizeGeminiContent_PreservesSingleUnmatchedClosingTag(t *testing.T) {
+	raw := "Inline documentation mentions </script> as a marker."
+	res := ArrangeGeminiOutput(raw)
+	if !strings.Contains(res.CleanText, "</script>") {
+		t.Fatalf("a single unmatched closing tag must be preserved, got %q", res.CleanText)
 	}
 }
 
@@ -701,14 +771,14 @@ func TestThrottleMutatingToolCalls_ParallelReadsWithOneWrite(t *testing.T) {
 		{Function: ToolCallFunction{Name: "list"}},
 	}
 	out := ThrottleMutatingToolCalls(calls)
-	if len(out) != 5 {
-		t.Fatalf("expected the batch to stop at the second mutation, got %d calls", len(out))
+	if len(out) != 4 {
+		t.Fatalf("expected the batch to stop immediately after the first mutation, got %d calls", len(out))
 	}
 	names := make([]string, len(out))
 	for i, tc := range out {
 		names[i] = tc.Function.Name
 	}
-	want := []string{"read", "grep", "glob", "write", "read"}
+	want := []string{"read", "grep", "glob", "write"}
 	for i := range want {
 		if names[i] != want[i] {
 			t.Fatalf("throttled names = %v, want %v", names, want)

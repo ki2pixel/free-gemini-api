@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.8] - 2026-11-23
+
+### Added
+- **Ground-Truth Recovery Directive (`api/session_transcripts.go`, `api/chat_handler.go`)**:
+  - When the client replays a trailing block of tool results containing a known failure shape (`Could not find oldString`, `oldString must not be empty`, `Invalid arguments for tool`, failed shell exit codes, etc.), the proxy injects a maximum-recency `[GROUND-TRUTH DIRECTIVE: ...]` reminder before the next assistant turn.
+  - The directive forbids claiming completion for affected files, requires a fresh `read`, and requires an exact non-empty anchor before retrying. This is a deterministic counter to the S7 “record-world split” self-reporting bias.
+  - Added `gemini_ground_truth_directives_total` to `/metrics`.
+- **Orphan Closing-Tag Sanitizer (`gemini/arranger.go`)**:
+  - `stripRepeatedOrphanClosingTags` removes repeated unmatched `</script>`, `</tool_call>` and `</tools>` sequences produced by autoregressive tag leakage, while preserving matched tags and single unmatched closing tags in legitimate documentation/code samples.
+  - Exposed as `gemini_arranger_repairs_total{kind="orphan_tags"}`.
+- **Semantic Tool-Argument Guard (`gemini/schema_validator.go`)**:
+  - JSON Schema validation now rejects blank `path`/`file_path` values and empty or whitespace-only edit anchors (`oldString`, `old_string`, `oldText`, `old_text`) before a call can reach the host. The abstract retry directive names the offending field.
+
+### Fixed
+- **Truncation Scanner Panic (`gemini/arranger.go`)**:
+  - `hasTruncatedMutationTagged` no longer computes a slice bound before the JSON object's opening brace when a `<tool_call>` mention appears earlier in the reasoning/preamble. The previous logic could panic with `slice bounds out of range [N:M]` and crash the whole proxy on a tool-bearing request.
+  - The scanner now checks for a complete, valid JSON object before searching for closing/next tags, so a write whose content legitimately quotes `<tool_call>` or `</tool_call>` is not misclassified as a mid-value truncation.
+  - Added `FuzzHasTruncatedMutationToolCall` plus targeted regression tests for a tag mention before the object, a quoted tag inside a complete object, and concatenated calls.
+- **False Refusal Detection (`api/session_transcripts.go`)**:
+  - Extended `isToolRefusalOutput` with English and French refusal shapes (`I must refuse`, `I cannot comply`, `Je ne peux pas modifier`, `tools are not available in this environment`, `so you can apply it directly`, etc.) so a false refusal is retried with the abstract-error directive instead of being returned to the client as a valid `stop` response.
+
+### Changed
+- **Write-Serial Throttling (`gemini/arranger.go`)**:
+  - `ThrottleMutatingToolCalls` now stops immediately after the first mutation instead of allowing trailing read-only calls. The host must execute the mutation and return its result before any further call, including a verification read.
+- **Tool Instructions (`FormatToolsInstruction`)**:
+  - Added the Poka-Yoke exact-anchor rule (verbatim substring from a recent `read`, no invented headings, no markdown links unless present in the file, no prompt/prose bleed) and the Counter-S7 evidence-based completion rule.
+  - The Write-Serial rule now explicitly requires ending the turn after the single mutation.
+- **Regression Tests**:
+  - `gemini/arranger_test.go`: strict mutation cutoff, orphan-tag removal, preservation of matched/single tags, and new prompt rules.
+  - `gemini/schema_validator_test.go`: empty/whitespace anchors, blank paths and `HasInvalidSchemaToolCall` coverage.
+  - `api/ground_truth_test.go`: anchor failures, empty anchors, resolved older errors, trailing system notices, deduplication/capping and metric exposition.
+
+---
+
 ## [3.4.7] - 2026-11-23
 
 ### Added

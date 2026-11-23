@@ -53,6 +53,42 @@ func (c *CompiledToolCatalog) ValidateCall(name, argsJSON string) (bool, string)
 	if err := schema.Validate(args); err != nil {
 		return false, describeSchemaViolation(err)
 	}
+	if argsMap, ok := args.(map[string]any); ok {
+		if valid, detail := validateToolArgumentSemantics(name, argsMap); !valid {
+			return false, detail
+		}
+	}
+	return true, ""
+}
+
+// validateToolArgumentSemantics enforces argument invariants that JSON Schema
+// cannot express portably: a path must not be blank, and an edit must carry a
+// non-empty anchor. An empty `oldString` is especially dangerous because it
+// passes a `type: string` schema while the host cannot locate any text to
+// replace (and tools may interpret it as a whole-file overwrite).
+func validateToolArgumentSemantics(name string, args map[string]any) (bool, string) {
+	for _, key := range []string{"path", "file_path", "filePath", "filepath"} {
+		if value, ok := args[key]; ok {
+			text, isString := value.(string)
+			if !isString || strings.TrimSpace(text) == "" {
+				return false, fmt.Sprintf("'%s' must not be empty", key)
+			}
+		}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "edit", "multiedit", "patch", "apply_patch", "replace":
+		for _, key := range []string{"oldString", "old_string", "oldText", "old_text"} {
+			value, ok := args[key]
+			if !ok {
+				continue
+			}
+			text, isString := value.(string)
+			if !isString || strings.TrimSpace(text) == "" {
+				return false, fmt.Sprintf("'%s' must not be empty; copy the exact text to replace, or use write to create/overwrite the file", key)
+			}
+		}
+	}
 	return true, ""
 }
 

@@ -102,6 +102,66 @@ func TestSchemaValidator_ValidCalls(t *testing.T) {
 	}
 }
 
+func TestSchemaValidator_EmptyOldStringRejected(t *testing.T) {
+	catalog, err := DefaultToolSchemaRegistry.CompileTools(openCodeToolsFixture())
+	if err != nil {
+		t.Fatalf("CompileTools returned error: %v", err)
+	}
+	for _, args := range []string{
+		`{"path":"a.txt","old_string":"","new_string":"b"}`,
+		`{"path":"a.txt","old_string":"   \n\t","new_string":"b"}`,
+	} {
+		ok, detail := catalog.ValidateCall("edit", args)
+		if ok {
+			t.Fatalf("expected an edit with an empty anchor to be rejected: %s", args)
+		}
+		if !strings.Contains(detail, "must not be empty") {
+			t.Errorf("detail %q does not explain the empty anchor", detail)
+		}
+	}
+}
+
+func TestValidateToolArgumentSemantics_CamelCaseAnchors(t *testing.T) {
+	for _, args := range []map[string]any{
+		{"path": "a.txt", "oldString": "", "newString": "b"},
+		{"path": "a.txt", "old_string": "x", "oldString": "   ", "newString": "b"},
+		{"path": "a.txt", "oldText": "\n\t", "newString": "b"},
+	} {
+		ok, detail := validateToolArgumentSemantics("edit", args)
+		if ok {
+			t.Fatalf("expected an empty edit anchor to be rejected: %#v", args)
+		}
+		if !strings.Contains(detail, "must not be empty") {
+			t.Errorf("detail %q does not explain the empty anchor", detail)
+		}
+	}
+}
+
+func TestSchemaValidator_EmptyPathRejected(t *testing.T) {
+	catalog, err := DefaultToolSchemaRegistry.CompileTools(openCodeToolsFixture())
+	if err != nil {
+		t.Fatalf("CompileTools returned error: %v", err)
+	}
+	ok, detail := catalog.ValidateCall("read", `{"path":"   "}`)
+	if ok {
+		t.Fatal("expected a read with a blank path to be rejected")
+	}
+	if !strings.Contains(detail, "'path' must not be empty") {
+		t.Errorf("detail %q does not explain the blank path", detail)
+	}
+}
+
+func TestHasInvalidSchemaToolCall_EmptyOldString(t *testing.T) {
+	raw := `<tool_call>{"name":"edit","arguments":{"path":"a.txt","old_string":"","new_string":"b"}}</tool_call>`
+	invalid, detail := HasInvalidSchemaToolCall(raw, openCodeToolsFixture())
+	if !invalid {
+		t.Fatal("expected an empty old_string to be reported as invalid")
+	}
+	if !strings.Contains(detail, "must not be empty") {
+		t.Errorf("detail %q does not explain the empty anchor", detail)
+	}
+}
+
 func TestSchemaValidator_MissingRequiredProperty(t *testing.T) {
 	catalog, err := DefaultToolSchemaRegistry.CompileTools(openCodeToolsFixture())
 	if err != nil {

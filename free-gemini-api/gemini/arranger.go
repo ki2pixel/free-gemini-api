@@ -103,12 +103,14 @@ func FormatToolsInstruction(tools []map[string]any) string {
 	sb.WriteString("<tool_call>\n")
 	sb.WriteString(`{"name": "<tool_name>", "arguments": {<json_arguments>}}` + "\n")
 	sb.WriteString("</tool_call>\n")
-	sb.WriteString("3. Read-Parallel / Write-Serial cadence: batch 2 to 4 read-only tool calls (read, glob, grep, list) in parallel when inspecting; serialize mutations strictly by emitting at most one file-writing tool call (write, edit, or a shell command that changes files) per turn so each change can be verified before the next.\n")
+	sb.WriteString("3. Read-Parallel / Write-Serial cadence: batch 2 to 4 read-only tool calls (read, glob, grep, list) in parallel when inspecting; serialize mutations strictly by emitting at most one file-writing tool call (write, edit, or a shell command that changes files) per turn so each change can be verified before the next. After that single mutation, stop the turn immediately and wait for the host's tool result before issuing any further call, including read-only verification calls.\n")
 	sb.WriteString("4. Metadata-First arguments: place `path` first in every file tool argument object, before `content`, `old_string`, `new_string`, or `diff`, and keep large payloads last. Ensure the \"arguments\" object strictly follows the schema parameters. When passing multi-line file content or code snippets in string arguments, escape all newlines as \\n and escape all internal double quotes as \\\" so the JSON remains strictly valid.\n")
 	sb.WriteString("5. The host environment executes each `<tool_call>` directly and returns the output to you. Every tool listed in [AVAILABLE TOOLS] remains active and executable for the entire session.\n")
 	sb.WriteString("6. Invoke tools exclusively through `<tool_call>` XML blocks; the [AVAILABLE TOOLS] catalog is internal context, not response content.\n")
 	sb.WriteString("7. Tool access is continuous and deterministic: every tool listed in [AVAILABLE TOOLS] is available on every turn, and each `<tool_call>` you emit is executed by the host environment. Continue invoking tools turn after turn until the task is complete.\n")
-	sb.WriteString("8. When asked to create or update a file (such as AGENTS.md), invoke the write/edit tool directly with a `<tool_call>` block; the host executes it and returns the result.\n\n")
+	sb.WriteString("8. When asked to create or update a file (such as AGENTS.md), invoke the write/edit tool directly with a `<tool_call>` block; the host executes it and returns the result.\n")
+	sb.WriteString("9. Exact-anchor rule (Poka-Yoke): when using `edit`, `oldString` (or `old_string`) MUST be a non-empty exact verbatim substring copied from a recent `read` output. Never invent a section heading, never wrap the anchor in a markdown link unless the file itself contains that exact markdown link, and never mix conversational prose or prompt text into the arguments. If the anchor is not known byte-for-byte, call `read` again first. If the host reports that the anchor was not found or that `oldString` is empty, re-read the file and replace the anchor with a fresh exact substring; never repeat the same failing anchor.\n")
+	sb.WriteString("10. Evidence-based completion (Counter-S7): a tool result that reports an error is not a success. Explicitly acknowledge every failed tool call, fix it, and verify the result before continuing. Never claim that a file was updated, or that the task is 100% complete, unless the corresponding tool result confirms the mutation succeeded. When errors remain, list them and continue working instead of writing a success report.\n\n")
 	sb.WriteString("[TOOL CALL EXAMPLE]\n")
 	sb.WriteString("User: Peux-tu inspecter main.rs et vérifier les tests ?\n")
 	sb.WriteString("Assistant:\n")
@@ -546,7 +548,7 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 			res.ToolCalls = taggedCalls
 			res.IsToolCall = true
 			res.FinishReason = "tool_calls"
-			res.CleanText = sanitizeGeminiContent(cleanText)
+			res.CleanText = sanitizeGeminiContentWithRepairs(res, cleanText)
 			noteBraceEnvelopeRepair(res, raw)
 			return res
 		}
@@ -594,7 +596,7 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 	}
 
 	// 4. Clean up any raw internal artifacts or trailing disclaimers
-	res.CleanText = sanitizeGeminiContent(text)
+	res.CleanText = sanitizeGeminiContentWithRepairs(res, text)
 	return res
 }
 
@@ -797,22 +799,20 @@ func acceptsToolCall(catalog *CompiledToolCatalog, tc ToolCall) bool {
 }
 
 // ThrottleMutatingToolCalls enforces the Write-Serial cadence: every read-only
-// call is preserved, at most one mutating call is allowed, and the batch is
-// truncated at the first subsequent mutation.
+// call preceding the first mutation is preserved, exactly one mutating call is
+// allowed, and the batch ends immediately after that mutation. Trailing calls
+// are dropped so the host must execute the mutation and return its result
+// before the model can request anything else (including a verification read).
 func ThrottleMutatingToolCalls(calls []ToolCall) []ToolCall {
 	if len(calls) == 0 {
 		return calls
 	}
 	out := make([]ToolCall, 0, len(calls))
-	mutationSeen := false
 	for _, tc := range calls {
-		if isMutatingTool(tc.Function.Name) {
-			if mutationSeen {
-				break
-			}
-			mutationSeen = true
-		}
 		out = append(out, tc)
+		if isMutatingTool(tc.Function.Name) {
+			break
+		}
 	}
 	return out
 }
@@ -1263,15 +1263,31 @@ func hasTruncatedMutationTagged(raw string) bool {
 		}
 		braceIdx := absIdx + len(tag) + braceOffset
 
+		// A complete, syntactically valid object at braceIdx is never a
+		// truncation, even when its string values contain tag-like text
+		// (`<tool_call>`, `</tool_call>`) or a disclaimer phrase. Check this
+		// before searching for closing/next tags: those searches can match a
+		// tag inside the current JSON string and produce a false truncation.
+		if objStr, ok := balancedJSONObjectAt(raw, braceIdx); ok && json.Valid([]byte(objStr)) {
+			pos = braceIdx + len(objStr)
+			continue
+		}
+
 		limit := len(raw)
 		if closeIdx := strings.Index(raw[braceIdx:], "</tool_call>"); closeIdx != -1 {
 			limit = braceIdx + closeIdx
 		}
-		if nextTagIdx := strings.Index(raw[absIdx+len(tag):], tag); nextTagIdx != -1 {
-			nextAbs := absIdx + len(tag) + nextTagIdx
+		// Look for a following call only after the current object's opening
+		// brace. Searching before it can match a `<tool_call>` mention inside
+		// the preamble/reasoning and produce limit < braceIdx (slice panic).
+		if nextTagIdx := strings.Index(raw[braceIdx:], tag); nextTagIdx != -1 {
+			nextAbs := braceIdx + nextTagIdx
 			if nextAbs < limit {
 				limit = nextAbs
 			}
+		}
+		if limit < braceIdx {
+			limit = braceIdx
 		}
 
 		candidate := strings.TrimSpace(raw[braceIdx:limit])
@@ -1376,7 +1392,68 @@ var (
 	toolResultOutputRegex   = regexp.MustCompile(`(?s)<output>[\s\S]*?</output>`)
 	subagentTagRegex        = regexp.MustCompile(`(?s)<subagent\b[^>]*/>|<subagent\b[^>]*>[\s\S]*?</subagent>`)
 	upstreamDisclaimerRegex = regexp.MustCompile(`(?i)(?:^|\n|\.\s*)\s*(?:I'm just a language model|I am just a language model|I'm a language model|I am a language model|can't help with that|cannot help with that|I can't assist with that|I cannot assist with that|I'm unable to assist with that|I am unable to assist with that|I'm unable to help with that|I am unable to help with that|As an AI language model|As a large language model|I apologize, but I (?:can't|cannot)|I'm sorry, but I (?:can't|cannot))[\s\S]*`)
+
+	scriptOpenTagRegex      = regexp.MustCompile(`(?i)<script\b[^>]*>`)
+	scriptCloseTagRegex     = regexp.MustCompile(`(?i)</script\s*>`)
+	toolCallOpenTagRegex    = regexp.MustCompile(`(?i)<tool_call\b[^>]*>`)
+	toolCallCloseTagRegex   = regexp.MustCompile(`(?i)</tool_call\s*>`)
+	toolsOpenTagRegex       = regexp.MustCompile(`(?i)<tools\b[^>]*>`)
+	toolsCloseTagRegex      = regexp.MustCompile(`(?i)</tools\s*>`)
+	whitespaceOnlyLineRegex = regexp.MustCompile(`(?m)^[ \t]+$`)
 )
+
+// sanitizeGeminiContentWithRepairs cleans visible model text and records
+// whether repeated orphan closing tags (an autoregressive surface-tag leak)
+// were removed.
+func sanitizeGeminiContentWithRepairs(res *ArrangedOutput, text string) string {
+	cleaned, removedOrphanTags := stripRepeatedOrphanClosingTags(text)
+	if removedOrphanTags && res != nil {
+		res.Repairs = append(res.Repairs, "orphan_tags")
+	}
+	return sanitizeGeminiContent(cleaned)
+}
+
+// stripRepeatedOrphanClosingTags removes repeated closing tags that have no
+// matching opening tag. Gemini occasionally degenerates into a loop of
+// `</script> </tool_call>` (or similar) tokens on long generations. A single
+// unmatched closing tag is left untouched so legitimate code/documentation
+// snippets are preserved; two or more unmatched closes are treated as a leak.
+func stripRepeatedOrphanClosingTags(text string) (string, bool) {
+	cleaned := text
+	removedAny := false
+	pairs := []struct {
+		open  *regexp.Regexp
+		close *regexp.Regexp
+	}{
+		{scriptOpenTagRegex, scriptCloseTagRegex},
+		{toolCallOpenTagRegex, toolCallCloseTagRegex},
+		{toolsOpenTagRegex, toolsCloseTagRegex},
+	}
+	for _, pair := range pairs {
+		opens := len(pair.open.FindAllStringIndex(cleaned, -1))
+		closes := len(pair.close.FindAllStringIndex(cleaned, -1))
+		if closes < 2 || closes <= opens {
+			continue
+		}
+		keep := opens
+		cleaned = pair.close.ReplaceAllStringFunc(cleaned, func(match string) string {
+			if keep > 0 {
+				keep--
+				return match
+			}
+			removedAny = true
+			return ""
+		})
+	}
+	if !removedAny {
+		return text, false
+	}
+	// A leaked tag sequence often occupies its own line. Remove the
+	// whitespace-only lines and excess blank lines left behind.
+	cleaned = whitespaceOnlyLineRegex.ReplaceAllString(cleaned, "")
+	cleaned = multiNewlineRegex.ReplaceAllString(cleaned, "\n\n")
+	return cleaned, true
+}
 
 func sanitizeGeminiContent(text string) string {
 	cleaned := text
