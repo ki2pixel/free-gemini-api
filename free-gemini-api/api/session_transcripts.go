@@ -200,8 +200,13 @@ func invalidateSessionTurn(sessionKey string) {
 // isToolRefusalOutput detects if the model generated a canned disclaimer or
 // refusal claiming tools or terminal/filesystem access are unavailable,
 // instead of executing requested tools.
-func isToolRefusalOutput(text string) bool {
-	if strings.Contains(text, "<tool_call>") || strings.Contains(text, "</tool_call>") {
+//
+// Only a tool call that survives the arranger counts as evidence that the model
+// acted. A bare textual mention of <tool_call> is not a tool call: replayed
+// project instructions (for example AGENTS.md) legitimately contain the tag in
+// prose, and a refusal that quotes that text must still be detected.
+func isToolRefusalOutput(text string, tools []map[string]any) bool {
+	if gemini.ArrangeGeminiOutputWithTools(text, tools).IsToolCall {
 		return false
 	}
 	lower := strings.ToLower(text)
@@ -255,6 +260,7 @@ func isToolRefusalOutput(text string) bool {
 		"0 tool calls remaining",
 		"cannot call tools anymore",
 		"cannot invoke any tools",
+		"hard time fulfilling your request",
 		"i must refuse",
 		"i refuse to",
 		"i cannot comply",
@@ -270,6 +276,8 @@ func isToolRefusalOutput(text string) bool {
 		"je refuse de",
 		"je ne peux pas donner suite",
 		"je ne suis pas en mesure de",
+		"je ne peux pas répondre",
+		"ne peux pas répondre",
 		"je ne peux pas procéder",
 		"je ne peux pas effectuer",
 		"je ne peux pas modifier",
@@ -301,6 +309,37 @@ func isToolRefusalOutput(text string) bool {
 		"save it as",
 	}
 	for _, snip := range refusalSnippets {
+		if strings.Contains(lower, snip) {
+			return true
+		}
+	}
+	return false
+}
+
+// pseudoReportSnippets are prose markers of an intermediate progress update or
+// a premature completion summary. On a request with tools they replace the
+// next tool call and leave the task unfinished, so they must be retried with a
+// corrective directive instead of being returned as a valid stop.
+var pseudoReportSnippets = []string{
+	"a été initié",
+	"ont été mis à jour avec succès",
+	"rapport d'exécution",
+	"composants clés",
+}
+
+// isPseudoProgressReport reports whether a tool-bearing turn produced only a
+// conversational progress/completion summary instead of a tool call. An
+// arranger-validated tool call always wins: a preamble that happens to contain
+// one of the markers next to a real tool call is not a pseudo-report.
+func isPseudoProgressReport(text string, tools []map[string]any) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	if gemini.ArrangeGeminiOutputWithTools(text, tools).IsToolCall {
+		return false
+	}
+	lower := strings.ToLower(text)
+	for _, snip := range pseudoReportSnippets {
 		if strings.Contains(lower, snip) {
 			return true
 		}
@@ -450,10 +489,10 @@ func formatSystemNotice(content string) string {
 }
 
 // isUnusableModelOutput reports whether the model output is empty, one of
-// gemini.google.com's canned failure strings, or a tool refusal when tools were provided.
-// Such turns are not committed, so the next request starts a fresh upstream conversation
-// with a full replay.
-func isUnusableModelOutput(text string, hasTools bool) bool {
+// gemini.google.com's canned failure strings, a tool refusal, or a pseudo-report
+// when tools were provided. Such turns are not committed, so the next request
+// starts a fresh upstream conversation with a full replay.
+func isUnusableModelOutput(text string, tools []map[string]any) bool {
 	if strings.TrimSpace(text) == "" {
 		return true
 	}
@@ -466,7 +505,13 @@ func isUnusableModelOutput(text string, hasTools bool) bool {
 			return true
 		}
 	}
-	if hasTools && isToolRefusalOutput(text) {
+	hasTools := len(tools) > 0
+	if hasTools && isToolRefusalOutput(text, tools) {
+		return true
+	}
+	// A purely textual progress/completion summary on a tool-bearing request
+	// means the model stopped before calling the next required tool.
+	if hasTools && isPseudoProgressReport(text, tools) {
 		return true
 	}
 	// A mutating tool call cut off mid-value must never be repaired and

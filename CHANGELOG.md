@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.1] - 2026-11-23
+
+### Added
+- **Active Pseudo-Report Guard (`api/session_transcripts.go`, `api/chat_handler.go`)**:
+  - Added `isPseudoProgressReport`, which recognizes purely textual progress updates and premature completion summaries on tool-bearing requests. The markers observed in the v3.5.0 transcripts are `a été initié`, `ont été mis à jour avec succès`, `rapport d'exécution`, and `composants clés`.
+  - A real, arranger-validated tool call always wins: a preamble or tool payload that quotes a marker next to a valid `<tool_call>` is not reclassified.
+  - `isUnusableModelOutput` now classifies these summaries as unusable when tools are declared, so they can no longer terminate the session with `finish_reason: "stop"`.
+  - Added `formatPseudoReportRetryDirective`, which replays the turn with: `[SYSTEM DIRECTIVE: Do not emit conversational progress updates or completion summaries. You still have files to inspect and modify. Call the required read/edit tools directly.]`.
+- **Third Generation Attempt for Tool Requests (`api/chat_handler.go`)**:
+  - Added `maxChatAttempts` to centralize the budget: **3** attempts for tool-bearing requests (streaming and non-streaming), **1** for plain streaming, and **2** for plain non-streaming chat.
+  - The extra slot absorbs the `1097` conversation-expiry self-heal, leaving two functional attempts for refusal, schema, truncation, or pseudo-report recovery.
+  - The non-streaming path now also retries `ErrConversationExpired` and `ErrUpstreamStreamStalled` once on a fresh upstream conversation, matching the streaming self-heal.
+
+### Fixed
+- **Prose `<tool_call>` False Negative (`api/session_transcripts.go`)**:
+  - `isToolRefusalOutput` no longer returns `false` as soon as the text contains `<tool_call>` or `</tool_call>`. A tool call now counts only when `gemini.ArrangeGeminiOutputWithTools(text, tools).IsToolCall` is true.
+  - A refusal that quotes `AGENTS.md` (which documents the `<tool_call>` tag in prose) is therefore detected and retried instead of being returned as a valid response.
+  - Added `hard time fulfilling your request` to the explicit refusal fragments; the Hydrogen v3.5.0 output is now classified as a refusal instead of only being caught by the generic unusable-output list.
+- **French Refusal Coverage (`api/session_transcripts.go`)**:
+  - Added `je ne peux pas répondre` and `ne peux pas répondre`, covering Neon's verbatim `Je ne peux pas répondre à cette demande.`
+
+### Regression Tests
+- `api/session_scope_test.go`:
+  - `TestIsToolRefusalOutput_ProseToolCallMention`: refusal quoting `<tool_call>` in prose, the exact Hydrogen canned prefix from the v3.5.0 transcript, and a real call that must not be misclassified.
+  - `TestIsToolRefusalOutput_FrenchCannotAnswer`: exact Neon refusal, short fragment, and no retry without tools.
+  - `TestIsPseudoProgressReport`: exact Hydrogen-Task summary, each marker individually, no retry without tools, and a valid tool call whose payload contains the markers.
+  - `TestFormatPseudoReportRetryDirective`: exact corrective directive content.
+  - `TestMaxChatAttempts`: 3 attempts for tool requests in both transports, 1/2 for plain chat.
+- `api/more_test.go`: updated the classifier calls to the tools-aware signature.
+
+### Validation
+| Check | Command | Result |
+|---|---|---|
+| Go formatting | `test -z "$(gofmt -l .)"` | **OK** |
+| Static analysis | `go vet ./...` | **exit 0** |
+| Short tests | `go test -short ./...` | **OK** — `api 0.965s`, `db 0.017s`, `gemini 13.195s` |
+| Race tests | `go test -race -short ./...` | **OK** — `api 4.478s`, `db 1.100s`, `gemini 18.219s` |
+| Full audit | `./scripts/audit_check.sh` | **exit 0** — coverage `api 66.5 %`, `db 77.1 %`, `gemini 72.1 %` |
+| Docker rebuild | `docker compose up -d --build` | **OK** — image rebuilt, container recreated |
+| Health | `GET /health` | **online**, `status: healthy` |
+| Live smoke | `./scripts/live_middleware_smoke.sh` | **6/6 PASS** |
+
+---
+
 ## [3.5.0] - 2026-11-23
 
 ### Added

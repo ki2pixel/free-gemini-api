@@ -84,25 +84,26 @@ func TestScopeKeysAndOutputClassification(t *testing.T) {
 		t.Fatal("contentScopeKey must be deterministic")
 	}
 
-	if !isToolRefusalOutput("I don't have access to local files") {
+	if !isToolRefusalOutput("I don't have access to local files", nil) {
 		t.Fatal("expected tool refusal detection")
 	}
-	if isToolRefusalOutput("Here is the result") {
+	if isToolRefusalOutput("Here is the result", nil) {
 		t.Fatal("plain output is not a refusal")
 	}
-	if !isUnusableModelOutput("", false) {
+	if !isUnusableModelOutput("", nil) {
 		t.Fatal("empty output should be unusable")
 	}
-	if !isUnusableModelOutput("I seem to be encountering an error", false) {
+	if !isUnusableModelOutput("I seem to be encountering an error", nil) {
 		t.Fatal("canned failure should be unusable")
 	}
-	if !isUnusableModelOutput("no access to the filesystem", true) {
+	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "read"}}}
+	if !isUnusableModelOutput("no access to the filesystem", tools) {
 		t.Fatal("tool refusal should be unusable when tools were provided")
 	}
-	if isUnusableModelOutput("no access to the filesystem", false) {
+	if isUnusableModelOutput("no access to the filesystem", nil) {
 		t.Fatal("tool refusal without tools is usable text")
 	}
-	if isUnusableModelOutput("useful answer", false) {
+	if isUnusableModelOutput("useful answer", nil) {
 		t.Fatal("useful answer should be usable")
 	}
 }

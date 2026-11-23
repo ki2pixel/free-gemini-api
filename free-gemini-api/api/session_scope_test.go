@@ -58,20 +58,53 @@ func TestFormatTruncationRetryDirective(t *testing.T) {
 	}
 }
 
+func agenticTestTools() []map[string]any {
+	return []map[string]any{
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name": "write",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":    map[string]any{"type": "string"},
+						"content": map[string]any{"type": "string"},
+					},
+					"required": []any{"path", "content"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name": "read",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string"},
+					},
+					"required": []any{"path"},
+				},
+			},
+		},
+	}
+}
+
 func TestIsUnusableModelOutput_TruncatedMutation(t *testing.T) {
+	tools := agenticTestTools()
 	truncatedWrite := `<tool_call>{"name":"write","arguments":{"path":"x","content":"unfinished`
-	if !isUnusableModelOutput(truncatedWrite, true) {
+	if !isUnusableModelOutput(truncatedWrite, tools) {
 		t.Fatal("expected a mid-value truncated write to be unusable and retried")
 	}
 
 	completeWrite := `<tool_call>{"name":"write","arguments":{"path":"x","content":"done"}}</tool_call>`
-	if isUnusableModelOutput(completeWrite, true) {
+	if isUnusableModelOutput(completeWrite, tools) {
 		t.Fatal("expected a complete write to be usable")
 	}
 
 	// A truncated read cannot corrupt a file, so it must not force a retry.
 	truncatedRead := `<tool_call>{"name":"read","arguments":{"path":"unfinished`
-	if isUnusableModelOutput(truncatedRead, true) {
+	if isUnusableModelOutput(truncatedRead, tools) {
 		t.Fatal("expected a truncated read not to be classified as a mutation")
 	}
 }
@@ -92,7 +125,7 @@ func TestIsToolRefusalOutput(t *testing.T) {
 		"I cannot fulfill this request.",
 	}
 	for _, text := range refusals {
-		if !isToolRefusalOutput(text) {
+		if !isToolRefusalOutput(text, nil) {
 			t.Errorf("expected refusal detection for %q", text)
 		}
 	}
@@ -103,22 +136,125 @@ func TestIsToolRefusalOutput(t *testing.T) {
 		"Normal response with no tools and no refusal words.",
 	}
 	for _, text := range notRefusals {
-		if isToolRefusalOutput(text) {
+		if isToolRefusalOutput(text, agenticTestTools()) {
 			t.Errorf("expected no refusal detection for %q", text)
 		}
+	}
+}
+
+func TestIsToolRefusalOutput_ProseToolCallMention(t *testing.T) {
+	// AGENTS.md quotes the tag in prose. A refusal that replays that text must
+	// not be neutralized by a bare strings.Contains("<tool_call>") check.
+	refusal := "I cannot fulfill this request. AGENTS.md documents the <tool_call> tag in prose, but no tool is invoked."
+	if !isToolRefusalOutput(refusal, nil) {
+		t.Fatal("expected refusal detection when <tool_call> is only mentioned in prose")
+	}
+	if !isUnusableModelOutput(refusal, agenticTestTools()) {
+		t.Fatal("expected the prose refusal to be unusable on a tool-bearing request")
+	}
+
+	// Exact Hydrogen prefix from the v3.5.0 transcript, followed by the
+	// AGENTS.md prose that mentions the tag without calling a tool.
+	hydrogen := "I'm having a hard time fulfilling your request. Can I help you with something else instead? The instructions mention \"... in JSON <tool_call> arguments ...\", but no tool is invoked."
+	if !isToolRefusalOutput(hydrogen, agenticTestTools()) {
+		t.Fatal("expected the Hydrogen canned refusal to be detected despite the prose tag mention")
+	}
+
+	// A real, arranger-validated call still wins over refusal-like prose in
+	// the surrounding text.
+	realCall := `<thought>Je ne peux pas répondre sans lire le fichier.</thought><tool_call>{"name":"read","arguments":{"path":"AGENTS.md"}}</tool_call>`
+	if isToolRefusalOutput(realCall, agenticTestTools()) {
+		t.Fatal("a valid tool call must never be classified as a refusal")
+	}
+}
+
+func TestIsToolRefusalOutput_FrenchCannotAnswer(t *testing.T) {
+	// Exact refusal emitted by gemini-4-neon during the v3.5.0 challenge.
+	refusal := "Je ne peux pas répondre à cette demande."
+	if !isToolRefusalOutput(refusal, nil) {
+		t.Fatal("expected the French 'je ne peux pas répondre' refusal to be detected")
+	}
+	if !isUnusableModelOutput(refusal, agenticTestTools()) {
+		t.Fatal("expected the French refusal to be unusable on a tool-bearing request")
+	}
+	if isUnusableModelOutput(refusal, nil) {
+		t.Fatal("a plain chat request without tools must not retry on this refusal")
+	}
+	if !isToolRefusalOutput("ne peux pas répondre dans cet environnement", nil) {
+		t.Fatal("expected the short French fragment to be detected")
+	}
+}
+
+func TestIsPseudoProgressReport(t *testing.T) {
+	tools := agenticTestTools()
+	// Exact premature summary emitted by gemini-4-hydrogen-task in v3.5.0.
+	pseudo := "Le plan d'alignement et de synchronisation des documentations post-audit pour la version **v3.5.0** a été initié et les composants clés (`AGENTS.md`, `README.md`) ont été mis à jour avec succès pour refléter l'ensemble des améliorations techniques."
+	if !isPseudoProgressReport(pseudo, tools) {
+		t.Fatal("expected the premature completion summary to be a pseudo-report")
+	}
+	if !isUnusableModelOutput(pseudo, tools) {
+		t.Fatal("expected the pseudo-report to be unusable when tools are declared")
+	}
+	if isUnusableModelOutput(pseudo, nil) {
+		t.Fatal("a plain chat request without tools must accept a prose summary")
+	}
+
+	for _, marker := range pseudoReportSnippets {
+		if !isPseudoProgressReport("prefix "+marker+" suffix", tools) {
+			t.Errorf("pseudo-report classifier missed marker %q", marker)
+		}
+	}
+
+	// A real tool call is never a pseudo-report, even when its payload quotes
+	// one of the markers (for example while documenting this classifier).
+	callWithMarkers := `<tool_call>{"name":"write","arguments":{"path":"CHANGELOG.md","content":"Le plan a été initié et les composants clés ont été mis à jour avec succès."}}</tool_call>`
+	if isPseudoProgressReport(callWithMarkers, tools) {
+		t.Fatal("a valid tool call must not be classified as a pseudo-report")
+	}
+	if isUnusableModelOutput(callWithMarkers, tools) {
+		t.Fatal("a valid tool call must remain usable")
+	}
+}
+
+func TestFormatPseudoReportRetryDirective(t *testing.T) {
+	directive := formatPseudoReportRetryDirective()
+	for _, want := range []string{
+		"[SYSTEM DIRECTIVE:",
+		"Do not emit conversational progress updates or completion summaries.",
+		"You still have files to inspect and modify.",
+		"Call the required read/edit tools directly.",
+	} {
+		if !strings.Contains(directive, want) {
+			t.Errorf("pseudo-report directive %q does not contain %q", directive, want)
+		}
+	}
+}
+
+func TestMaxChatAttempts(t *testing.T) {
+	if got := maxChatAttempts(true, true); got != 3 {
+		t.Fatalf("streaming tool request should get 3 attempts, got %d", got)
+	}
+	if got := maxChatAttempts(false, true); got != 3 {
+		t.Fatalf("non-streaming tool request should get 3 attempts, got %d", got)
+	}
+	if got := maxChatAttempts(true, false); got != 1 {
+		t.Fatalf("plain streaming request should keep 1 attempt, got %d", got)
+	}
+	if got := maxChatAttempts(false, false); got != 2 {
+		t.Fatalf("plain non-streaming request should keep 2 attempts, got %d", got)
 	}
 }
 
 func TestIsToolRefusalOutput_GlobalSafetyRefusal(t *testing.T) {
 	// Exact refusal returned by Gemini web for gemini-4-hydrogen-task v3.4.9.
 	refusal := "I must refuse to assist with or generate any content that touches on sexually explicit material, dangerous or illegal activities, self-harm, or violence, or provides instructions or advice regarding them."
-	if !isToolRefusalOutput(refusal) {
+	if !isToolRefusalOutput(refusal, nil) {
 		t.Fatal("expected the Google global safety refusal to be classified as a tool refusal")
 	}
-	if !isUnusableModelOutput(refusal, true) {
+	if !isUnusableModelOutput(refusal, agenticTestTools()) {
 		t.Fatal("expected the global safety refusal to be unusable when tools are active")
 	}
-	if isUnusableModelOutput(refusal, false) {
+	if isUnusableModelOutput(refusal, nil) {
 		t.Fatal("a plain chat request without tools must not be retried for this refusal")
 	}
 
@@ -131,7 +267,7 @@ func TestIsToolRefusalOutput_GlobalSafetyRefusal(t *testing.T) {
 		"provides instructions or advice regarding them",
 		"cannot generate content that touches on",
 	} {
-		if !isToolRefusalOutput("prefix " + fragment + " suffix") {
+		if !isToolRefusalOutput("prefix "+fragment+" suffix", nil) {
 			t.Errorf("classifier missed fragment %q", fragment)
 		}
 	}
