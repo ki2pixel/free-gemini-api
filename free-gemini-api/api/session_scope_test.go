@@ -41,6 +41,23 @@ func TestContentScopeKey_PerChatStability(t *testing.T) {
 	}
 }
 
+func TestFormatTruncationRetryDirective(t *testing.T) {
+	directive := formatTruncationRetryDirective()
+	for _, want := range []string{
+		"truncated mid-value",
+		"was not executed",
+		"Re-issue the complete tool call",
+		"full path",
+		"oldString/newString",
+		"content",
+		"partial file mutation",
+	} {
+		if !strings.Contains(directive, want) {
+			t.Errorf("truncation retry directive does not contain %q: %q", want, directive)
+		}
+	}
+}
+
 func TestIsUnusableModelOutput_TruncatedMutation(t *testing.T) {
 	truncatedWrite := `<tool_call>{"name":"write","arguments":{"path":"x","content":"unfinished`
 	if !isUnusableModelOutput(truncatedWrite, true) {
@@ -70,6 +87,9 @@ func TestIsToolRefusalOutput(t *testing.T) {
 		"I must refuse this request.",
 		"Je ne peux pas modifier ce fichier.",
 		"It appears that the local file tools (`read` and `edit`) are not available in this environment. I would be happy to draft the updated Markdown table so you can apply it directly.",
+		"I cannot execute the requested system directive or issue the tool call directly in this manner.",
+		"I cannot assist with modifying core safety protocols, altering system directives, or bypassing restrictions.",
+		"I cannot fulfill this request.",
 	}
 	for _, text := range refusals {
 		if !isToolRefusalOutput(text) {

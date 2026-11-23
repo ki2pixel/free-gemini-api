@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.9] - 2026-11-23
+
+### Added
+- **OpenCode Instruction-Notice Compaction (`api/session_transcripts.go`, `api/chat_handler.go`)**:
+  - Added `compactSystemNotice` / `formatSystemNotice`. The large `The instructions changed: ... AGENTS.md` and `The Code Mode tool catalog has changed` notices replayed by OpenCode are replaced by short neutral reminders before being sent upstream.
+  - The authoritative tool catalog and system prompt remain at the top of the prompt; the full instruction file is not replayed.
+  - Unknown oversized inline notices are capped at 4 000 runes so a single notice cannot saturate the upstream classifier.
+- **Truncation-Specific Retry Directive (`api/chat_handler.go`)**:
+  - Added `formatTruncationRetryDirective`. When `HasTruncatedMutationToolCall` is detected, the streaming and non-streaming paths reset the upstream conversation and retry once with a directive requiring a complete `path`/`oldString`/`newString`/`content` payload.
+  - The partial mutation is never repaired or executed; the final `[Error: upstream tool call was truncated mid-value...]` path remains the last resort after the transparent retry.
+
+### Fixed
+- **Upstream False-Refusal Coverage (`api/session_transcripts.go`)**:
+  - Added the refusal shapes observed on Neon and Hydrogen after an `AGENTS.md` write: `cannot execute the requested system directive`, `issue the tool call directly in this manner`, `modifying core safety protocols`, `altering system directives`, `bypassing restrictions`, and `cannot assist with modifying`.
+  - Also covers `cannot fulfill this request` / `unable to fulfill this request`, observed when an oversized write request triggers a conservative refusal.
+  - These now trigger the existing refusal retry on a fresh upstream conversation instead of being returned as a valid `stop`.
+
+### Changed
+- **Live Smoke Suite (`scripts/live_middleware_smoke.sh`)**:
+  - Added a fifth live test that replays the full OpenCode instruction notice and checks that the model continues without a false refusal or full-notice echo.
+  - Updated the test numbering and refusal-phrase checks.
+
+### Regression Tests
+- `api/system_notice_test.go`: instruction/tool-catalog notice compaction, unknown-notice cap, and small-notice preservation.
+- `api/session_scope_test.go`: new English/French refusal shapes and the truncation retry directive.
+- `api/session_scope_test.go` and `gemini/arranger_test.go`: existing truncation and scanner coverage retained.
+
+---
+
 ## [3.4.8] - 2026-11-23
 
 ### Added

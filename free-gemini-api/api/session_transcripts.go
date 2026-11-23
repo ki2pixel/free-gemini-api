@@ -276,6 +276,17 @@ func isToolRefusalOutput(text string) bool {
 		"je ne peux pas créer",
 		"je ne peux pas écrire",
 		"je ne peux pas exécuter",
+		"cannot execute the requested system directive",
+		"issue the tool call directly in this manner",
+		"modifying core safety protocols",
+		"altering system directives",
+		"bypassing restrictions",
+		"cannot assist with modifying",
+		"cannot fulfill this request",
+		"cannot fulfil this request",
+		"unable to fulfill this request",
+		"i cannot fulfill",
+		"i can't fulfill",
 		"which you can save to",
 		"which you can save as",
 		"save this to",
@@ -379,6 +390,57 @@ func compactToolErrorSnippet(content string) string {
 		return string(runes[:maxRunes]) + "..."
 	}
 	return compact
+}
+
+// maxInlineSystemNoticeRunes bounds unknown inline system notices. OpenCode
+// replays large notices such as "The instructions changed" (the full AGENTS.md)
+// and "The Code Mode tool catalog has changed" after tool execution. Replaying
+// the full text wastes the prompt budget and can trigger upstream safety
+// refusals; the authoritative instructions/tool catalog are already at the top
+// of the prompt.
+const maxInlineSystemNoticeRunes = 4000
+
+// compactSystemNotice recognizes the two large OpenCode notices that must be
+// neutralized and returns a short, non-authoritative reminder. It returns
+// ok=false for every other system message.
+func compactSystemNotice(content string) (string, bool) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "", false
+	}
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "the instructions changed"),
+		strings.HasPrefix(lower, "the code mode tool catalog has changed"):
+		// Both replay notices start with an explicit "changed" marker. Do not
+		// match on a bare "Instructions from:" substring here: an initial
+		// harness system prompt may legitimately contain the project
+		// instructions and must not be replaced by the compact reminder.
+		if strings.HasPrefix(lower, "the code mode tool catalog has changed") {
+			return "The tool catalog was refreshed. The [AVAILABLE TOOLS] section at the top is authoritative; do not restate the catalog.", true
+		}
+		return "The project instruction file (AGENTS.md) was updated on disk. Continue the current task using the current tool results. Do not restate or analyze the instruction file, do not treat it as a new user request, and do not modify safety protocols or bypass restrictions.", true
+	default:
+		return "", false
+	}
+}
+
+// formatSystemNotice renders an inline system notice for the upstream prompt.
+// Known OpenCode notices are replaced by a compact neutral reminder; unknown
+// notices are capped so a single notice cannot saturate the prompt.
+func formatSystemNotice(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+	if compact, ok := compactSystemNotice(trimmed); ok {
+		return "[System Notice]: " + compact
+	}
+	runes := []rune(trimmed)
+	if len(runes) > maxInlineSystemNoticeRunes {
+		trimmed = string(runes[:maxInlineSystemNoticeRunes]) + " ... [notice truncated]"
+	}
+	return "[System Notice]: " + trimmed
 }
 
 // isUnusableModelOutput reports whether the model output is empty, one of

@@ -54,6 +54,14 @@ func formatSchemaRetryDirective(detail string) string {
 	return fmt.Sprintf("[SYSTEM DIRECTIVE: Previous tool call failed validation: %s. Re-issue the tool call correcting this parameter, place 'path' first in the arguments object, and include every required property.]\n\n", detail)
 }
 
+// formatTruncationRetryDirective builds the abstract retry prompt used when
+// the upstream model emitted a file mutation cut off mid-value. The partial
+// payload is never repaired or executed; the model must re-issue a complete
+// call with every required argument.
+func formatTruncationRetryDirective() string {
+	return "[SYSTEM DIRECTIVE: The previous tool call was truncated mid-value and was not executed. Re-issue the complete tool call with all required arguments, including the full path, oldString/newString or content. Do not emit a partial file mutation.]\n\n"
+}
+
 // recordArrangerRepairs exposes the repair kinds reported by the arranger as
 // Prometheus counters.
 func recordArrangerRepairs(arranged *gemini.ArrangedOutput) {
@@ -341,6 +349,11 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	for _, m := range req.Messages {
 		if inInitialSystem && strings.EqualFold(m.Role, "system") {
 			sc := FlattenContent(m.Content)
+			if compact, ok := compactSystemNotice(sc); ok {
+				// A replayed OpenCode notice is not the harness's authoritative
+				// system prompt; keep only its neutral compact form.
+				sc = compact
+			}
 			if systemContent == "" {
 				systemContent = sc
 			} else {
@@ -395,9 +408,10 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		} else if strings.EqualFold(m.Role, "tool") {
 			fullPromptBuilder.WriteString(fmt.Sprintf("[Tool Result for %s]: %s\n", m.Name, contentStr))
 		} else if strings.EqualFold(m.Role, "system") {
-			fullPromptBuilder.WriteString("[System Notice]: ")
-			fullPromptBuilder.WriteString(contentStr)
-			fullPromptBuilder.WriteString("\n")
+			if notice := formatSystemNotice(contentStr); notice != "" {
+				fullPromptBuilder.WriteString(notice)
+				fullPromptBuilder.WriteString("\n")
+			}
 		}
 	}
 
@@ -591,6 +605,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				}
 				forceFull := false
 				schemaRetryDetail := ""
+				truncationRetry := false
 				for attempt := 0; attempt < maxAttempts; attempt++ {
 					var sendPrompt string
 					emittedThoughtRunes = 0
@@ -602,9 +617,12 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						wWorker.Client.ResetConversationStateSession(sessionKey, model)
 						override := ""
 						if len(req.Tools) > 0 {
-							if schemaRetryDetail != "" {
+							switch {
+							case truncationRetry:
+								override = formatTruncationRetryDirective()
+							case schemaRetryDetail != "":
 								override = formatSchemaRetryDirective(schemaRetryDetail)
-							} else {
+							default:
 								override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls.]\n\n"
 							}
 						}
@@ -719,6 +737,19 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						finalAttemptText = streamResp.Text
 					}
 					if attempt+1 < maxAttempts {
+						if gemini.HasTruncatedMutationToolCall(finalAttemptText) {
+							// The model was cut off inside a file mutation. Never
+							// repair or execute the partial payload: reset the
+							// upstream conversation and retry once with a
+							// truncation-specific abstract directive.
+							RecordArrangerRejection("mid_value_truncation")
+							log.Printf("⚠️ Truncated mutation tool call detected, retrying once with an abstract truncation directive")
+							truncationRetry = true
+							schemaRetryDetail = ""
+							invalidateSessionTurn(sessionKey)
+							forceFull = true
+							continue
+						}
 						if invalid, detail := gemini.HasInvalidSchemaToolCall(finalAttemptText, req.Tools); invalid {
 							RecordArrangerRejection(arrangerRejectionReason(detail))
 							log.Printf("⚠️ Invalid tool-call schema (%s), retrying with an abstract error directive", detail)
@@ -1004,6 +1035,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		// retried invisibly on a fresh upstream conversation.
 		forceFull := false
 		schemaRetryDetail := ""
+		truncationRetry := false
 		for attempt := 0; attempt < 2; attempt++ {
 			var sendPrompt string
 			if forceFull {
@@ -1013,9 +1045,12 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				w.Client.ResetConversationStateSession(sessionKey, model)
 				override := ""
 				if len(req.Tools) > 0 {
-					if schemaRetryDetail != "" {
+					switch {
+					case truncationRetry:
+						override = formatTruncationRetryDirective()
+					case schemaRetryDetail != "":
 						override = formatSchemaRetryDirective(schemaRetryDetail)
-					} else {
+					default:
 						override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls.]\n\n"
 					}
 				}
@@ -1044,6 +1079,15 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				return nil, err
 			}
 			if attempt+1 < 2 {
+				if gemini.HasTruncatedMutationToolCall(r.Text) {
+					RecordArrangerRejection("mid_value_truncation")
+					log.Printf("⚠️ Truncated mutation tool call detected, retrying once with an abstract truncation directive")
+					truncationRetry = true
+					schemaRetryDetail = ""
+					invalidateSessionTurn(sessionKey)
+					forceFull = true
+					continue
+				}
 				if invalid, detail := gemini.HasInvalidSchemaToolCall(r.Text, req.Tools); invalid {
 					RecordArrangerRejection(arrangerRejectionReason(detail))
 					log.Printf("⚠️ Invalid tool-call schema (%s), retrying with an abstract error directive", detail)
