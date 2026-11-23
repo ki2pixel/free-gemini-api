@@ -25,10 +25,11 @@ type GeminiResponse struct {
 
 // ChatRequest represents the incoming request payload
 type ChatRequest struct {
-	Prompt  string `json:"prompt"`
-	Message string `json:"message"`
-	NewChat bool   `json:"new_chat"`
-	UserID  string `json:"user_id"`
-	Stream  bool   `json:"stream"`
-	Model   string `json:"model,omitempty"`
+	Prompt          string `json:"prompt"`
+	Message         string `json:"message"`
+	NewChat         bool   `json:"new_chat"`
+	UserID          string `json:"user_id"`
+	Stream          bool   `json:"stream"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }

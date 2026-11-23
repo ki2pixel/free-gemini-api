@@ -65,7 +65,7 @@ func TestNextStreamDelta(t *testing.T) {
 		{"", "", "", ""},
 	}
 	for _, tc := range cases {
-		delta, newSent := nextStreamDelta(tc.sent, tc.snapshot)
+		delta, newSent := nextStreamDelta(tc.sent, tc.sent, tc.snapshot)
 		if delta != tc.delta || newSent != tc.newSent {
 			t.Errorf("nextStreamDelta(%q,%q) = (%q,%q), want (%q,%q)",
 				tc.sent, tc.snapshot, delta, newSent, tc.delta, tc.newSent)

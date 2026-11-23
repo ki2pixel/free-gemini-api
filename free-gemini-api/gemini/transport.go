@@ -65,13 +65,13 @@ var (
 	CurrentChromeUA, CurrentPlatform, CurrentSecChUa = getPlatformDetails()
 )
 
-func (c *GeminiClient) doStreamRequestQUIC(fullURL string, data url.Values, modelCfg *ModelConfig, onChunk func(text string)) (string, error) {
+func (c *GeminiClient) doStreamRequestQUIC(fullURL string, data url.Values, modelCfg *ModelConfig, onChunk func(text string)) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), upstreamRequestTimeout)
 	defer cancel()
 
 	req, err := stdhttp.NewRequestWithContext(ctx, "POST", fullURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if modelCfg == nil {
@@ -94,12 +94,12 @@ func (c *GeminiClient) doStreamRequestQUIC(fullURL string, data url.Values, mode
 
 	resp, err := c.quicClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if resp.StatusCode != 200 {
 		_ = resp.Body.Close()
-		return "", fmt.Errorf("QUIC status %d", resp.StatusCode)
+		return "", "", fmt.Errorf("QUIC status %d", resp.StatusCode)
 	}
 
 	guard := newStallGuardReader(resp.Body, cancel, upstreamStreamStallTimeout)
@@ -107,13 +107,13 @@ func (c *GeminiClient) doStreamRequestQUIC(fullURL string, data url.Values, mode
 	return c.readAndProcessStream(guard, onChunk)
 }
 
-func (c *GeminiClient) doStreamRequestHTTP2(fullURL string, data url.Values, modelCfg *ModelConfig, onChunk func(text string)) (string, error) {
+func (c *GeminiClient) doStreamRequestHTTP2(fullURL string, data url.Values, modelCfg *ModelConfig, onChunk func(text string)) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), upstreamRequestTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if modelCfg == nil {
@@ -136,12 +136,12 @@ func (c *GeminiClient) doStreamRequestHTTP2(fullURL string, data url.Values, mod
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if resp.StatusCode != 200 {
 		_ = resp.Body.Close()
-		return "", fmt.Errorf("HTTP2 status %d", resp.StatusCode)
+		return "", "", fmt.Errorf("HTTP2 status %d", resp.StatusCode)
 	}
 
 	guard := newStallGuardReader(resp.Body, cancel, upstreamStreamStallTimeout)

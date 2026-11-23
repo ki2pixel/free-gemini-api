@@ -173,18 +173,6 @@ var (
 // Default models catalog
 var defaultBuiltinModels = []ModelConfig{
 	{
-		ID:             "gemini-4-hydrogen",
-		DisplayName:    "Google Gemini 4 Hydrogen",
-		Description:    "Everyday help — balanced multi-modal flagship (Default)",
-		ModeID:         "56fdd199312815e2",
-		HeaderTemplate: `[1,null,null,null,"%s",null,null,0,[4],null,null,2]`,
-		MinTier:        "free",
-		Aliases:        []string{"4-hydrogen", "hydrogen", "everyday-help", "gemini-hydrogen"},
-		Capabilities:   []string{"chat", "stream", "vision", "video", "tools"},
-		IsDefault:      false,
-		Source:         "builtin",
-	},
-	{
 		ID:             "gemini-4-hydrogen-task",
 		DisplayName:    "Google Gemini 4 Hydrogen (Task Mode)",
 		Description:    "Everyday help with agentic task execution and workflow guidance",
@@ -222,6 +210,20 @@ var defaultBuiltinModels = []ModelConfig{
 		IsDefault:      false,
 		Source:         "builtin",
 	},
+	// A-15: upstream Antigravity Hub / OpenCode address thinking models as
+	// gemini-4-<family>-<tier>, without the "-thinking-" infix. Each thinking
+	// entry below keeps its canonical Go ID and registers the upstream name as an
+	// alias, so Get/lookupLocked (used by ModelForThinkingTier) resolve exactly:
+	//
+	//	gemini-4-argon-high      -> gemini-4-argon-thinking-high      (ThinkingLevel 2)
+	//	gemini-4-argon-medium    -> gemini-4-argon-thinking-medium    (ThinkingLevel 4)
+	//	gemini-4-argon-low       -> gemini-4-argon-thinking-low       (ThinkingLevel 1)
+	//	gemini-4-neon-high       -> gemini-4-neon-thinking-high       (ThinkingLevel 2)
+	//	gemini-4-neon-medium     -> gemini-4-neon-thinking-medium     (ThinkingLevel 4)
+	//	gemini-4-neon-low        -> gemini-4-neon-thinking-low        (ThinkingLevel 1)
+	//	gemini-4-hydrogen-high   -> gemini-4-hydrogen-thinking-high   (ThinkingLevel 2)
+	//	gemini-4-hydrogen-medium -> gemini-4-hydrogen-thinking-medium (ThinkingLevel 4)
+	//	gemini-4-hydrogen-low    -> gemini-4-hydrogen-thinking-low    (ThinkingLevel 1)
 	{
 		ID:             "gemini-4-neon-thinking-high",
 		DisplayName:    "Google Gemini 4 Neon (Thinking High)",
@@ -230,7 +232,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,%d,null,null,null,null]`,
 		ThinkingLevel:  2,
 		MinTier:        "subscription",
-		Aliases:        []string{"neon-thinking-high", "neon-high"},
+		Aliases:        []string{"neon-thinking-high", "neon-high", "gemini-4-neon-high"},
 		Capabilities:   []string{"chat", "stream", "thinking", "math", "code", "complex_tasks"},
 		IsDefault:      false,
 		Source:         "builtin",
@@ -243,7 +245,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,%d,null,null,null,null]`,
 		ThinkingLevel:  4,
 		MinTier:        "subscription",
-		Aliases:        []string{"neon-thinking-medium", "neon-medium"},
+		Aliases:        []string{"neon-thinking-medium", "neon-medium", "gemini-4-neon-medium"},
 		Capabilities:   []string{"chat", "stream", "thinking", "math", "code", "complex_tasks"},
 		IsDefault:      false,
 		Source:         "builtin",
@@ -256,7 +258,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,%d,null,null,null,null]`,
 		ThinkingLevel:  1,
 		MinTier:        "subscription",
-		Aliases:        []string{"neon-thinking-low", "neon-low"},
+		Aliases:        []string{"neon-thinking-low", "neon-low", "gemini-4-neon-low"},
 		Capabilities:   []string{"chat", "stream", "thinking", "math", "code", "complex_tasks"},
 		IsDefault:      false,
 		Source:         "builtin",
@@ -310,6 +312,9 @@ var defaultBuiltinModels = []ModelConfig{
 		Source:         "builtin",
 	},
 	{
+		// A-16: this is the single canonical definition of gemini-4-hydrogen.
+		// It supersedes the older non-thinking duplicate that previously sat at the
+		// top of this catalog and was always overwritten by this entry at startup.
 		ID:          "gemini-4-hydrogen",
 		DisplayName: "Google Gemini 4 Hydrogen",
 		Description: "Everyday help — new-generation default model (repoints the 3.8 Flash everyday slot), 1M context",
@@ -320,7 +325,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,1,null,null,null,null]`,
 		MinTier:        "free",
 		Aliases:        []string{"hydrogen", "4-hydrogen", "gemini-hydrogen", "everyday-help"},
-		Capabilities:   []string{"chat", "stream", "vision", "tools", "long_context"},
+		Capabilities:   []string{"chat", "stream", "vision", "video", "tools", "long_context"},
 		IsDefault:      false,
 		Source:         "builtin",
 	},
@@ -332,7 +337,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,%d,null,null,null,null]`,
 		ThinkingLevel:  4,
 		MinTier:        "free",
-		Aliases:        []string{"hydrogen-thinking-medium", "hydrogen-medium"},
+		Aliases:        []string{"hydrogen-thinking-medium", "hydrogen-medium", "gemini-4-hydrogen-medium"},
 		Capabilities:   []string{"chat", "stream", "thinking", "long_context"},
 		IsDefault:      false,
 		Source:         "builtin",
@@ -345,7 +350,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,%d,null,null,null,null]`,
 		ThinkingLevel:  2,
 		MinTier:        "free",
-		Aliases:        []string{"hydrogen-thinking-high", "hydrogen-high"},
+		Aliases:        []string{"hydrogen-thinking-high", "hydrogen-high", "gemini-4-hydrogen-high"},
 		Capabilities:   []string{"chat", "stream", "thinking", "math", "code", "long_context"},
 		IsDefault:      false,
 		Source:         "builtin",
@@ -358,7 +363,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,%d,null,null,null,null]`,
 		ThinkingLevel:  1,
 		MinTier:        "free",
-		Aliases:        []string{"hydrogen-thinking-low", "hydrogen-low"},
+		Aliases:        []string{"hydrogen-thinking-low", "hydrogen-low", "gemini-4-hydrogen-low"},
 		Capabilities:   []string{"chat", "stream", "thinking", "long_context"},
 		IsDefault:      false,
 		Source:         "builtin",
@@ -397,7 +402,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,%d,null,null,null,null]`,
 		ThinkingLevel:  2,
 		MinTier:        "free",
-		Aliases:        []string{"argon-thinking-high", "argon-high", "thinking-high"},
+		Aliases:        []string{"argon-thinking-high", "argon-high", "thinking-high", "gemini-4-argon-high"},
 		Capabilities:   []string{"chat", "stream", "thinking", "math", "code", "complex_tasks"},
 		IsDefault:      false,
 		Source:         "builtin",
@@ -411,7 +416,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,%d,null,null,null,null]`,
 		ThinkingLevel:  4,
 		MinTier:        "free",
-		Aliases:        []string{"argon-thinking-medium", "argon-medium", "thinking-medium"},
+		Aliases:        []string{"argon-thinking-medium", "argon-medium", "thinking-medium", "gemini-4-argon-medium"},
 		Capabilities:   []string{"chat", "stream", "thinking", "math", "code", "complex_tasks"},
 		IsDefault:      false,
 		Source:         "builtin",
@@ -425,7 +430,7 @@ var defaultBuiltinModels = []ModelConfig{
 		HeaderTemplate: `[1,null,null,null,"%s",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,%d,null,null,null,null]`,
 		ThinkingLevel:  1,
 		MinTier:        "free",
-		Aliases:        []string{"argon-thinking-low", "argon-low", "thinking-low"},
+		Aliases:        []string{"argon-thinking-low", "argon-low", "thinking-low", "gemini-4-argon-low"},
 		Capabilities:   []string{"chat", "stream", "thinking", "math", "code", "complex_tasks"},
 		IsDefault:      false,
 		Source:         "builtin",
@@ -601,7 +606,65 @@ func (r *ModelRegistry) Unregister(id string) {
 	_ = r.saveToFileInternal()
 }
 
-// Resolve looks up a model by ID or alias, falling back to default model
+// ModelForThinkingTier resolves the model of the same family that carries the
+// requested thinking tier ("low", "medium", "high"). It reports false when the
+// family has no such variant, so callers can leave the request untouched.
+//
+// The lookup is name-based on purpose: ModelConfig values are shared pointers
+// in the registry, and mutating ThinkingLevel on one would race with every
+// concurrent request reading it through BuildHeaderValue.
+func (r *ModelRegistry) ModelForThinkingTier(baseModel, tier string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	base := strings.ToLower(strings.TrimSpace(baseModel))
+	if base == "" {
+		return "", false
+	}
+	baseCfg, ok := r.lookupLocked(base)
+	if !ok {
+		return "", false
+	}
+	baseID := stripThinkingSuffix(strings.ToLower(baseCfg.ID))
+	if tier == thinkingTierNone {
+		return baseID, true
+	}
+	if tier != thinkingTierLow && tier != thinkingTierMedium && tier != thinkingTierHigh {
+		return "", false
+	}
+	candidate, ok := r.lookupLocked(baseID + "-thinking-" + tier)
+	if !ok {
+		return "", false
+	}
+	candidateID := strings.ToLower(candidate.ID)
+	// The convenience substring matcher may answer with any member of the
+	// family; only accept the entry that really encodes this tier.
+	if thinkingTierOf(candidateID) != tier || stripThinkingSuffix(candidateID) != baseID {
+		return "", false
+	}
+	return candidate.ID, true
+}
+
+// lookupLocked resolves one name without taking the registry lock. Callers must
+// hold it.
+func (r *ModelRegistry) lookupLocked(name string) (*ModelConfig, bool) {
+	clean := strings.ToLower(strings.TrimSpace(name))
+	if clean == "" {
+		return nil, false
+	}
+	if model, ok := r.models[clean]; ok {
+		return model, true
+	}
+	if canonicalID, ok := r.aliasMap[clean]; ok {
+		if model, ok := r.models[canonicalID]; ok {
+			return model, true
+		}
+	}
+	return nil, false
+}
+
+// Resolve resolves a model name or alias against the registry, with a small
+// set of family convenience matches (see the body for the heuristics).
 func (r *ModelRegistry) Resolve(name string) *ModelConfig {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

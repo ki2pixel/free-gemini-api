@@ -233,17 +233,18 @@ func (c *GeminiClient) executeStreamRequestSession(prompt string, modelName stri
 	fullURL := urlStr + "?" + query.Encode()
 
 	var rawBody string
+	var emittedText string
 	var err error
 
 	if c.useQUIC.Load() {
-		rawBody, err = c.doStreamRequestQUIC(fullURL, data, modelCfg, onChunk)
+		rawBody, emittedText, err = c.doStreamRequestQUIC(fullURL, data, modelCfg, onChunk)
 		if err != nil {
 			log.Printf("⚠️ HTTP/3 QUIC stream failed (%v). Falling back to HTTP/2 TLS...", err)
 			c.useQUIC.Store(false)
-			rawBody, err = c.doStreamRequestHTTP2(fullURL, data, modelCfg, onChunk)
+			rawBody, emittedText, err = c.doStreamRequestHTTP2(fullURL, data, modelCfg, onChunk)
 		}
 	} else {
-		rawBody, err = c.doStreamRequestHTTP2(fullURL, data, modelCfg, onChunk)
+		rawBody, emittedText, err = c.doStreamRequestHTTP2(fullURL, data, modelCfg, onChunk)
 	}
 
 	if err != nil {
@@ -264,6 +265,12 @@ func (c *GeminiClient) executeStreamRequestSession(prompt string, modelName stri
 
 	response := &GeminiResponse{}
 	parseResponse(rawBody, response)
+	// The raw body still contains upstream re-renders of paragraphs already
+	// delivered. Trust the projection the client actually received so the API
+	// layer cannot re-commit duplicated text.
+	if emittedText != "" {
+		response.Text = emittedText
+	}
 
 	if response.ConversationID != "" {
 		c.updateConvStateFor(sessionKey, modelCfg.ID, response.ConversationID, response.ResponseID, response.ChoiceID)
@@ -303,31 +310,167 @@ func isArtifactStreamText(s string) bool {
 	return !strings.ContainsAny(t, " \t\r\n")
 }
 
-// nextStreamDelta projects a fresh upstream snapshot onto the text already
-// emitted. Gemini's StreamGenerate emits both growing snapshots of the answer
-// and, near the end, full re-renders of it (sometimes repeated); naively
-// appending every snapshot duplicates whole paragraphs. Only a snapshot that
-// genuinely extends what the client already has produces a delta.
-func nextStreamDelta(sent, snapshot string) (delta, newSent string) {
+// maxReplayScanBytes bounds how much of the client-visible text is probed when
+// looking for a complete replayed line. Re-renders happen near the tail of the
+// answer, so a sliding window keeps the check linear per snapshot instead of
+// quadratic over the whole response.
+const maxReplayScanBytes = 8192
+
+// minReplayBytes is the smallest replay treated as an upstream re-render when
+// it does not cover the entire visible text. Shorter repeats on a line
+// boundary (a closing brace, an empty line) are legitimate continuations and
+// must be emitted.
+const minReplayBytes = 16
+
+// nextStreamDelta projects a fresh upstream snapshot onto the text the client
+// already received. Gemini's StreamGenerate emits both growing snapshots of
+// the answer and, near the end, full re-renders of it (sometimes repeated);
+// naively appending every snapshot duplicates whole paragraphs.
+//
+// Two marks are needed because the upstream rendering and the client-visible
+// stream diverge once a replay is suppressed:
+//   - sent is the upstream watermark and anchors prefix comparison, so later
+//     snapshots that still contain the replayed lines keep extending it;
+//   - visible is everything actually emitted, and anchors replay detection,
+//     which must never suppress text the client has not seen.
+//
+// The emitted delta is always the only text appended to visible, so callers
+// advance the visible mark by appending delta. newSent is returned separately
+// because it can move without anything being emitted.
+func nextStreamDelta(sent, visible, snapshot string) (delta, newSent string) {
 	if snapshot == "" || snapshot == sent {
 		return "", sent
 	}
 	if strings.HasPrefix(snapshot, sent) {
-		return snapshot[len(sent):], snapshot
+		suffix := snapshot[len(sent):]
+		trimmed := strings.TrimLeft(suffix, "\r\n")
+		leadingNL := len(suffix) - len(trimmed)
+		if replayed := replayedVisiblePrefix(trimmed, visible); replayed > 0 {
+			remainder := trimmed[replayed:]
+			if remainder == "" {
+				// The whole extension re-prints text already delivered: emit
+				// nothing, not even the separator newlines introducing it.
+				return "", snapshot
+			}
+			return suffix[:leadingNL] + remainder, snapshot
+		}
+		return suffix, snapshot
+	}
+	if strings.HasPrefix(snapshot, visible) && len(snapshot) > len(visible) {
+		// The upstream retracted onto the text the client actually saw, then
+		// continued from there. The package's own watermark is ahead of it, so
+		// comparing against `sent` would silently drop the continuation.
+		return snapshot[len(visible):], snapshot
 	}
 	// Divergent snapshot: a re-render or duplicate of text already delivered,
 	// not an extension. Emitting it would duplicate content.
 	return "", sent
 }
 
-// readAndProcessStream consumes the upstream SSE-like body line by line.
+// replayedVisiblePrefix returns the length of the prefix of s that re-prints
+// text already sent to the client.
+//
+// The ambiguous shape is a snapshot that only re-prints everything the client
+// already has: "A" followed by "A\nA" is a stream glitch, while a full sentence
+// followed by its own repetition may be deliberate. Two rules separate them:
+//   - a whole-visible replay is suppressed when it introduces nothing new and
+//     the visible text is shorter than minReplayBytes (a short glitch);
+//   - a replay may also start on a line boundary and cover one or more complete
+//     emitted lines (terminated by a newline) of at least minReplayBytes, which
+//     is the paragraph re-render the upstream produces at end of stream.
+//
+// A repeated line that is not terminated in the visible text ("Bonjour" then
+// "\nBonjour") is therefore never swallowed: the client would otherwise lose
+// text it never received.
+func replayedVisiblePrefix(s, visible string) int {
+	if s == "" || visible == "" {
+		return 0
+	}
+	if strings.HasPrefix(s, visible) && endsReplayAtBoundary(s, len(visible)) {
+		nothingNew := len(s) == len(visible)
+		if nothingNew && len(visible) < minReplayBytes {
+			return len(visible)
+		}
+		if strings.HasSuffix(visible, "\n") {
+			return len(visible)
+		}
+	}
+	windowStart := 0
+	if len(visible) > maxReplayScanBytes {
+		windowStart = len(visible) - maxReplayScanBytes
+		firstNewline := strings.IndexByte(visible[windowStart:], '\n')
+		if firstNewline < 0 {
+			// The bounded window holds no complete line.
+			return 0
+		}
+		windowStart += firstNewline + 1
+	}
+	best := 0
+	cursor := windowStart
+	for cursor < len(visible) {
+		newline := strings.IndexByte(visible[cursor:], '\n')
+		if newline < 0 {
+			// A partial trailing line is still streaming: it cannot anchor a
+			// complete-line replay.
+			break
+		}
+		end := cursor + newline + 1
+		if !strings.HasPrefix(s, visible[cursor:end]) {
+			cursor = end
+			continue
+		}
+		matched := end - cursor
+		for end < len(visible) {
+			nextNewline := strings.IndexByte(visible[end:], '\n')
+			if nextNewline < 0 {
+				break
+			}
+			nextEnd := end + nextNewline + 1
+			chunk := visible[end:nextEnd]
+			if !strings.HasPrefix(s[matched:], chunk) {
+				break
+			}
+			matched += len(chunk)
+			end = nextEnd
+		}
+		if matched > best {
+			best = matched
+		}
+		cursor = end
+	}
+	if best < minReplayBytes {
+		return 0
+	}
+	return best
+}
+
+// endsReplayAtBoundary reports whether the replayed prefix ends where a line
+// ends, so a full-buffer match is not mistaken for the model continuing the
+// same sentence.
+func endsReplayAtBoundary(s string, replayed int) bool {
+	if replayed >= len(s) {
+		return true
+	}
+	if s[replayed] == '\n' {
+		return true
+	}
+	return s[replayed] == '\r' && replayed+1 < len(s) && s[replayed+1] == '\n'
+}
+
+// readAndProcessStream consumes the upstream SSE-like body line by line and
+// returns the raw body together with the text actually emitted to the client.
+// The two differ when the upstream re-renders already-emitted paragraphs:
+// the raw body keeps them, the emitted projection does not.
 // Transport callers wrap the body with newStallGuardReader, so a body that
 // stops producing bytes does not block here forever: the guard cancels the
 // request context and surfaces ErrUpstreamStreamStalled.
-func (c *GeminiClient) readAndProcessStream(body io.Reader, onChunk func(text string)) (string, error) {
+func (c *GeminiClient) readAndProcessStream(body io.Reader, onChunk func(text string)) (string, string, error) {
 	var rawBody strings.Builder
 	reader := bufio.NewReader(body)
+	// sent is the upstream watermark, visible the concatenated client output:
+	// they diverge once a replayed paragraph is suppressed.
 	sent := ""
+	var visible strings.Builder
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -340,9 +483,12 @@ func (c *GeminiClient) readAndProcessStream(body io.Reader, onChunk func(text st
 
 				snapshot := tempResp.Text
 				if snapshot != "" && !isArtifactStreamText(snapshot) {
-					delta, newSent := nextStreamDelta(sent, snapshot)
-					if delta != "" && onChunk != nil {
-						onChunk(delta)
+					delta, newSent := nextStreamDelta(sent, visible.String(), snapshot)
+					if delta != "" {
+						visible.WriteString(delta)
+						if onChunk != nil {
+							onChunk(delta)
+						}
 					}
 					sent = newSent
 				}
@@ -352,11 +498,11 @@ func (c *GeminiClient) readAndProcessStream(body io.Reader, onChunk func(text st
 			if err == io.EOF {
 				break
 			}
-			return rawBody.String(), err
+			return rawBody.String(), visible.String(), err
 		}
 	}
 
-	return rawBody.String(), nil
+	return rawBody.String(), visible.String(), nil
 }
 
 func (c *GeminiClient) AskWithTool(prompt string, tool string) (*GeminiResponse, error) {

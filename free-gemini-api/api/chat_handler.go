@@ -219,7 +219,9 @@ func HandleUnifiedChat(c fiber.Ctx) error {
 	}
 
 	prompt := input.Prompt
-	reqModel := input.Model
+	// reasoning_effort selects a thinking variant by name; unsupported families
+	// keep the requested model untouched.
+	reqModel := gemini.ApplyReasoningEffort(input.Model, input.ReasoningEffort)
 	newChat := input.NewChat
 	stream := input.Stream
 	images := input.Images
@@ -410,6 +412,140 @@ func HandleUnifiedChat(c fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
+// recoveredToolResultContent is the placeholder injected when a tool call has
+// no matching result. It is explicitly marked so the model can never mistake
+// the hole for a successful (but empty) tool output and infer from it.
+const recoveredToolResultContent = "[recovered] Tool response was lost during context processing. Do not assume this tool produced output."
+
+// formatToolResultLabel builds the identifier of a flattened tool observation.
+// The OpenAI transcript pairs a result to its call through tool_call_id, so the
+// id is always serialized; the tool name is prepended when it adds information.
+// A label is never empty: a harness that supplies neither field would otherwise
+// produce the unparseable line "[Tool Result for ]:".
+func formatToolResultLabel(name, toolCallID string) string {
+	name = strings.TrimSpace(name)
+	toolCallID = strings.TrimSpace(toolCallID)
+	switch {
+	case toolCallID == "":
+		if name == "" {
+			return "unknown_tool"
+		}
+		return name
+	case name == "" || name == toolCallID:
+		return toolCallID
+	default:
+		return fmt.Sprintf("%s (%s)", name, toolCallID)
+	}
+}
+
+// reconcileTranscriptMessages enforces the assistant call → tool result
+// bijection before the transcript is flattened into prose. A call left without
+// a result (dropped by ThrottleMutatingToolCalls, or lost by a harness) would
+// otherwise leave the model free to invent an output. Every unanswered call
+// receives a visible, explicitly marked synthetic result placed right after
+// the assistant message that emitted it. The input slice and its messages are
+// never modified, real results keep their relative order, and a second pass is
+// a fixed point: a synthesized result carries the call id, so the call is
+// answered on the next run.
+func reconcileTranscriptMessages(messages []OpenAIChatMessage) []OpenAIChatMessage {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	// Pass 1: collect the results already present, keyed by tool_call_id with
+	// an explicit name fallback for harnesses that omit the id.
+	answered := make(map[string]struct{}, len(messages))
+	for _, message := range messages {
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
+			continue
+		}
+		key := strings.TrimSpace(message.ToolCallID)
+		if key == "" {
+			key = strings.TrimSpace(message.Name)
+		}
+		if key != "" {
+			answered[key] = struct{}{}
+		}
+	}
+
+	// Pass 2: build a new list, appending one synthetic result per unanswered
+	// call immediately after its assistant message.
+	out := make([]OpenAIChatMessage, 0, len(messages))
+	synthesized := false
+	for _, message := range messages {
+		out = append(out, message)
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "assistant") || len(message.ToolCalls) == 0 {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			id := strings.TrimSpace(call.ID)
+			if id == "" {
+				// An id-less call cannot be paired reliably; reconcile it by
+				// name would risk inventing a result for a different call.
+				continue
+			}
+			if _, exists := answered[id]; exists {
+				continue
+			}
+			answered[id] = struct{}{}
+			out = append(out, OpenAIChatMessage{
+				Role:       "tool",
+				ToolCallID: id,
+				Name:       call.Function.Name,
+				Content:    contentRawString(recoveredToolResultContent),
+			})
+			synthesized = true
+		}
+	}
+	if !synthesized {
+		return messages
+	}
+	return out
+}
+
+// streamBlockTracker projects cumulative upstream snapshots onto the deltas
+// the client has not received yet. Unlike a monotone rune counter, it rebases
+// its high-water mark whenever a snapshot stops extending the text already
+// sent: a reopened thought block (or a restarted generation) is then emitted
+// in full instead of being silently swallowed by the previous block's mark.
+type streamBlockTracker struct {
+	sent string
+}
+
+func (t *streamBlockTracker) reset() {
+	t.sent = ""
+}
+
+// delta returns the portion of snapshot that has not been emitted yet.
+func (t *streamBlockTracker) delta(snapshot string) string {
+	if snapshot == "" || snapshot == t.sent {
+		return ""
+	}
+	if strings.HasPrefix(snapshot, t.sent) {
+		delta := snapshot[len(t.sent):]
+		t.sent = snapshot
+		return delta
+	}
+	if strings.HasPrefix(t.sent, snapshot) {
+		// The snapshot retracted into the already-emitted prefix (a partial
+		// tag was re-interpreted): nothing new, and the high-water mark must
+		// not move backwards or the retracted text would be sent twice.
+		return ""
+	}
+	// The snapshot no longer extends what was sent: a new thought block was
+	// opened (or the generation restarted). Keep the longest common prefix so
+	// the new block is emitted from its own start without replaying shared
+	// text, then rebase the high-water mark on the new snapshot.
+	previous := []rune(t.sent)
+	current := []rune(snapshot)
+	common := 0
+	for common < len(previous) && common < len(current) && previous[common] == current[common] {
+		common++
+	}
+	t.sent = snapshot
+	return string(current[common:])
+}
+
 // HandleOpenAIChatCompletions handles /v1/chat/completions with Native Tool Calling & Output Arranger
 func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	var req OpenAIChatCompletionRequest
@@ -436,7 +572,15 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Messages array is empty"})
 	}
 
-	_, model, requiredTier := GetChatService().ResolveModel(c, req.Model)
+	// reasoning_effort selects a registry variant by name instead of mutating
+	// the shared ModelConfig (whose ThinkingLevel is read concurrently by every
+	// in-flight request through BuildHeaderValue). An unsupported family keeps
+	// the requested model unchanged.
+	requestedModel := gemini.ApplyReasoningEffort(req.Model, req.ReasoningEffort)
+	if requestedModel != req.Model {
+		log.Printf("🧠 reasoning_effort=%q maps model %q -> %q", req.ReasoningEffort, req.Model, requestedModel)
+	}
+	_, model, requiredTier := GetChatService().ResolveModel(c, requestedModel)
 
 	var tiBlock string
 	if len(req.Tools) > 0 {
@@ -487,6 +631,14 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		len(systemContent)+len(tiBlock),
 	)
 
+	// Enforce the call↔result bijection before flattening: a call without a
+	// result (throttled mutation, aborted turn) receives an explicit
+	// "[recovered]" placeholder instead of silently dangling. The pristine
+	// list is kept for the prompt fallback so a placeholder can never become
+	// the task itself.
+	originalNonSystemMessages := nonSystemMessages
+	nonSystemMessages = reconcileTranscriptMessages(nonSystemMessages)
+
 	// Write System directives & tool schemas at the very top of the prompt
 	if systemContent != "" {
 		fullPromptBuilder.WriteString("[System]: ")
@@ -520,7 +672,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				fullPromptBuilder.WriteString("\n")
 			}
 		} else if strings.EqualFold(m.Role, "tool") {
-			fullPromptBuilder.WriteString(fmt.Sprintf("[Tool Result for %s]: %s\n", m.Name, contentStr))
+			label := formatToolResultLabel(m.Name, m.ToolCallID)
+			fullPromptBuilder.WriteString(fmt.Sprintf("[Tool Result for %s]: %s\n", label, contentStr))
 		} else if strings.EqualFold(m.Role, "system") {
 			if notice := formatSystemNotice(contentStr); notice != "" {
 				fullPromptBuilder.WriteString(notice)
@@ -529,8 +682,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		}
 	}
 
-	if prompt == "" && len(nonSystemMessages) > 0 {
-		lastM := nonSystemMessages[len(nonSystemMessages)-1]
+	if prompt == "" && len(originalNonSystemMessages) > 0 {
+		lastM := originalNonSystemMessages[len(originalNonSystemMessages)-1]
 		fallback := FlattenContent(lastM.Content)
 		if strings.EqualFold(lastM.Role, "user") {
 			// Never fall back to an OpenCode notice-only wrapper: if the
@@ -712,8 +865,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			var usedWorker *AccountWorker
 			var streamResp *gemini.GeminiResponse
 			var accumulatedOutput strings.Builder
-			var emittedThoughtRunes int
-			var emittedContentRunes int
+			var thoughtTracker streamBlockTracker
+			var contentTracker streamBlockTracker
 
 			streamErr := pool.ExecuteQueuedStreamWithTier(streamCtx, sessionID, requiredTier, func(wWorker *AccountWorker) error {
 				usedWorker = wWorker
@@ -729,15 +882,20 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				pseudoReportRetry := false
 				transportRetries := 0
 				emptyGenerationRetries := 0
+				// sendModel is the upstream model actually queried. It starts as
+				// the client-facing model and only escalates to a deeper thinking
+				// variant after a technically empty turn; the response keeps
+				// reporting the model the caller asked for.
+				sendModel := model
 				for attempt := 0; attempt < maxAttempts; attempt++ {
 					var sendPrompt string
-					emittedThoughtRunes = 0
-					emittedContentRunes = 0
+					thoughtTracker.reset()
+					contentTracker.reset()
 					if forceFull {
 						// Previous attempt hit a blocked/empty generation, a
 						// refusal, or an invalid tool call: replay everything
 						// fresh with a targeted override directive.
-						wWorker.Client.ResetConversationStateSession(sessionKey, model)
+						wWorker.Client.ResetConversationStateSession(sessionKey, sendModel)
 						override := ""
 						if len(req.Tools) > 0 {
 							switch {
@@ -756,7 +914,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						// Continuation strategy: continue the session's live upstream
 						// conversation with just the new transcript delta, or reset and
 						// replay the full transcript when that is not safe.
-						curConv := wWorker.Client.CurrentConversationIDFor(sessionKey, model)
+						curConv := wWorker.Client.CurrentConversationIDFor(sessionKey, sendModel)
 						prompt, needReset := planSessionTurn(sessionKey, curConv, msgFlat)
 						if needReset {
 							// The worker may have been recreated by a cookie re-sync
@@ -764,13 +922,13 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							// while the upstream conversation still exists. Restore
 							// the recorded pointer when this worker owns it.
 							if conv, respID, choiceID, lastWorker, valid := peekSessionTurnConv(sessionKey); valid && conv != "" && lastWorker == wWorker.ID && curConv == "" {
-								wWorker.Client.RestoreConversationStateSession(sessionKey, model, conv, respID, choiceID)
+								wWorker.Client.RestoreConversationStateSession(sessionKey, sendModel, conv, respID, choiceID)
 								prompt, needReset = planSessionTurn(sessionKey, conv, msgFlat)
 							}
 						}
 						if needReset {
 							// Full replay: message transcript, turn cue, tool schemas.
-							wWorker.Client.ResetConversationStateSession(sessionKey, model)
+							wWorker.Client.ResetConversationStateSession(sessionKey, sendModel)
 							sendPrompt = msgFlat + antiLoopDirective + effectiveTurnCue
 						} else {
 							sendPrompt = prompt + antiLoopDirective + effectiveTurnCue
@@ -778,37 +936,33 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					}
 
 					accumulatedOutput.Reset()
-					sr, err := wWorker.Client.AskStreamModelSession(sendPrompt, model, func(chunk string) {
+					sr, err := wWorker.Client.AskStreamModelSession(sendPrompt, sendModel, func(chunk string) {
 						accumulatedOutput.WriteString(chunk)
 
 						rawSoFar := accumulatedOutput.String()
 
-						// 1. Live stream thinking tokens whenever available
+						// 1. Live stream thinking tokens whenever available. The
+						// tracker rebases on a reopened thought block instead of
+						// comparing against a stale monotone high-water mark.
 						allThoughts := gemini.ExtractAvailableThoughts(rawSoFar)
-						if allThoughts != "" {
-							thoughtRunes := []rune(allThoughts)
-							if len(thoughtRunes) > emittedThoughtRunes {
-								deltaThought := string(thoughtRunes[emittedThoughtRunes:])
-								emittedThoughtRunes = len(thoughtRunes)
-
-								chunkResp := OpenAIChatCompletionChunk{
-									ID:      chunkID,
-									Object:  "chat.completion.chunk",
-									Created: createdTime,
-									Model:   model,
-									Choices: []OpenAIStreamChoice{
-										{
-											Index: 0,
-											Delta: OpenAIDelta{
-												Role:             "assistant",
-												ReasoningContent: deltaThought,
-											},
+						if deltaThought := thoughtTracker.delta(allThoughts); deltaThought != "" {
+							chunkResp := OpenAIChatCompletionChunk{
+								ID:      chunkID,
+								Object:  "chat.completion.chunk",
+								Created: createdTime,
+								Model:   model,
+								Choices: []OpenAIStreamChoice{
+									{
+										Index: 0,
+										Delta: OpenAIDelta{
+											Role:             "assistant",
+											ReasoningContent: deltaThought,
 										},
 									},
-								}
-								data, _ := json.Marshal(chunkResp)
-								writeChunk(data)
+								},
 							}
+							data, _ := json.Marshal(chunkResp)
+							writeChunk(data)
 						}
 
 						if len(req.Tools) > 0 {
@@ -818,30 +972,24 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 
 						// 2. For non-tool requests, stream content (outside thoughts)
 						allContent := gemini.ExtractAvailableContent(rawSoFar)
-						if allContent != "" {
-							contentRunes := []rune(allContent)
-							if len(contentRunes) > emittedContentRunes {
-								deltaContent := string(contentRunes[emittedContentRunes:])
-								emittedContentRunes = len(contentRunes)
-
-								chunkResp := OpenAIChatCompletionChunk{
-									ID:      chunkID,
-									Object:  "chat.completion.chunk",
-									Created: createdTime,
-									Model:   model,
-									Choices: []OpenAIStreamChoice{
-										{
-											Index: 0,
-											Delta: OpenAIDelta{
-												Role:    "assistant",
-												Content: deltaContent,
-											},
+						if deltaContent := contentTracker.delta(allContent); deltaContent != "" {
+							chunkResp := OpenAIChatCompletionChunk{
+								ID:      chunkID,
+								Object:  "chat.completion.chunk",
+								Created: createdTime,
+								Model:   model,
+								Choices: []OpenAIStreamChoice{
+									{
+										Index: 0,
+										Delta: OpenAIDelta{
+											Role:    "assistant",
+											Content: deltaContent,
 										},
 									},
-								}
-								data, _ := json.Marshal(chunkResp)
-								writeChunk(data)
+								},
 							}
+							data, _ := json.Marshal(chunkResp)
+							writeChunk(data)
 						}
 					}, sessionKey)
 					streamResp = sr
@@ -852,7 +1000,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							// consuming the model's functional attempt.
 							transportRetries++
 							log.Printf("⚠️ Stream transport incident %d/%d (%v), retrying on a fresh upstream conversation without consuming a generation attempt", transportRetries, maxTransportRetries, err)
-							wWorker.Client.ResetConversationStateSession(sessionKey, model)
+							wWorker.Client.ResetConversationStateSession(sessionKey, sendModel)
 							truncationRetry = false
 							schemaRetryDetail = ""
 							pseudoReportRetry = false
@@ -887,7 +1035,18 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					// schema errors, or truncations.
 					if len(req.Tools) > 0 && isEmptyGenerationOutput(finalAttemptText, req.Tools) && emptyGenerationRetries < maxEmptyGenerationRetries {
 						emptyGenerationRetries++
-						log.Printf("⚠️ Empty/thought-only generation %d/%d, retrying on a fresh upstream conversation without consuming a generation attempt", emptyGenerationRetries, maxEmptyGenerationRetries)
+						// An identical empty turn replayed at the same depth
+						// tends to fail identically. Escalate to the next
+						// thinking variant (Low -> Medium -> High, then a fixed
+						// point) by model name, never by mutating the shared
+						// registry entry.
+						if escalated := gemini.EscalateThinkingModel(sendModel); escalated != sendModel {
+							wWorker.Client.ResetConversationStateSession(sessionKey, sendModel)
+							log.Printf("⚠️ Empty/thought-only generation %d/%d: escalating thinking model %q -> %q", emptyGenerationRetries, maxEmptyGenerationRetries, sendModel, escalated)
+							sendModel = escalated
+						} else {
+							log.Printf("⚠️ Empty/thought-only generation %d/%d, retrying on a fresh upstream conversation without consuming a generation attempt", emptyGenerationRetries, maxEmptyGenerationRetries)
+						}
 						truncationRetry = false
 						schemaRetryDetail = ""
 						pseudoReportRetry = false
@@ -1040,30 +1199,27 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					return
 				}
 
-				// Emit any remaining reasoning tokens not yet streamed
-				if arranged.ReasoningContent != "" {
-					rcRunes := []rune(arranged.ReasoningContent)
-					if len(rcRunes) > emittedThoughtRunes {
-						deltaThought := string(rcRunes[emittedThoughtRunes:])
-						emittedThoughtRunes = len(rcRunes)
-						chunkResp := OpenAIChatCompletionChunk{
-							ID:      chunkID,
-							Object:  "chat.completion.chunk",
-							Created: createdTime,
-							Model:   model,
-							Choices: []OpenAIStreamChoice{
-								{
-									Index: 0,
-									Delta: OpenAIDelta{
-										Role:             "assistant",
-										ReasoningContent: deltaThought,
-									},
+				// Emit any remaining reasoning tokens not yet streamed. The
+				// tracker handles a final snapshot that extends, rewrites, or
+				// reopens what was streamed live.
+				if deltaThought := thoughtTracker.delta(arranged.ReasoningContent); deltaThought != "" {
+					chunkResp := OpenAIChatCompletionChunk{
+						ID:      chunkID,
+						Object:  "chat.completion.chunk",
+						Created: createdTime,
+						Model:   model,
+						Choices: []OpenAIStreamChoice{
+							{
+								Index: 0,
+								Delta: OpenAIDelta{
+									Role:             "assistant",
+									ReasoningContent: deltaThought,
 								},
 							},
-						}
-						data, _ := json.Marshal(chunkResp)
-						writeChunk(data)
+						},
 					}
+					data, _ := json.Marshal(chunkResp)
+					writeChunk(data)
 				}
 
 				if arranged.IsToolCall {
@@ -1188,13 +1344,17 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		pseudoReportRetry := false
 		transportRetries := 0
 		emptyGenerationRetries := 0
+		// sendModel is the upstream model actually queried; it escalates to a
+		// deeper thinking variant after a technically empty turn. The response
+		// still reports the model the caller requested.
+		sendModel := model
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			var sendPrompt string
 			if forceFull {
 				// Previous attempt hit a blocked/empty generation, a refusal,
 				// or an invalid tool call: replay everything fresh with a
 				// targeted override directive.
-				w.Client.ResetConversationStateSession(sessionKey, model)
+				w.Client.ResetConversationStateSession(sessionKey, sendModel)
 				override := ""
 				if len(req.Tools) > 0 {
 					switch {
@@ -1210,25 +1370,25 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				}
 				sendPrompt = override + msgFlat + antiLoopDirective + effectiveTurnCue
 			} else {
-				curConv := w.Client.CurrentConversationIDFor(sessionKey, model)
+				curConv := w.Client.CurrentConversationIDFor(sessionKey, sendModel)
 				prompt, needReset := planSessionTurn(sessionKey, curConv, msgFlat)
 				if needReset {
 					// Restore the recorded upstream conversation pointer after a
 					// pool reload recreated this worker (see stream path).
 					if conv, respID, choiceID, lastWorker, valid := peekSessionTurnConv(sessionKey); valid && conv != "" && lastWorker == w.ID && curConv == "" {
-						w.Client.RestoreConversationStateSession(sessionKey, model, conv, respID, choiceID)
+						w.Client.RestoreConversationStateSession(sessionKey, sendModel, conv, respID, choiceID)
 						prompt, needReset = planSessionTurn(sessionKey, conv, msgFlat)
 					}
 				}
 				if needReset {
 					// Full replay: message transcript, turn cue, tool schemas.
-					w.Client.ResetConversationStateSession(sessionKey, model)
+					w.Client.ResetConversationStateSession(sessionKey, sendModel)
 					sendPrompt = msgFlat + antiLoopDirective + effectiveTurnCue
 				} else {
 					sendPrompt = prompt + antiLoopDirective + effectiveTurnCue
 				}
 			}
-			r, err := w.Client.AskModelSession(sendPrompt, model, sessionKey)
+			r, err := w.Client.AskModelSession(sendPrompt, sendModel, sessionKey)
 			if err != nil {
 				if shouldRetryTransport(err, transportRetries) {
 					// A 1097 expiry or a silent upstream stall is a transport
@@ -1237,7 +1397,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					// recovery budget.
 					transportRetries++
 					log.Printf("⚠️ Non-stream transport incident %d/%d (%v), retrying on a fresh upstream conversation without consuming a generation attempt", transportRetries, maxTransportRetries, err)
-					w.Client.ResetConversationStateSession(sessionKey, model)
+					w.Client.ResetConversationStateSession(sessionKey, sendModel)
 					truncationRetry = false
 					schemaRetryDetail = ""
 					pseudoReportRetry = false
@@ -1256,7 +1416,15 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			// errors, or truncations.
 			if len(req.Tools) > 0 && isEmptyGenerationOutput(r.Text, req.Tools) && emptyGenerationRetries < maxEmptyGenerationRetries {
 				emptyGenerationRetries++
-				log.Printf("⚠️ Empty/thought-only generation %d/%d, retrying on a fresh upstream conversation without consuming a generation attempt", emptyGenerationRetries, maxEmptyGenerationRetries)
+				// Escalate the depth on the retry: an identical empty turn at
+				// the same level tends to fail identically.
+				if escalated := gemini.EscalateThinkingModel(sendModel); escalated != sendModel {
+					w.Client.ResetConversationStateSession(sessionKey, sendModel)
+					log.Printf("⚠️ Empty/thought-only generation %d/%d: escalating thinking model %q -> %q", emptyGenerationRetries, maxEmptyGenerationRetries, sendModel, escalated)
+					sendModel = escalated
+				} else {
+					log.Printf("⚠️ Empty/thought-only generation %d/%d, retrying on a fresh upstream conversation without consuming a generation attempt", emptyGenerationRetries, maxEmptyGenerationRetries)
+				}
 				truncationRetry = false
 				schemaRetryDetail = ""
 				pseudoReportRetry = false

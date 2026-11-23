@@ -20,12 +20,13 @@ var errPromptTooLarge = errors.New("prompt exceeds 1 MiB limit")
 // UnifiedChatInput is the decoded form of a /chat request, regardless of
 // whether the caller used JSON or multipart/form-data.
 type UnifiedChatInput struct {
-	Prompt  string
-	UserID  string
-	Model   string
-	NewChat bool
-	Stream  bool
-	Images  []gemini.ImageInput
+	Prompt          string
+	UserID          string
+	Model           string
+	ReasoningEffort string
+	NewChat         bool
+	Stream          bool
+	Images          []gemini.ImageInput
 }
 
 // ChatService owns the coordination shared by the unified chat endpoint and
@@ -75,6 +76,7 @@ func (s *ChatService) DecodeUnifiedChat(c fiber.Ctx) (*UnifiedChatInput, error) 
 		input.NewChat = c.FormValue("new_chat") == "true"
 		input.Stream = c.FormValue("stream") == "true"
 		input.Model = c.FormValue("model")
+		input.ReasoningEffort = c.FormValue("reasoning_effort")
 
 		form, err := c.MultipartForm()
 		if err != nil {
@@ -118,6 +120,7 @@ func (s *ChatService) DecodeUnifiedChat(c fiber.Ctx) (*UnifiedChatInput, error) 
 		input.NewChat = req.NewChat
 		input.Stream = req.Stream
 		input.Model = req.Model
+		input.ReasoningEffort = req.ReasoningEffort
 	}
 
 	if len(input.Prompt) > maxPromptBytes {

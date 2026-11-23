@@ -124,6 +124,97 @@ func TestArgonThinkingLevels(t *testing.T) {
 	}
 }
 
+// TestHydrogenSingleCanonicalDefinition guards A-16: the built-in catalog must
+// contain exactly one definition of gemini-4-hydrogen, and that definition must
+// be the canonical thinking-capable one (default thinking level Low=1).
+func TestHydrogenSingleCanonicalDefinition(t *testing.T) {
+	definitions := 0
+	for _, m := range defaultBuiltinModels {
+		if strings.EqualFold(strings.TrimSpace(m.ID), "gemini-4-hydrogen") {
+			definitions++
+		}
+	}
+	if definitions != 1 {
+		t.Fatalf("defaultBuiltinModels contains %d definitions of gemini-4-hydrogen, want exactly 1", definitions)
+	}
+
+	m, ok := GetModelRegistry().Get("gemini-4-hydrogen")
+	if !ok {
+		t.Fatal("Get(gemini-4-hydrogen) failed")
+	}
+
+	capabilities := make(map[string]bool, len(m.Capabilities))
+	for _, capability := range m.Capabilities {
+		capabilities[capability] = true
+	}
+	for _, want := range []string{"video", "long_context"} {
+		if !capabilities[want] {
+			t.Errorf("gemini-4-hydrogen capabilities %v missing %q", m.Capabilities, want)
+		}
+	}
+
+	if header := m.BuildHeaderValue(); !strings.Contains(header, ",8,1,") {
+		t.Errorf("gemini-4-hydrogen BuildHeaderValue() = %q, want default thinking Low (contains %q)", header, ",8,1,")
+	}
+}
+
+// TestUpstreamAntigravityAliases guards A-15: the upstream Antigravity Hub /
+// OpenCode identifiers gemini-4-<family>-<tier> must resolve through the alias
+// map, including the exact lookups backed by Get and ModelForThinkingTier.
+func TestUpstreamAntigravityAliases(t *testing.T) {
+	reg := GetModelRegistry()
+
+	cases := []struct {
+		upstream      string
+		canonicalID   string
+		thinkingLevel int
+	}{
+		{"gemini-4-argon-high", "gemini-4-argon-thinking-high", 2},
+		{"gemini-4-argon-medium", "gemini-4-argon-thinking-medium", 4},
+		{"gemini-4-argon-low", "gemini-4-argon-thinking-low", 1},
+		{"gemini-4-neon-high", "gemini-4-neon-thinking-high", 2},
+		{"gemini-4-neon-medium", "gemini-4-neon-thinking-medium", 4},
+		{"gemini-4-neon-low", "gemini-4-neon-thinking-low", 1},
+		{"gemini-4-hydrogen-high", "gemini-4-hydrogen-thinking-high", 2},
+		{"gemini-4-hydrogen-medium", "gemini-4-hydrogen-thinking-medium", 4},
+		{"gemini-4-hydrogen-low", "gemini-4-hydrogen-thinking-low", 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.upstream, func(t *testing.T) {
+			got, ok := reg.Get(tc.upstream)
+			if !ok {
+				t.Fatalf("Get(%q) failed", tc.upstream)
+			}
+			if got.ID != tc.canonicalID {
+				t.Errorf("Get(%q).ID = %q, want %q", tc.upstream, got.ID, tc.canonicalID)
+			}
+			if got.ThinkingLevel != tc.thinkingLevel {
+				t.Errorf("Get(%q).ThinkingLevel = %d, want %d", tc.upstream, got.ThinkingLevel, tc.thinkingLevel)
+			}
+
+			resolved := reg.Resolve(tc.upstream)
+			if resolved == nil {
+				t.Fatalf("Resolve(%q) returned nil", tc.upstream)
+			}
+			if resolved.ID != tc.canonicalID {
+				t.Errorf("Resolve(%q).ID = %q, want %q", tc.upstream, resolved.ID, tc.canonicalID)
+			}
+			if resolved.ThinkingLevel != tc.thinkingLevel {
+				t.Errorf("Resolve(%q).ThinkingLevel = %d, want %d", tc.upstream, resolved.ThinkingLevel, tc.thinkingLevel)
+			}
+		})
+	}
+
+	tier, ok := reg.ModelForThinkingTier("gemini-4-argon-high", "low")
+	if !ok {
+		t.Fatal(`ModelForThinkingTier("gemini-4-argon-high", "low") failed`)
+	}
+	if tier != "gemini-4-argon-thinking-low" {
+		t.Errorf(`ModelForThinkingTier("gemini-4-argon-high", "low") = %q, want %q`, tier, "gemini-4-argon-thinking-low")
+	}
+}
+
 func TestNeonThinkingLevelsAndTaskMode(t *testing.T) {
 	reg := GetModelRegistry()
 

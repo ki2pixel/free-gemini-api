@@ -1000,3 +1000,331 @@ func TestArrangeGeminiOutputWithTools_NestedClosedThoughts(t *testing.T) {
 		}
 	}
 }
+
+func decodeCompactSchema(t *testing.T, value any) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal compact schema: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal compact schema: %v", err)
+	}
+	return decoded
+}
+
+func TestCompactParametersSchema_RequiredFiltering(t *testing.T) {
+	t.Run("drops phantom required entries", func(t *testing.T) {
+		decoded := decodeCompactSchema(t, compactParametersSchema(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"a": map[string]any{"type": "string"}},
+			"required":   []any{"a", "b"},
+		}))
+		required, ok := decoded["required"].([]any)
+		if !ok {
+			t.Fatalf("required must survive when one entry is valid: %#v", decoded)
+		}
+		if len(required) != 1 || required[0] != "a" {
+			t.Fatalf("required = %#v, want [\"a\"]", required)
+		}
+	})
+
+	t.Run("omits required when every entry is phantom", func(t *testing.T) {
+		decoded := decodeCompactSchema(t, compactParametersSchema(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"a": map[string]any{"type": "string"}},
+			"required":   []any{"b", "c"},
+		}))
+		if _, exists := decoded["required"]; exists {
+			t.Fatalf("an entirely phantom required list must be omitted: %#v", decoded)
+		}
+	})
+
+	t.Run("keeps required for an opaque object without properties", func(t *testing.T) {
+		decoded := decodeCompactSchema(t, compactParametersSchema(map[string]any{
+			"type":     "object",
+			"required": []any{"a"},
+		}))
+		required, ok := decoded["required"].([]any)
+		if !ok || len(required) != 1 || required[0] != "a" {
+			t.Fatalf("opaque object required list must be preserved: %#v", decoded)
+		}
+	})
+
+	t.Run("filters nested object requirements", func(t *testing.T) {
+		decoded := decodeCompactSchema(t, compactPropertySchema(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"config": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"x": map[string]any{"type": "string"}},
+					"required":   []any{"x", "y"},
+				},
+			},
+		}, 0))
+		props, ok := decoded["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("properties missing from compacted object: %#v", decoded)
+		}
+		config, ok := props["config"].(map[string]any)
+		if !ok {
+			t.Fatalf("nested config schema missing: %#v", props)
+		}
+		required, ok := config["required"].([]any)
+		if !ok || len(required) != 1 || required[0] != "x" {
+			t.Fatalf("nested required = %#v, want [\"x\"]", config["required"])
+		}
+	})
+}
+
+func TestCompactPropertySchema_ArrayMissingItems(t *testing.T) {
+	t.Run("injects a default items schema", func(t *testing.T) {
+		decoded := decodeCompactSchema(t, compactPropertySchema(map[string]any{"type": "array"}, 0))
+		items, ok := decoded["items"].(map[string]any)
+		if !ok || items["type"] != "string" {
+			t.Fatalf("array without items must get {\"type\":\"string\"}: %#v", decoded)
+		}
+	})
+
+	t.Run("is case insensitive", func(t *testing.T) {
+		decoded := decodeCompactSchema(t, compactPropertySchema(map[string]any{"type": "ARRAY"}, 0))
+		items, ok := decoded["items"].(map[string]any)
+		if !ok || items["type"] != "string" {
+			t.Fatalf("ARRAY without items must get a default items schema: %#v", decoded)
+		}
+	})
+
+	t.Run("preserves declared items", func(t *testing.T) {
+		decoded := decodeCompactSchema(t, compactPropertySchema(map[string]any{
+			"type":  "array",
+			"items": map[string]any{"type": "integer"},
+		}, 0))
+		items, ok := decoded["items"].(map[string]any)
+		if !ok || items["type"] != "integer" {
+			t.Fatalf("declared items must be preserved: %#v", decoded)
+		}
+	})
+
+	t.Run("replaces null items", func(t *testing.T) {
+		decoded := decodeCompactSchema(t, compactPropertySchema(map[string]any{
+			"type":  "array",
+			"items": nil,
+		}, 0))
+		items, ok := decoded["items"].(map[string]any)
+		if !ok || items["type"] != "string" {
+			t.Fatalf("null items must be replaced by the default: %#v", decoded)
+		}
+	})
+
+	t.Run("recurses into nested arrays", func(t *testing.T) {
+		decoded := decodeCompactSchema(t, compactPropertySchema(map[string]any{
+			"type":  "array",
+			"items": map[string]any{"type": "array"},
+		}, 0))
+		items, _ := decoded["items"].(map[string]any)
+		nested, ok := items["items"].(map[string]any)
+		if !ok || nested["type"] != "string" {
+			t.Fatalf("nested array must also receive items: %#v", decoded)
+		}
+	})
+}
+
+// compactCatalog decodes the tool catalog embedded in a FormatToolsInstruction
+// prompt, which is the exact text the model receives.
+func compactCatalog(t *testing.T, out string) []map[string]any {
+	t.Helper()
+	const fence = "```json\n"
+	start := strings.Index(out, fence)
+	if start == -1 {
+		t.Fatalf("tool catalog not found")
+	}
+	start += len(fence)
+	relEnd := strings.Index(out[start:], "\n```")
+	if relEnd == -1 {
+		t.Fatalf("tool catalog closing fence not found")
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal([]byte(out[start:start+relEnd]), &decoded); err != nil {
+		t.Fatalf("tool catalog is not valid JSON: %v", err)
+	}
+	return decoded
+}
+
+func TestInjectStrictParameterSignatures(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema map[string]any
+		want   []string
+		absent []string
+	}{
+		{
+			name: "required markers and declaration order",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":    map[string]any{"type": "string"},
+					"content": map[string]any{"type": "string"},
+					"timeout": map[string]any{"type": "integer"},
+				},
+				"required": []any{"path", "content"},
+			},
+			want: []string{
+				"path string, REQUIRED",
+				"content string, REQUIRED",
+				"timeout integer",
+			},
+			absent: []string{"timeout integer, REQUIRED"},
+		},
+		{
+			name: "enum and array item types",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"mode":  map[string]any{"type": "string", "enum": []any{"fast", "safe"}},
+					"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"flag":  map[string]any{"type": "boolean"},
+				},
+				"required": []any{"mode"},
+			},
+			want: []string{
+				"mode string enum[fast|safe]",
+				"paths array of string",
+				"flag boolean",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tools := []map[string]any{{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "demo",
+					"description": "Demo tool",
+					"parameters":  tc.schema,
+				},
+			}}
+			catalog := compactCatalog(t, FormatToolsInstruction(tools))
+			if len(catalog) != 1 {
+				t.Fatalf("expected 1 tool, got %d", len(catalog))
+			}
+			description, _ := catalog[0]["description"].(string)
+			if !strings.Contains(description, "STRICT PARAMETERS:") {
+				t.Fatalf("signature missing from description: %q", description)
+			}
+			for _, expected := range tc.want {
+				if !strings.Contains(description, expected) {
+					t.Errorf("signature %q missing from %q", expected, description)
+				}
+			}
+			for _, unexpected := range tc.absent {
+				if strings.Contains(description, unexpected) {
+					t.Errorf("signature must not contain %q: %q", unexpected, description)
+				}
+			}
+		})
+	}
+}
+
+func TestInjectStrictParameterSignatures_ComputedOnCompactedSchema(t *testing.T) {
+	// `ghost` is declared required but absent from properties: the compaction
+	// drops it from the emitted schema, so the signature must not advertise it.
+	tools := []map[string]any{{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "write",
+			"description": "Write a file",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":    map[string]any{"type": "string"},
+					"content": map[string]any{"type": "string"},
+				},
+				"required": []any{"path", "content", "ghost"},
+			},
+		},
+	}}
+	catalog := compactCatalog(t, FormatToolsInstruction(tools))
+	description, _ := catalog[0]["description"].(string)
+	if strings.Contains(description, "ghost") {
+		t.Fatalf("signature advertised a parameter absent from the schema: %q", description)
+	}
+	if !strings.Contains(description, "path string, REQUIRED") {
+		t.Fatalf("declared parameters missing from signature: %q", description)
+	}
+}
+
+func TestInjectStrictParameterSignatures_Idempotent(t *testing.T) {
+	tools := []map[string]any{{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "read",
+			"description": "Read a file",
+			"parameters": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"path": map[string]any{"type": "string"}},
+				"required":   []any{"path"},
+			},
+		},
+	}}
+	first := compactCatalog(t, FormatToolsInstruction(tools))
+	// Feed the produced description back in: the guard must not double it.
+	fn := tools[0]["function"].(map[string]any)
+	fn["description"] = first[0]["description"]
+	second := compactCatalog(t, FormatToolsInstruction(tools))
+
+	firstDesc, _ := first[0]["description"].(string)
+	secondDesc, _ := second[0]["description"].(string)
+	if firstDesc != secondDesc {
+		t.Fatalf("signature injection is not idempotent:\nfirst=%q\nsecond=%q", firstDesc, secondDesc)
+	}
+	if strings.Count(secondDesc, "STRICT PARAMETERS:") != 1 {
+		t.Fatalf("signature injected twice: %q", secondDesc)
+	}
+}
+
+func TestInjectStrictParameterSignatures_NoParameters(t *testing.T) {
+	tools := []map[string]any{{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "list",
+			"description": "List a directory",
+		},
+	}}
+	catalog := compactCatalog(t, FormatToolsInstruction(tools))
+	description, _ := catalog[0]["description"].(string)
+	if strings.Contains(description, "STRICT PARAMETERS:") {
+		t.Fatalf("a parameterless tool must not advertise a signature: %q", description)
+	}
+}
+
+func TestFormatToolsInstruction_Hardened(t *testing.T) {
+	out := FormatToolsInstruction([]map[string]any{{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "write",
+			"description": "Write a file",
+			"parameters": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"path": map[string]any{"type": "string"}},
+				"required":   []any{"path"},
+			},
+		},
+	}})
+	for _, required := range []string{
+		"Metadata-First",
+		"NEVER guess parameter names from prior training data",
+		"STRICT PARAMETERS",
+		"the schema wins",
+	} {
+		if !strings.Contains(out, required) {
+			t.Errorf("hardened rule 4 must contain %q", required)
+		}
+	}
+	// The hardening must live inside the existing numbered rule, not in a new
+	// block: the prefix of the prompt has to stay stable for session reuse.
+	if strings.Count(out, "Metadata-First") != 1 {
+		t.Errorf("rule 4 must be merged, not duplicated")
+	}
+}

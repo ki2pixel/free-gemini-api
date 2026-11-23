@@ -71,6 +71,12 @@ type OpenAIChatCompletionRequest struct {
 	ToolChoice any                 `json:"tool_choice,omitempty"`
 	Stream     bool                `json:"stream"`
 	User       *string             `json:"user,omitempty"`
+	// ReasoningEffort selects a deeper thinking variant of the requested model
+	// family: "low"/"medium"/"high" map to the registry's -thinking-* entries,
+	// "none" drops an explicit tier. Unknown values and families without
+	// thinking variants are ignored silently, because harnesses send this field
+	// by default. It never mutates the shared ModelConfig.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type OpenAIChoice struct {

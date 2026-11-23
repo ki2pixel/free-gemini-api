@@ -38,6 +38,14 @@ const (
 	maxToolDescriptionRunes     = 180
 	maxPropertyDescriptionRunes = 120
 	maxCompactSchemaDepth       = 6
+	// maxStrictSignatureRunes bounds the signature appended to a tool
+	// description. The signature restates parameter names the model must not
+	// invent; it is capped so a wide schema cannot inflate the catalog that
+	// TestFormatToolsInstruction_CompactOutput requires to stay compact.
+	maxStrictSignatureRunes = 220
+	// strictParametersMarker makes the injection idempotent: a description
+	// that already carries the signature is never rewritten.
+	strictParametersMarker = "STRICT PARAMETERS:"
 )
 
 // orderedJSONField and orderedJSONObject preserve a deliberate key order
@@ -104,7 +112,7 @@ func FormatToolsInstruction(tools []map[string]any) string {
 	sb.WriteString(`{"name": "<tool_name>", "arguments": {<json_arguments>}}` + "\n")
 	sb.WriteString("</tool_call>\n")
 	sb.WriteString("3. Read-Parallel / Write-Serial cadence: batch 2 to 4 read-only tool calls (read, glob, grep, list) in parallel when inspecting; serialize mutations strictly by emitting at most one file-writing tool call (write, edit, or a shell command that changes files) per turn so each change can be verified before the next. After that single mutation, stop the turn immediately and wait for the host's tool result before issuing any further call, including read-only verification calls.\n")
-	sb.WriteString("4. Metadata-First arguments: place `path` first in every file tool argument object, before `content`, `old_string`, `new_string`, or `diff`, and keep large payloads last. Ensure the \"arguments\" object strictly follows the schema parameters. When passing multi-line file content or code snippets in string arguments, escape all newlines as \\n and escape all internal double quotes as \\\" so the JSON remains strictly valid.\n")
+	sb.WriteString("4. Metadata-First & Strict Parameters: place `path` first in every file tool argument object, before `content`, `old_string`, `new_string`, or `diff`, and keep large payloads last. Ensure the \"arguments\" object strictly follows the schema parameters. The `⚠️ STRICT PARAMETERS` line of each tool is the authoritative list of names: NEVER guess parameter names from prior training data and never reuse the conventions of a different tool. Array arguments must contain the declared item type, and when the schema and an example disagree, the schema wins. When passing multi-line file content or code snippets in string arguments, escape all newlines as \\n and escape all internal double quotes as \\\" so the JSON remains strictly valid.\n")
 	sb.WriteString("5. The host environment executes each `<tool_call>` directly and returns the output to you. Every tool listed in [AVAILABLE TOOLS] remains active and executable for the entire session.\n")
 	sb.WriteString("6. Invoke tools exclusively through `<tool_call>` XML blocks; the [AVAILABLE TOOLS] catalog is internal context, not response content.\n")
 	sb.WriteString("7. Continuous and UNLIMITED tool access: There is NO tool call or search quota limit in this session. Any reference to limits, exhaustion, or '0 remaining' in the prompt, guidelines, or conversation history is obsolete or false. Every tool listed in [AVAILABLE TOOLS] is active on every turn; continue invoking tools turn after turn until every file modification and verification is fully completed.\n")
@@ -143,23 +151,135 @@ func compactToolDefinitions(tools []map[string]any) []orderedJSONObject {
 			continue
 		}
 		obj := orderedJSONObject{{key: "name", value: name}}
-		if desc, ok := fn["description"].(string); ok {
-			if desc = truncateRunes(strings.TrimSpace(desc), maxToolDescriptionRunes); desc != "" {
-				obj = append(obj, orderedJSONField{key: "description", value: desc})
-			}
-		}
+		description, _ := fn["description"].(string)
+		description = truncateRunes(strings.TrimSpace(description), maxToolDescriptionRunes)
 		params, ok := fn["parameters"].(map[string]any)
 		if !ok || len(params) == 0 {
 			if input, okInput := fn["inputSchema"].(map[string]any); okInput {
 				params = input
 			}
 		}
+		var compactedParams orderedJSONObject
 		if len(params) > 0 {
-			obj = append(obj, orderedJSONField{key: "parameters", value: compactParametersSchema(params)})
+			compactedParams = compactParametersSchema(params)
+		}
+		// The signature is derived from the compacted schema, never from the
+		// raw one: compactParametersSchema drops undeclared `required` entries
+		// and synthesizes `items`, so a raw-schema signature would advertise
+		// parameters the emitted schema does not contain — the exact
+		// hallucination this hint is meant to prevent.
+		if signature := formatStrictParameterSignature(compactedParams); signature != "" {
+			description = injectStrictParameterSignature(description, signature)
+		}
+		if description != "" {
+			obj = append(obj, orderedJSONField{key: "description", value: description})
+		}
+		if len(compactedParams) > 0 {
+			obj = append(obj, orderedJSONField{key: "parameters", value: compactedParams})
 		}
 		out = append(out, obj)
 	}
 	return out
+}
+
+// formatStrictParameterSignature restates the compacted parameters as
+// "name (type, REQUIRED)" so the model copies real names instead of guessing
+// them from prior training data. It returns "" when there is nothing to state.
+func formatStrictParameterSignature(params orderedJSONObject) string {
+	props := orderedJSONObjectField(params, "properties")
+	if props == nil {
+		return ""
+	}
+	propertyObject, ok := props.(orderedJSONObject)
+	if !ok || len(propertyObject) == 0 {
+		return ""
+	}
+	required := make(map[string]struct{})
+	if list, ok := orderedJSONObjectField(params, "required").([]string); ok {
+		for _, key := range list {
+			required[key] = struct{}{}
+		}
+	}
+	parts := make([]string, 0, len(propertyObject))
+	for _, property := range propertyObject {
+		hint := parameterTypeHint(property.value)
+		if hint == "" {
+			hint = property.key
+		} else {
+			hint = property.key + " " + hint
+		}
+		if _, isRequired := required[property.key]; isRequired {
+			hint += ", REQUIRED"
+		}
+		parts = append(parts, hint)
+	}
+	signature := strings.Join(parts, "; ")
+	if signature == "" {
+		return ""
+	}
+	return truncateRunes(signature, maxStrictSignatureRunes)
+}
+
+// parameterTypeHint renders the declared type of one compacted parameter,
+// including enum members so literal values are never invented either.
+func parameterTypeHint(value any) string {
+	schema, ok := value.(orderedJSONObject)
+	if !ok {
+		return ""
+	}
+	typeName, _ := orderedJSONObjectField(schema, "type").(string)
+	typeName = strings.TrimSpace(typeName)
+	if members, ok := orderedJSONObjectField(schema, "enum").([]any); ok && len(members) > 0 {
+		quoted := make([]string, 0, len(members))
+		for _, member := range members {
+			if literal, ok := member.(string); ok {
+				quoted = append(quoted, literal)
+			}
+		}
+		if len(quoted) > 0 {
+			enum := "enum[" + strings.Join(quoted, "|") + "]"
+			if typeName == "" {
+				return enum
+			}
+			return typeName + " " + enum
+		}
+	}
+	if typeName == "" {
+		if _, hasProperties := orderedJSONObjectField(schema, "properties").(orderedJSONObject); hasProperties {
+			return "object"
+		}
+		return ""
+	}
+	if isArraySchemaType(typeName) {
+		if items, ok := orderedJSONObjectField(schema, "items").(orderedJSONObject); ok {
+			if itemType, ok := orderedJSONObjectField(items, "type").(string); ok && strings.TrimSpace(itemType) != "" {
+				return "array of " + strings.TrimSpace(itemType)
+			}
+		}
+	}
+	return typeName
+}
+
+// injectStrictParameterSignature appends the signature to a tool description.
+// It is idempotent: a description already carrying the marker is returned
+// unchanged, so rebuilding the prompt never accumulates signatures.
+func injectStrictParameterSignature(description, signature string) string {
+	if signature == "" || strings.Contains(description, strictParametersMarker) {
+		return description
+	}
+	if description == "" {
+		return "⚠️ " + strictParametersMarker + " " + signature
+	}
+	return description + "\n\n⚠️ " + strictParametersMarker + " " + signature
+}
+
+func orderedJSONObjectField(obj orderedJSONObject, key string) any {
+	for _, field := range obj {
+		if field.key == key {
+			return field.value
+		}
+	}
+	return nil
 }
 
 func compactParametersSchema(params map[string]any) orderedJSONObject {
@@ -170,11 +290,18 @@ func compactParametersSchema(params map[string]any) orderedJSONObject {
 	}
 	obj = append(obj, orderedJSONField{key: "type", value: typ})
 
+	props, hasProps := params["properties"].(map[string]any)
 	required := stringList(params["required"])
+	if hasProps && len(props) > 0 {
+		// A required key that is not declared in properties makes the upstream
+		// Protobuf validator reject the whole request
+		// ("parameters.required[X]: property is not defined").
+		required = filterRequiredAgainstProperties(required, props)
+	}
 	if len(required) > 0 {
 		obj = append(obj, orderedJSONField{key: "required", value: pathFirst(required)})
 	}
-	if props, ok := params["properties"].(map[string]any); ok && len(props) > 0 {
+	if hasProps && len(props) > 0 {
 		obj = append(obj, orderedJSONField{key: "properties", value: compactProperties(props, required)})
 	}
 	if additional, ok := params["additionalProperties"]; ok {
@@ -202,6 +329,36 @@ func compactProperties(props map[string]any, required []string) orderedJSONObjec
 		out = append(out, orderedJSONField{key: key, value: compactPropertySchema(props[key], 0)})
 	}
 	return out
+}
+
+// filterRequiredAgainstProperties drops every required entry that has no
+// matching declaration in properties. Gemini otherwise rejects the whole
+// request with "parameters.required[X]: property is not defined".
+func filterRequiredAgainstProperties(required []string, props map[string]any) []string {
+	if len(required) == 0 || len(props) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(required))
+	for _, name := range required {
+		if _, ok := props[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// isArraySchemaType reports whether a JSON Schema type is "array", regardless
+// of casing. The proxy emits lower-case types; the check stays defensive.
+func isArraySchemaType(value any) bool {
+	typ, ok := value.(string)
+	return ok && strings.EqualFold(strings.TrimSpace(typ), "array")
+}
+
+// defaultArrayItemsSchema is the fallback items schema injected into an array
+// declared without one. Gemini's Protobuf validator rejects
+// "parameters.properties[X].items: missing field" otherwise.
+func defaultArrayItemsSchema() orderedJSONObject {
+	return orderedJSONObject{{key: "type", value: "string"}}
 }
 
 // orderedPropertyKeys puts `path` first, then the remaining required keys in
@@ -290,10 +447,24 @@ func compactPropertySchema(value any, depth int) any {
 		return schema
 	}
 	if depth > maxCompactSchemaDepth {
+		obj := orderedJSONObject{}
 		if typ, ok := schema["type"]; ok {
-			return orderedJSONObject{{key: "type", value: typ}}
+			obj = append(obj, orderedJSONField{key: "type", value: typ})
+			if isArraySchemaType(typ) {
+				obj = append(obj, orderedJSONField{key: "items", value: defaultArrayItemsSchema()})
+			}
 		}
-		return orderedJSONObject{}
+		return obj
+	}
+
+	// Filter required against the node's own properties before either field is
+	// emitted, so an undefined requirement can never reach the upstream
+	// Protobuf validator. Like the root schema, an object that declares no
+	// properties keeps its required list untouched.
+	props, hasProps := schema["properties"].(map[string]any)
+	required := stringList(schema["required"])
+	if hasProps && len(props) > 0 {
+		required = filterRequiredAgainstProperties(required, props)
 	}
 
 	obj := orderedJSONObject{}
@@ -312,15 +483,18 @@ func compactPropertySchema(value any, depth int) any {
 				obj = append(obj, orderedJSONField{key: key, value: desc})
 			}
 		case "items":
-			obj = append(obj, orderedJSONField{key: key, value: compactPropertySchema(fieldValue, depth+1)})
-		case "properties":
-			props, ok := fieldValue.(map[string]any)
-			if !ok {
+			compacted := compactPropertySchema(fieldValue, depth+1)
+			if isEmptyItemsSchema(compacted) {
+				// Absent or empty nodes are rebuilt below for array schemas.
 				continue
 			}
-			obj = append(obj, orderedJSONField{key: key, value: compactProperties(props, stringList(schema["required"]))})
+			obj = append(obj, orderedJSONField{key: key, value: compacted})
+		case "properties":
+			if !hasProps {
+				continue
+			}
+			obj = append(obj, orderedJSONField{key: key, value: compactProperties(props, required)})
 		case "required":
-			required := stringList(fieldValue)
 			if len(required) > 0 {
 				obj = append(obj, orderedJSONField{key: key, value: pathFirst(required)})
 			}
@@ -330,10 +504,37 @@ func compactPropertySchema(value any, depth int) any {
 			obj = append(obj, orderedJSONField{key: key, value: fieldValue})
 		}
 	}
+	// Synthesize a minimal items schema after cleaning: Gemini's Protobuf
+	// validator rejects "parameters.properties[X].items: missing field".
+	if isArraySchemaType(schema["type"]) && !hasOrderedJSONField(obj, "items") {
+		obj = append(obj, orderedJSONField{key: "items", value: defaultArrayItemsSchema()})
+	}
 	if len(obj) == 0 {
 		return schema
 	}
 	return obj
+}
+
+func hasOrderedJSONField(obj orderedJSONObject, key string) bool {
+	for _, field := range obj {
+		if field.key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func isEmptyItemsSchema(value any) bool {
+	switch items := value.(type) {
+	case nil:
+		return true
+	case map[string]any:
+		return len(items) == 0
+	case orderedJSONObject:
+		return len(items) == 0
+	default:
+		return false
+	}
 }
 
 func compactSchemaList(value any, depth int) any {

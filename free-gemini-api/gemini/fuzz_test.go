@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -40,9 +41,14 @@ func FuzzNextStreamDelta(f *testing.F) {
 	f.Add("", "new")
 
 	f.Fuzz(func(t *testing.T, sent, snapshot string) {
-		delta, newSent := nextStreamDelta(sent, snapshot)
+		delta, newSent := nextStreamDelta(sent, sent, snapshot)
 		if delta != "" && newSent == sent {
 			t.Fatal("a non-empty delta must advance the sent snapshot")
+		}
+		// A suppressed delta must not lose text: the upstream mark may move
+		// only when the snapshot is a replay of what the client already has.
+		if delta == "" && newSent != sent && !strings.Contains(newSent, sent) {
+			t.Fatalf("mark moved to %q without extending %q", newSent, sent)
 		}
 	})
 }
