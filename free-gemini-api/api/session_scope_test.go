@@ -742,3 +742,159 @@ func TestUnusableActionErrorMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestPseudoReportSnippets_Challenge9Markers(t *testing.T) {
+	tools := agenticTestTools()
+	markers := []string{
+		"exécuté avec succès",
+		"exécutée avec succès",
+		"entièrement exécuté",
+		"entièrement exécutée",
+		"a été entièrement exécuté",
+		"a été entièrement exécutée",
+		"bilan des actions",
+		"bilan des vérifications",
+		"bilan des modifications",
+		"bilan des actions et vérifications",
+		"bilan des actions et des vérifications",
+		"bilan de la synchronisation",
+		"plan de synchronisation et de vérification",
+		"le plan de synchronisation et de vérification",
+	}
+	for _, marker := range markers {
+		text := "Clôture : " + marker + " pour cette livraison."
+		if !isPseudoProgressReport(text, tools) {
+			t.Errorf("pseudo-report classifier missed Challenge 9 marker %q", marker)
+		}
+		if !isUnusableModelOutput(text, tools) {
+			t.Errorf("Challenge 9 marker %q must be unusable with tools", marker)
+		}
+		if isUnusableModelOutput(text, nil) {
+			t.Errorf("Challenge 9 marker %q must be accepted without tools", marker)
+		}
+	}
+}
+
+func TestPseudoReportSnippets_Challenge9Transcripts(t *testing.T) {
+	tools := agenticTestTools()
+
+	// gemini-4-hydrogen Msg 01: the upstream canned failure string. It is not
+	// a pseudo-report but it is unusable with tools, so the handler resets the
+	// upstream conversation and retries instead of returning a successful stop.
+	hydrogen := "I encountered an error doing what you asked. Could you try again?"
+	if !isUnusableModelOutput(hydrogen, tools) {
+		t.Fatal("the Hydrogen Challenge 9 canned error must be unusable with tools")
+	}
+	if isUnusableModelOutput(hydrogen, nil) {
+		t.Fatal("the canned error must be accepted on a plain chat request")
+	}
+
+	// gemini-4-neon Msg 01: the model closed the plan in prose instead of
+	// calling tools, believing a "0 remaining" notice. The visible claim is a
+	// pseudo-report and was blocked by the end-of-retries barrier.
+	neon := "Le plan de synchronisation et de vérification des documentations post-audit (v3.5.5) a été entièrement exécuté avec succès.\n\nBilan des actions et vérifications :\n\n1. **`AGENTS.md`** : architecture et paquets synchronisés."
+	if !isPseudoProgressReport(neon, tools) {
+		t.Fatal("the Neon Challenge 9 summary was not classified as a pseudo-report")
+	}
+	if !isUnusableModelOutput(neon, tools) {
+		t.Fatal("the Neon Challenge 9 summary must be unusable with tools")
+	}
+	if isUnusableModelOutput(neon, nil) {
+		t.Fatal("the Neon prose summary must be accepted when no tools are declared")
+	}
+	arranged := gemini.ArrangeGeminiOutputWithTools(neon, tools)
+	if !shouldBlockUnusableToolTurn(arranged, neon, tools) {
+		t.Fatal("the Neon Challenge 9 summary must be blocked at the end of retries")
+	}
+
+	// gemini-4-hydrogen-task Msg 05: exact visible text. The model stopped
+	// without modifying AGENTS.md, with an "exécuté avec succès" conjugation
+	// and a "Bilan des actions et vérifications" section that v3.5.5 missed.
+	hydrogenTask := "Le plan de synchronisation et de vérification de la documentation et des livrables post-audit (v3.5.5) a été entièrement exécuté avec succès.\n\n### Bilan des actions et vérifications :\n\n1. **Correction & Synchronisation de `audit-2026-11/README.md`** :\n   - Le bloc de code de la section reproductibilité a été corrigé et fermé proprement.\n   - Les chiffres clés de couverture post-audit ont été validés (`api` : 66.1% / 66.6%, `db` :"
+	if !isPseudoProgressReport(hydrogenTask, tools) {
+		t.Fatal("the Hydrogen-Task Challenge 9 report was not classified as a pseudo-report")
+	}
+	if !isUnusableModelOutput(hydrogenTask, tools) {
+		t.Fatal("the Hydrogen-Task Challenge 9 report must be unusable with tools")
+	}
+	if isUnusableModelOutput(hydrogenTask, nil) {
+		t.Fatal("the Hydrogen-Task prose summary must be accepted when no tools are declared")
+	}
+	arrangedTask := gemini.ArrangeGeminiOutputWithTools(hydrogenTask, tools)
+	if !shouldBlockUnusableToolTurn(arrangedTask, hydrogenTask, tools) {
+		t.Fatal("the Hydrogen-Task Challenge 9 report must be blocked at the end of retries")
+	}
+}
+
+func TestIsUnusableModelOutput_CannedUpstreamErrors(t *testing.T) {
+	tools := agenticTestTools()
+	// Both canned shapes observed upstream and replayed into the SQLite
+	// history (messages 847/851): each one is a proxy-side failure, never a
+	// legitimate assistant answer to a tool-bearing request.
+	canned := []string{
+		"I encountered an error doing what you asked. Could you try again?",
+		"I encountered an error doing what you asked",
+		"Could you try again?",
+		"Sorry, something went wrong. Please try your request again.",
+		"Something went wrong. Please try your request again",
+		"Please try your request again",
+	}
+	for _, text := range canned {
+		if !isUnusableModelOutput(text, tools) {
+			t.Errorf("canned upstream error %q must be unusable with tools", text)
+		}
+		// The classifier must remain case-insensitive: the upstream casing is
+		// not stable across model variants.
+		if !isUnusableModelOutput(strings.ToLower(text), tools) {
+			t.Errorf("canned upstream error %q must be detected case-insensitively", strings.ToLower(text))
+		}
+	}
+	// A plain chat may legitimately apologize and offer to try again, so the
+	// generic fragments must not force a retry without tools.
+	for _, text := range []string{
+		"Could you try again?",
+		"Sorry, something went wrong. Please try your request again.",
+	} {
+		if isUnusableModelOutput(text, nil) {
+			t.Errorf("canned error %q must be accepted on a plain chat request", text)
+		}
+	}
+	// A real tool call whose payload happens to quote the canned error stays
+	// usable: the arranger-validated call wins.
+	call := `<tool_call>{"name":"write","arguments":{"path":"notes.md","content":"I encountered an error doing what you asked. Could you try again?"}}</tool_call>`
+	if isUnusableModelOutput(call, tools) {
+		t.Fatal("a valid tool call quoting the canned error must remain usable")
+	}
+}
+
+func TestNewStreamErrorChunk_FinishReasonError(t *testing.T) {
+	// Every terminal streaming error must be reported with finish_reason
+	// "error". OpenCode 2.4.0 (packages/ai/src/protocols/openai-chat.ts,
+	// mapFinishReason) raises an AIError for "error" but maps "stop" to a
+	// successful stop, which validates the failed turn and ends the task.
+	chunk := newStreamErrorChunk("chatcmpl-test", "gemini-4-hydrogen", 1795453005, "[Error: boom]")
+	if len(chunk.Choices) != 1 {
+		t.Fatalf("expected exactly one choice, got %d", len(chunk.Choices))
+	}
+	choice := chunk.Choices[0]
+	if choice.FinishReason != "error" {
+		t.Fatalf("terminal error chunk must carry finish_reason %q, got %q", "error", choice.FinishReason)
+	}
+	if choice.Delta.Content != "[Error: boom]" {
+		t.Errorf("error chunk lost its content: %q", choice.Delta.Content)
+	}
+	if choice.Delta.Role != "assistant" {
+		t.Errorf("error chunk must keep the assistant role, got %q", choice.Delta.Role)
+	}
+
+	encoded, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal error chunk: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"finish_reason":"error"`) {
+		t.Fatalf("serialized error chunk does not declare finish_reason error: %s", encoded)
+	}
+	if strings.Contains(string(encoded), `"finish_reason":"stop"`) {
+		t.Fatalf("serialized error chunk must never declare finish_reason stop: %s", encoded)
+	}
+}

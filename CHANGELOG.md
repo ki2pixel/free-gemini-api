@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.6] - 2026-11-23
+
+### Added
+- **Canned Upstream Error Interception (`api/session_transcripts.go`)**:
+  - Added Google's own generation-failure strings to `refusalSnippets` and to the `canned` list of `isUnusableModelOutput`: `i encountered an error doing what you asked`, `could you try again?`, `sorry, something went wrong`, `something went wrong. please try your request again`, and `please try your request again`.
+  - On a tool-bearing request these outputs are now classified as unusable: the session is invalidated and the turn is retried on a fresh upstream conversation instead of being returned as a successful `finish_reason: "stop"` (v3.5.5 Challenge 9 Hydrogen, Msg 01).
+  - The list is matched case-insensitively. Without tools the same prose remains a legitimate answer, and an arranger-validated tool call always wins over the prose classifiers.
+- **Challenge 9 Pseudo-Report Coverage (`api/session_transcripts.go`)**:
+  - Added the completion conjugations `exécuté avec succès`, `exécutée avec succès`, `entièrement exécuté`, `entièrement exécutée`, `a été entièrement exécuté`, and `a été entièrement exécutée` to `pseudoReportSnippets`.
+  - Added the closing-section markers `bilan des actions`, `bilan des vérifications`, `bilan des modifications`, `bilan des actions et vérifications`, `bilan des actions et des vérifications`, and `bilan de la synchronisation`.
+  - Added `plan de synchronisation et de vérification` and `le plan de synchronisation et de vérification`.
+- **Unlimited Tool Access at Turn 0 (`gemini/arranger.go`)**:
+  - `FormatToolsInstruction` point 7 now states peremptorily that there is NO tool call or search quota limit, that any reference to limits, exhaustion, or `0 remaining` is obsolete or false, and that every listed tool is active on every turn until every modification and verification is complete. This denies the hallucinated quota notice at initialization instead of only after a retry.
+
+### Changed
+- **`isUnusableModelOutput` ordering (`api/session_transcripts.go`)**:
+  - A mutating tool call truncated mid-value is rejected first, then an arranger-validated tool call short-circuits every prose classifier, then thought-only output, canned failures, refusals, and pseudo-reports are evaluated. A payload that merely quotes a canned error or a completion marker is therefore never blocked.
+
+### Fixed
+- **Terminal SSE error chunks (`api/chat_handler.go`)**:
+  - The four streaming error paths (upstream `streamErr`, schema validation failure after retries, mid-value mutation truncation, and `shouldBlockUnusableToolTurn` at the end of retries) now emit `finish_reason: "error"` instead of `"stop"`.
+  - OpenCode 2.4.0 (`packages/ai/src/protocols/openai-chat.ts`, `mapFinishReason`) maps `"error"` to an `AIError`, while `"stop"` is accepted as a completed response (`outcome: succeeded`). Reporting `"stop"` made the host go `idle` without error handling or retries; `"error"` now surfaces the failure as intended.
+  - The four chunks are built by the new `newStreamErrorChunk` helper, whose `finish_reason` is structurally fixed to `"error"`.
+
+### Regression Tests
+- `api/session_scope_test.go`:
+  - `TestPseudoReportSnippets_Challenge9Transcripts`: the Hydrogen canned error is unusable with tools and accepted without tools; the exact Neon and Hydrogen-Task visible texts are classified as pseudo-reports, are unusable with tools, and are blocked by `shouldBlockUnusableToolTurn`.
+  - `TestPseudoReportSnippets_Challenge9Markers`: every new Challenge 9 marker is intercepted with tools and accepted without tools.
+  - `TestIsUnusableModelOutput_CannedUpstreamErrors`: all canned upstream strings are detected case-insensitively with tools, plain chat is left untouched, and a valid tool call quoting the canned error remains usable.
+  - `TestNewStreamErrorChunk_FinishReasonError`: the terminal chunk carries `finish_reason: "error"` both in memory and after JSON serialization.
+- `gemini/arranger_test.go`:
+  - `TestFormatToolsInstruction_PositiveContinuityAndCadence` now asserts the unlimited-quota wording and only tolerates the `0 remaining` literal as part of its explicit denial.
+
+### Validation
+| Check | Command | Result |
+|---|---|---|
+| Go formatting | `test -z "$(gofmt -l .)"` | **OK** |
+| Static analysis | `go vet ./...` | **exit 0** |
+| Short tests | `go test -short ./...` | **OK** — `api 1.064s`, `db`, `gemini 93.061s` |
+| Race tests | `go test -race -short ./...` | **OK** — `api 5.022s`, `db`, `gemini 16.812s`, no race detected |
+| Full audit | `./scripts/audit_check.sh` | **exit 0** — coverage `api 66.2 %`, `db 77.1 %`, `gemini 72.6 %` |
+| Docker rebuild | `docker compose up -d --build` | **OK** — image rebuilt, container recreated |
+| Health | `GET /health` | **online**, 1 extension worker connected, cookie pool healthy (1 account, TTL ~4319 h) |
+| Live smoke | `./scripts/live_middleware_smoke.sh` | **6/6 PASS** (exit 0) |
+
+---
+
 ## [3.5.5] - 2026-11-23
 
 ### Added

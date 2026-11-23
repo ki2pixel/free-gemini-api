@@ -82,6 +82,31 @@ const unlimitedToolExecutionDirective = "[SYSTEM DIRECTIVE: You have UNLIMITED t
 // the streaming error chunk and the non-streaming 502 response.
 const unusableActionErrorMessage = "upstream model output was unusable with tools (pseudo-report, refusal, or incomplete action without tool calls after retries)"
 
+// newStreamErrorChunk builds the terminal SSE error chunk. Its finish_reason
+// is always "error": OpenAI-compatible hosts must treat the turn as a failed
+// generation, not as a successful model stop. OpenCode 2.4.0 maps
+// finish_reason "error" to an AIError (raising its error handling and retries)
+// while "stop" is accepted as a completed response, which silently ends the
+// task on what is actually a proxy-side failure.
+func newStreamErrorChunk(id, model string, created int64, content string) OpenAIChatCompletionChunk {
+	return OpenAIChatCompletionChunk{
+		ID:      id,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   model,
+		Choices: []OpenAIStreamChoice{
+			{
+				Index: 0,
+				Delta: OpenAIDelta{
+					Role:    "assistant",
+					Content: content,
+				},
+				FinishReason: "error",
+			},
+		},
+	}
+}
+
 const (
 	maxToolChatAttempts    = 4
 	maxPlainStreamAttempts = 1
@@ -926,22 +951,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			if streamErr != nil {
 				log.Printf("❌ Streaming error: %v", streamErr)
 				invalidateSessionTurn(sessionKey)
-				errChunk := OpenAIChatCompletionChunk{
-					ID:      chunkID,
-					Object:  "chat.completion.chunk",
-					Created: createdTime,
-					Model:   model,
-					Choices: []OpenAIStreamChoice{
-						{
-							Index: 0,
-							Delta: OpenAIDelta{
-								Role:    "assistant",
-								Content: fmt.Sprintf("\n\n[Error: %v]", streamErr),
-							},
-							FinishReason: "stop",
-						},
-					},
-				}
+				errChunk := newStreamErrorChunk(chunkID, model, createdTime, fmt.Sprintf("\n\n[Error: %v]", streamErr))
 				if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 					writeChunk(errBytes)
 				}
@@ -961,22 +971,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					RecordArrangerRejection(arrangerRejectionReason(detail))
 					log.Printf("❌ Upstream tool call failed schema validation after retry: %s", detail)
 					invalidateSessionTurn(sessionKey)
-					errChunk := OpenAIChatCompletionChunk{
-						ID:      chunkID,
-						Object:  "chat.completion.chunk",
-						Created: createdTime,
-						Model:   model,
-						Choices: []OpenAIStreamChoice{
-							{
-								Index: 0,
-								Delta: OpenAIDelta{
-									Role:    "assistant",
-									Content: fmt.Sprintf("\n\n[Error: upstream tool call failed schema validation: %s]", detail),
-								},
-								FinishReason: "stop",
-							},
-						},
-					}
+					errChunk := newStreamErrorChunk(chunkID, model, createdTime, fmt.Sprintf("\n\n[Error: upstream tool call failed schema validation: %s]", detail))
 					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 						writeChunk(errBytes)
 					}
@@ -1016,22 +1011,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					// arranger deliberately rejected it; report an explicit
 					// error instead of silently returning a stop response.
 					RecordArrangerRejection("mid_value_truncation")
-					errChunk := OpenAIChatCompletionChunk{
-						ID:      chunkID,
-						Object:  "chat.completion.chunk",
-						Created: createdTime,
-						Model:   model,
-						Choices: []OpenAIStreamChoice{
-							{
-								Index: 0,
-								Delta: OpenAIDelta{
-									Role:    "assistant",
-									Content: "\n\n[Error: upstream tool call was truncated mid-value; no mutation was executed. Please retry.]",
-								},
-								FinishReason: "stop",
-							},
-						},
-					}
+					errChunk := newStreamErrorChunk(chunkID, model, createdTime, "\n\n[Error: upstream tool call was truncated mid-value; no mutation was executed. Please retry.]")
 					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 						writeChunk(errBytes)
 					}
@@ -1052,22 +1032,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				if shouldBlockUnusableToolTurn(arranged, finalText, req.Tools) {
 					RecordArrangerRejection("unusable_action_with_tools")
 					invalidateSessionTurn(sessionKey)
-					errChunk := OpenAIChatCompletionChunk{
-						ID:      chunkID,
-						Object:  "chat.completion.chunk",
-						Created: createdTime,
-						Model:   model,
-						Choices: []OpenAIStreamChoice{
-							{
-								Index: 0,
-								Delta: OpenAIDelta{
-									Role:    "assistant",
-									Content: "\n\n[Error: " + unusableActionErrorMessage + ". Please retry.]",
-								},
-								FinishReason: "stop",
-							},
-						},
-					}
+					errChunk := newStreamErrorChunk(chunkID, model, createdTime, "\n\n[Error: "+unusableActionErrorMessage+". Please retry.]")
 					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 						writeChunk(errBytes)
 					}

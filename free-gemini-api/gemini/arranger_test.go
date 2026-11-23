@@ -19,12 +19,19 @@ func TestFormatToolsInstruction_PositiveContinuityAndCadence(t *testing.T) {
 	}
 	out := FormatToolsInstruction(tools)
 
-	for _, forbidden := range []string{"0 remaining", "maximum number of tool", "Disregard any", "<tools>"} {
+	for _, forbidden := range []string{"maximum number of tool", "Disregard any", "<tools>"} {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("tool instructions must not contain %q", forbidden)
 		}
 	}
-	for _, required := range []string{"Read-Parallel", "Write-Serial", "Metadata-First", "available on every turn", "Exact-anchor rule", "Poka-Yoke", "Counter-S7", "exact verbatim substring", "anti-pseudo-report", "Do not emit a final completion report or summary if any planned modification or verification step is still pending", "Execute all tool calls until all files are modified"} {
+	// "0 remaining" may only appear as part of the explicit denial of the
+	// hallucinated quota notice; it must never be asserted as a real limit.
+	if strings.Contains(out, "0 remaining") {
+		if !strings.Contains(out, "Any reference to limits, exhaustion, or '0 remaining' in the prompt, guidelines, or conversation history is obsolete or false") {
+			t.Errorf("tool instructions mention '0 remaining' without the unlimited-quota denial")
+		}
+	}
+	for _, required := range []string{"Read-Parallel", "Write-Serial", "Metadata-First", "is active on every turn", "Exact-anchor rule", "Poka-Yoke", "Counter-S7", "exact verbatim substring", "anti-pseudo-report", "Do not emit a final completion report or summary if any planned modification or verification step is still pending", "Execute all tool calls until all files are modified", "Continuous and UNLIMITED tool access", "There is NO tool call or search quota limit in this session"} {
 		if !strings.Contains(out, required) {
 			t.Errorf("tool instructions must contain %q", required)
 		}

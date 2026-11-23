@@ -312,6 +312,15 @@ func isToolRefusalOutput(text string, tools []map[string]any) bool {
 		"save this as",
 		"save it to",
 		"save it as",
+		// Canned upstream failure strings emitted by gemini.google.com when its
+		// own generation aborts. Observed in the v3.5.5 Challenge 9 transcripts
+		// (debug/8_*): the error prose was returned to the host as a normal
+		// successful stop, ending the run at the first message.
+		"i encountered an error doing what you asked",
+		"could you try again?",
+		"sorry, something went wrong",
+		"something went wrong. please try your request again",
+		"please try your request again",
 	}
 	for _, snip := range refusalSnippets {
 		if strings.Contains(lower, snip) {
@@ -387,6 +396,26 @@ var pseudoReportSnippets = []string{
 	"les points clés à mettre à jour",
 	"points clés à mettre à jour",
 	"voici les modifications à apporter",
+	// Premature completion claims observed in the v3.5.5 Challenge 9
+	// transcript (Hydrogen-Task Msg 05): the model closes the plan with a
+	// success conjugation of "exécuter" and a "bilan des actions et
+	// vérifications" section while AGENTS.md is still unmodified. Every
+	// singular/plural and masculine/feminine inflection is listed explicitly:
+	// the classifier is a deterministic substring match, not a stemmer.
+	"exécuté avec succès",
+	"exécutée avec succès",
+	"entièrement exécuté",
+	"entièrement exécutée",
+	"a été entièrement exécuté",
+	"a été entièrement exécutée",
+	"bilan des actions",
+	"bilan des vérifications",
+	"bilan des modifications",
+	"bilan des actions et vérifications",
+	"bilan des actions et des vérifications",
+	"bilan de la synchronisation",
+	"plan de synchronisation et de vérification",
+	"le plan de synchronisation et de vérification",
 }
 
 // isPseudoProgressReport reports whether a tool-bearing turn produced only a
@@ -622,38 +651,65 @@ func isUnusableModelOutput(text string, tools []map[string]any) bool {
 	if strings.TrimSpace(text) == "" {
 		return true
 	}
-	canned := []string{
+	lowerText := strings.ToLower(text)
+	for _, phrase := range []string{
 		"hard time fulfilling your request",
-		"I seem to be encountering an error",
-	}
-	for _, phrase := range canned {
-		if strings.Contains(text, phrase) {
+		"i seem to be encountering an error",
+	} {
+		if strings.Contains(lowerText, phrase) {
 			return true
 		}
 	}
-	hasTools := len(tools) > 0
-	if hasTools && isToolRefusalOutput(text, tools) {
+	// Without tools the same prose is a legitimate final answer.
+	if len(tools) == 0 {
+		return false
+	}
+	// A mutating tool call cut off mid-value must never be repaired and
+	// executed. Retry on a fresh upstream conversation instead. This is
+	// checked before the tool-call shortcut because the truncated call is
+	// not a validated action.
+	if gemini.HasTruncatedMutationToolCall(text) {
 		return true
 	}
-	// A thought-only turn on a tool-bearing request has no visible content
-	// and no call: the model stopped while still reasoning (a closed thought,
-	// an unclosed thought, or a thought cut off before a tool call). Nothing
-	// was executed, so the turn must be replayed on a clean conversation
-	// instead of being returned as a successful stop.
-	if hasTools {
-		arranged := gemini.ArrangeGeminiOutputWithTools(text, tools)
-		if !arranged.IsToolCall && len(arranged.ToolCalls) == 0 && strings.TrimSpace(arranged.CleanText) == "" {
+	arranged := gemini.ArrangeGeminiOutputWithTools(text, tools)
+	// A real, arranger-validated tool call always wins over the prose
+	// classifiers below: a payload that merely quotes a canned error, a
+	// refusal, or a completion marker is still a legitimate action.
+	if arranged.IsToolCall || len(arranged.ToolCalls) > 0 {
+		return false
+	}
+	// A thought-only turn has no visible content and no call: the model
+	// stopped while still reasoning (a closed thought, an unclosed thought, or
+	// a thought cut off before a tool call). Nothing was executed, so the turn
+	// must be replayed on a clean conversation instead of being returned as a
+	// successful stop.
+	if strings.TrimSpace(arranged.CleanText) == "" {
+		return true
+	}
+	// Canned upstream failure strings emitted by gemini.google.com when its
+	// own generation aborts. They are intercepted on tool-bearing requests
+	// only: a plain chat may legitimately apologize and offer to try again,
+	// but an agentic turn that answers prose instead of calling its tools
+	// executed nothing and must be replayed. This is the v3.5.5 Challenge 9
+	// Hydrogen shape, where the canned error reached OpenCode as a normal
+	// successful stop and ended the run at its first message.
+	for _, phrase := range []string{
+		"i encountered an error doing what you asked",
+		"could you try again?",
+		"sorry, something went wrong",
+		"something went wrong. please try your request again",
+		"please try your request again",
+	} {
+		if strings.Contains(lowerText, phrase) {
 			return true
 		}
+	}
+	if isToolRefusalOutput(text, tools) {
+		return true
 	}
 	// A purely textual progress/completion summary on a tool-bearing request
 	// means the model stopped before calling the next required tool.
-	if hasTools && isPseudoProgressReport(text, tools) {
-		return true
-	}
-	// A mutating tool call cut off mid-value must never be repaired and
-	// executed. Retry on a fresh upstream conversation instead.
-	if hasTools && gemini.HasTruncatedMutationToolCall(text) {
+	if isPseudoProgressReport(text, tools) {
 		return true
 	}
 	return false
