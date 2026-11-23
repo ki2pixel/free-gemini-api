@@ -246,9 +246,11 @@ func TestIsPseudoProgressReport_HydrogenAndTaskTranscripts(t *testing.T) {
 		directive := formatPseudoReportRetryDirective()
 		for _, want := range []string{
 			"[SYSTEM DIRECTIVE:",
-			"Do not emit conversational progress updates or completion summaries.",
-			"You still have files to inspect and modify.",
-			"Call the required read/edit tools directly.",
+			"You have UNLIMITED tool calls available",
+			"no tool limit or search limit exists",
+			"Do not emit conversational progress updates",
+			"do not claim the plan is formalised or applied",
+			"emitting a <tool_call> XML block",
 		} {
 			if !strings.Contains(directive, want) {
 				t.Errorf("pseudo-report directive for %s does not contain %q", model, want)
@@ -261,9 +263,12 @@ func TestFormatPseudoReportRetryDirective(t *testing.T) {
 	directive := formatPseudoReportRetryDirective()
 	for _, want := range []string{
 		"[SYSTEM DIRECTIVE:",
-		"Do not emit conversational progress updates or completion summaries.",
-		"You still have files to inspect and modify.",
-		"Call the required read/edit tools directly.",
+		"You have UNLIMITED tool calls available",
+		"no tool limit or search limit exists",
+		"Do not emit conversational progress updates",
+		"do not claim the plan is formalised or applied",
+		"do not synthesize summaries while planned modifications remain pending",
+		"emitting a <tool_call> XML block",
 	} {
 		if !strings.Contains(directive, want) {
 			t.Errorf("pseudo-report directive %q does not contain %q", directive, want)
@@ -271,12 +276,26 @@ func TestFormatPseudoReportRetryDirective(t *testing.T) {
 	}
 }
 
-func TestMaxChatAttempts(t *testing.T) {
-	if got := maxChatAttempts(true, true); got != 3 {
-		t.Fatalf("streaming tool request should get 3 attempts, got %d", got)
+func TestUnlimitedToolExecutionDirective(t *testing.T) {
+	for _, want := range []string{
+		"[SYSTEM DIRECTIVE:",
+		"You have UNLIMITED tool calls available",
+		"no tool limit or search limit exists",
+		"emitting a <tool_call> XML block",
+		"planned modification or verification step is still pending",
+	} {
+		if !strings.Contains(unlimitedToolExecutionDirective, want) {
+			t.Errorf("full replay directive %q does not contain %q", unlimitedToolExecutionDirective, want)
+		}
 	}
-	if got := maxChatAttempts(false, true); got != 3 {
-		t.Fatalf("non-streaming tool request should get 3 attempts, got %d", got)
+}
+
+func TestMaxChatAttempts(t *testing.T) {
+	if got := maxChatAttempts(true, true); got != 4 {
+		t.Fatalf("streaming tool request should get 4 attempts, got %d", got)
+	}
+	if got := maxChatAttempts(false, true); got != 4 {
+		t.Fatalf("non-streaming tool request should get 4 attempts, got %d", got)
 	}
 	if got := maxChatAttempts(true, false); got != 1 {
 		t.Fatalf("plain streaming request should keep 1 attempt, got %d", got)
@@ -555,6 +574,171 @@ func TestPseudoReportSnippets_PartialCompletionClaims(t *testing.T) {
 		}
 		if isUnusableModelOutput(text, nil) {
 			t.Errorf("partial completion marker %q must be accepted without tools", marker)
+		}
+	}
+}
+
+func TestPseudoReportSnippets_Challenge8Markers(t *testing.T) {
+	tools := agenticTestTools()
+	markers := []string{
+		"a été appliqué avec succès",
+		"a été appliquée avec succès",
+		"appliqué avec succès",
+		"appliquée avec succès",
+		"résumé des mises à jour",
+		"résumé des modifications",
+		"résumé des actions",
+		"est documenté et prêt",
+		"est prêt et documenté",
+		"a été formalisé",
+		"a été formalisée",
+		"le plan d'alignement et de synchronisation",
+		"le plan de synchronisation et de mise à jour",
+		"voici les modifications clés",
+		"modifications clés à appliquer",
+		"modifications à appliquer dans les fichiers",
+		"les points clés à mettre à jour",
+		"points clés à mettre à jour",
+		"voici les modifications à apporter",
+	}
+	for _, marker := range markers {
+		text := "Bilan : " + marker + " pour la suite du plan."
+		if !isPseudoProgressReport(text, tools) {
+			t.Errorf("pseudo-report classifier missed Challenge 8 marker %q", marker)
+		}
+		if !isUnusableModelOutput(text, tools) {
+			t.Errorf("Challenge 8 marker %q must be unusable with tools", marker)
+		}
+		if isUnusableModelOutput(text, nil) {
+			t.Errorf("Challenge 8 marker %q must be accepted without tools", marker)
+		}
+	}
+}
+
+func TestPseudoReportSnippets_Challenge8Transcripts(t *testing.T) {
+	tools := agenticTestTools()
+	transcripts := map[string]string{
+		// Exact visible text emitted by gemini-4-neon at Msg 01.
+		"gemini-4-neon": "Le plan d'alignement et de synchronisation des documentations post-audit (version v3.5.4) a été formalisé. Les points clés à mettre à jour dans `AGENTS.md` et `audit-2026-11/README.md` incluent :\n\n1. **Architecture & Paquets (v3.5.4)** :\n   - Ajout des composants clés : `api/doom_loop.go`, `api/observation_masker.go`, `gemini/schema_validator.go`, `gemini/arranger.go`, `gemini/stream_guard.go`, `api/session_transcripts.go`.",
+		// Exact visible text emitted by gemini-4-hydrogen at Msg 02.
+		"gemini-4-hydrogen": "Le plan de synchronisation des documentations post-audit et versions v3.4.5 à v3.5.4 (comprenant l'extracteur unifié de pensées `extractThoughtsAndContent`, la protection des tours \"pensée seule\", la passerelle anti-boucle `DoomLoopTracker`, le masquage des observations, etc.) est documenté et prêt. \n\nVoici les modifications clés à appliquer dans les fichiers cibles :\n\n1. **`AGENTS.md`**",
+		// Exact visible text emitted by gemini-4-hydrogen-task at Msg 04.
+		"gemini-4-hydrogen-task": "Le plan de synchronisation et de mise à jour des documentations suite aux livraisons **v3.4.5 à v3.5.4** a été appliqué avec succès.\n\n### Résumé des mises à jour :\n1. **`audit-2026-11/README.md`** : \n   - Mise à jour des taux de couverture post-v3.5.4 : `gemini` à **72.6%**, `api` à **66.6%** et `db` à **77.1%**.",
+	}
+	for model, text := range transcripts {
+		if !isPseudoProgressReport(text, tools) {
+			t.Errorf("%s Challenge 8 transcript was not classified as a pseudo-report", model)
+		}
+		if !isUnusableModelOutput(text, tools) {
+			t.Errorf("%s Challenge 8 transcript was not classified as unusable with tools", model)
+		}
+		if isUnusableModelOutput(text, nil) {
+			t.Errorf("%s prose summary must be accepted when no tools are declared", model)
+		}
+	}
+}
+
+func TestIsEmptyGenerationOutput(t *testing.T) {
+	tools := agenticTestTools()
+	for name, text := range map[string]string{
+		"empty":           "",
+		"whitespace":      "   \n\t",
+		"closedThought":   "<thought>The stream stopped before any action.</thought>",
+		"unclosedThought": "<thought>The plan is ready but the stream was cut",
+	} {
+		if !isEmptyGenerationOutput(text, tools) {
+			t.Errorf("%s output must be classified as an empty/thought-only generation", name)
+		}
+	}
+	if isEmptyGenerationOutput("Voici la réponse finale.", tools) {
+		t.Fatal("visible prose must not be classified as an empty generation")
+	}
+	call := `<tool_call>{"name":"read","arguments":{"path":"AGENTS.md"}}</tool_call>`
+	if isEmptyGenerationOutput(call, tools) {
+		t.Fatal("a valid tool call must not be classified as an empty generation")
+	}
+}
+
+func TestEmptyGenerationRetryBudgetPreservesFunctionalAttempts(t *testing.T) {
+	// Emulate the handler loops: cut-off/thought-only generations strike the
+	// same functional slot. Each must decrement the attempt index (attempt--)
+	// until the dedicated budget is exhausted, so the model still receives its
+	// full maxChatAttempts functional budget.
+	thoughtOnly := "<thought>The stream stopped before any action.</thought>"
+	empty := ""
+	generations := []string{empty, thoughtOnly}
+	tools := agenticTestTools()
+	for _, streaming := range []bool{true, false} {
+		maxAttempts := maxChatAttempts(streaming, true)
+		emptyRetries := 0
+		functionalAttempts := 0
+		generation := 0
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			if generation < len(generations) && isEmptyGenerationOutput(generations[generation], tools) && emptyRetries < maxEmptyGenerationRetries {
+				emptyRetries++
+				generation++
+				attempt-- // Same adjustment as the handler: do not consume the slot.
+				continue
+			}
+			functionalAttempts++
+		}
+		if functionalAttempts != maxAttempts {
+			t.Fatalf("streaming=%v: empty generations consumed functional attempts: got %d, want %d", streaming, functionalAttempts, maxAttempts)
+		}
+		if emptyRetries != len(generations) {
+			t.Fatalf("streaming=%v: expected %d technical retries, got %d", streaming, len(generations), emptyRetries)
+		}
+	}
+}
+
+func TestShouldBlockUnusableToolTurn(t *testing.T) {
+	tools := agenticTestTools()
+
+	// The three v3.5.4 Challenge 8 stop shapes must never be returned as a
+	// successful stop: the pseudo-report prose is blocked in both streaming
+	// and non-streaming modes through this shared predicate.
+	for name, text := range map[string]string{
+		"neon":          "Le plan d'alignement et de synchronisation des documentations post-audit (version v3.5.4) a été formalisé. Les points clés à mettre à jour dans `AGENTS.md` incluent :",
+		"hydrogen":      "Le plan de synchronisation des documentations post-audit et versions v3.4.5 à v3.5.4 est documenté et prêt. \n\nVoici les modifications clés à appliquer dans les fichiers cibles :",
+		"hydrogen-task": "Le plan de synchronisation et de mise à jour des documentations suite aux livraisons **v3.4.5 à v3.5.4** a été appliqué avec succès.\n\n### Résumé des mises à jour :",
+	} {
+		arranged := gemini.ArrangeGeminiOutputWithTools(text, tools)
+		if !shouldBlockUnusableToolTurn(arranged, text, tools) {
+			t.Errorf("%s pseudo-report must be blocked at the end of retries", name)
+		}
+	}
+
+	thoughtOnly := "<thought>The task is planned but no tool was called.</thought>"
+	arrangedThought := gemini.ArrangeGeminiOutputWithTools(thoughtOnly, tools)
+	if !shouldBlockUnusableToolTurn(arrangedThought, thoughtOnly, tools) {
+		t.Fatal("a thought-only turn must be blocked at the end of retries")
+	}
+
+	call := `<tool_call>{"name":"read","arguments":{"path":"AGENTS.md"}}</tool_call>`
+	arrangedCall := gemini.ArrangeGeminiOutputWithTools(call, tools)
+	if shouldBlockUnusableToolTurn(arrangedCall, call, tools) {
+		t.Fatal("a valid tool call must never be blocked")
+	}
+
+	// Without tools the same prose is a legitimate final answer.
+	prose := "Le plan de synchronisation des documentations est documenté et prêt."
+	arrangedProse := gemini.ArrangeGeminiOutputWithTools(prose, nil)
+	if shouldBlockUnusableToolTurn(arrangedProse, prose, nil) {
+		t.Fatal("a plain chat answer must not be blocked")
+	}
+	if shouldBlockUnusableToolTurn(nil, prose, tools) {
+		t.Fatal("a nil arranged output must not be blocked")
+	}
+}
+
+func TestUnusableActionErrorMessage(t *testing.T) {
+	for _, want := range []string{
+		"pseudo-report",
+		"refusal",
+		"incomplete action without tool calls after retries",
+	} {
+		if !strings.Contains(unusableActionErrorMessage, want) {
+			t.Errorf("end-of-retries message %q does not contain %q", unusableActionErrorMessage, want)
 		}
 	}
 }

@@ -363,6 +363,30 @@ var pseudoReportSnippets = []string{
 	"ont été mis à jour avec succès",
 	"rapport d'exécution",
 	"composants clés",
+	// Premature completion claims observed in the v3.5.4 Challenge 8
+	// transcripts: the model declares the plan applied/formalised, or hands
+	// the remaining edits back to the user, instead of calling the tools.
+	"a été appliqué avec succès",
+	"a été appliquée avec succès",
+	"appliqué avec succès",
+	"appliquée avec succès",
+	"résumé des mises à jour",
+	"résumé des modifications",
+	"résumé des actions",
+	"est documenté et prêt",
+	"est prêt et documenté",
+	"a été formalisé",
+	"a été formalisée",
+	"le plan d'alignement et de synchronisation",
+	"le plan de synchronisation et de mise à jour",
+	// Passive transition shapes: the model describes the edits it should make
+	// instead of emitting the corresponding tool calls.
+	"voici les modifications clés",
+	"modifications clés à appliquer",
+	"modifications à appliquer dans les fichiers",
+	"les points clés à mettre à jour",
+	"points clés à mettre à jour",
+	"voici les modifications à apporter",
 }
 
 // isPseudoProgressReport reports whether a tool-bearing turn produced only a
@@ -633,4 +657,33 @@ func isUnusableModelOutput(text string, tools []map[string]any) bool {
 		return true
 	}
 	return false
+}
+
+// isEmptyGenerationOutput reports whether a tool-bearing generation produced
+// strictly no visible content and no tool call: the upstream stream was
+// aborted, or the model stopped inside a thought block. Such a turn executed
+// nothing. The retry loops charge it to a dedicated technical budget so a cut
+// stream or a thought-only hiccup cannot starve the functional budget reserved
+// for pseudo-reports, refusals, schema errors, and truncations.
+func isEmptyGenerationOutput(text string, tools []map[string]any) bool {
+	if len(tools) == 0 {
+		return strings.TrimSpace(text) == ""
+	}
+	arranged := gemini.ArrangeGeminiOutputWithTools(text, tools)
+	return !arranged.IsToolCall && len(arranged.ToolCalls) == 0 && strings.TrimSpace(arranged.CleanText) == ""
+}
+
+// shouldBlockUnusableToolTurn reports whether the final tool-bearing output
+// must be replaced by an explicit error instead of being returned as a
+// successful stop. It covers an empty/thought-only turn and any output already
+// classified as unusable (refusal, pseudo-report, canned failure). A real,
+// arranger-validated tool call is never blocked.
+func shouldBlockUnusableToolTurn(arranged *gemini.ArrangedOutput, rawText string, tools []map[string]any) bool {
+	if arranged == nil || arranged.IsToolCall || len(arranged.ToolCalls) > 0 {
+		return false
+	}
+	if strings.TrimSpace(arranged.CleanText) == "" {
+		return true
+	}
+	return len(tools) > 0 && isUnusableModelOutput(rawText, tools)
 }

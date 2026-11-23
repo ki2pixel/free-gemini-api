@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.5] - 2026-11-23
+
+### Added
+- **Challenge 8 Pseudo-Report Coverage (`api/session_transcripts.go`)**:
+  - Added premature completion markers: `a été appliqué avec succès`, `a été appliquée avec succès`, `appliqué avec succès`, `appliquée avec succès`, `résumé des mises à jour`, `résumé des modifications`, `résumé des actions`, `est documenté et prêt`, `est prêt et documenté`, `a été formalisé`, `a été formalisée`, `le plan d'alignement et de synchronisation`, and `le plan de synchronisation et de mise à jour`.
+  - Added passive transition markers: `voici les modifications clés`, `modifications clés à appliquer`, `modifications à appliquer dans les fichiers`, `les points clés à mettre à jour`, `points clés à mettre à jour`, and `voici les modifications à apporter`.
+  - These formulations are now classified by `isPseudoProgressReport` / `isUnusableModelOutput` and retried with the corrective directive instead of ending the task with `finish_reason: "stop"`.
+- **Unlimited Tool Execution Directive (`api/chat_handler.go`)**:
+  - `formatPseudoReportRetryDirective` and the default full-replay directive now explicitly state that the session has UNLIMITED tool calls and that no tool or search limit exists, denying the hallucinated `0 remaining` notice observed in Challenge 8.
+- **Dedicated Empty/Thought-Only Retry Budget (`api/chat_handler.go`)**:
+  - Added `isEmptyGenerationOutput`, which recognizes an aborted generation or a thought-only turn with no visible content and no tool call.
+  - Added `maxEmptyGenerationRetries = 2`, independent from the functional generation budget. Both handler loops reset the upstream conversation, replay the full transcript, and decrement the attempt index (`attempt--`) on this purely technical anomaly, so it cannot starve the attempts reserved for pseudo-reports, refusals, schema errors, or truncations.
+  - `maxToolChatAttempts` increased from 3 to 4 to absorb an extra upstream hiccup without abandoning the turn.
+
+### Fixed
+- **Pseudo-Report Leak at End of Retries (`api/chat_handler.go`)**:
+  - Added the shared `shouldBlockUnusableToolTurn` predicate: a tool-bearing turn with no validated tool call and either no visible content or an output classified as unusable (pseudo-report, refusal, canned failure) is never returned as a successful stop.
+  - Streaming: the barrier invalidates the session, records `RecordArrangerRejection("unusable_action_with_tools")`, emits `[Error: upstream model output was unusable with tools (pseudo-report, refusal, or incomplete action without tool calls after retries). Please retry.]` with `finish_reason: "stop"`, and closes with `data: [DONE]`.
+  - Non-streaming: the same condition invalidates the session and returns HTTP `502` with `upstream model output was unusable with tools (pseudo-report, refusal, or incomplete action without tool calls after retries)` instead of a JSON 200 containing the pseudo-report.
+
+### Regression Tests
+- `api/session_scope_test.go`:
+  - `TestPseudoReportSnippets_Challenge8Markers`: every new Challenge 8 marker is intercepted with tools and accepted without tools.
+  - `TestPseudoReportSnippets_Challenge8Transcripts`: the exact Neon Msg 01, Hydrogen Msg 02, and Hydrogen-Task Msg 04 visible texts are classified as pseudo-reports.
+  - `TestIsEmptyGenerationOutput`: empty, whitespace, closed-thought, and unclosed-thought outputs are technical empty generations; visible prose and valid tool calls are not.
+  - `TestEmptyGenerationRetryBudgetPreservesFunctionalAttempts`: the dedicated budget keeps all 4 functional attempts for streaming and non-streaming tool requests.
+  - `TestShouldBlockUnusableToolTurn`: the three Challenge 8 pseudo-reports and a thought-only turn are blocked; a valid tool call, a plain chat answer, and a nil arranged output are not.
+  - `TestUnlimitedToolExecutionDirective`, `TestFormatPseudoReportRetryDirective`, and `TestUnusableActionErrorMessage`: the new directive and end-of-retries message contracts are asserted.
+  - `TestMaxChatAttempts` updated to 4 tool attempts.
+
+### Validation
+| Check | Command | Result |
+|---|---|---|
+| Go formatting | `test -z "$(gofmt -l .)"` | **OK** |
+| Static analysis | `go vet ./...` | **exit 0** |
+| Short tests | `go test -short ./...` | **OK** — `api 0.998s`, `db 0.018s`, `gemini 70.308s` |
+| Race tests | `go test -race -short ./...` | **OK** — `api 4.784s`, `db 1.112s`, `gemini 47.879s`, no race detected |
+| Full audit | `./scripts/audit_check.sh` | **exit 0** — coverage `api 66.1 %`, `db 77.1 %`, `gemini 72.6 %` |
+| Docker rebuild | `docker compose up -d --build` | **OK** — image rebuilt, container recreated |
+| Health | `GET /health` | **online**, 1 extension worker connected, cookie pool healthy (1 account, TTL ~4319 h) |
+| Live smoke | `./scripts/live_middleware_smoke.sh` | **6/6 PASS** (third run; `[2/6]` is stochastic and passed once the upstream model echoed the orphan tags) |
+
+---
+
 ## [3.5.4] - 2026-11-23
 
 ### Added

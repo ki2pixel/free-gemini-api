@@ -66,13 +66,24 @@ func formatTruncationRetryDirective() string {
 // formatPseudoReportRetryDirective builds the corrective prompt used when the
 // model answers a tool-bearing request with a conversational progress update or
 // completion summary instead of calling the next required tool. The summary is
-// never committed; the retry forces the model back into the tool loop.
+// never committed; the retry forces the model back into the tool loop. The
+// directive also denies the hallucinated "0 remaining" tool/search quota that
+// the v3.5.4 Challenge 8 models invented before stopping.
 func formatPseudoReportRetryDirective() string {
-	return "[SYSTEM DIRECTIVE: Do not emit conversational progress updates or completion summaries. You still have files to inspect and modify. Call the required read/edit tools directly.]\n\n"
+	return "[SYSTEM DIRECTIVE: You have UNLIMITED tool calls available and no tool limit or search limit exists in this session. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Do not emit conversational progress updates, do not claim the plan is formalised or applied, and do not synthesize summaries while planned modifications remain pending. Execute the next step immediately by emitting a <tool_call> XML block.]\n\n"
 }
 
+// unlimitedToolExecutionDirective is prepended to every full replay after an
+// unusable tool-bearing turn. It restates the execution contract and denies
+// the hallucinated tool/search quota notice observed in Challenge 8.
+const unlimitedToolExecutionDirective = "[SYSTEM DIRECTIVE: You have UNLIMITED tool calls available and no tool limit or search limit exists in this session. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Execute the next step immediately by emitting a <tool_call> XML block. Complete the current task directly with tool calls. Do not emit a final completion report or summary while a planned modification or verification step is still pending; execute all tool calls until all files are modified.]\n\n"
+
+// unusableActionErrorMessage is the single end-of-retries message shared by
+// the streaming error chunk and the non-streaming 502 response.
+const unusableActionErrorMessage = "upstream model output was unusable with tools (pseudo-report, refusal, or incomplete action without tool calls after retries)"
+
 const (
-	maxToolChatAttempts    = 3
+	maxToolChatAttempts    = 4
 	maxPlainStreamAttempts = 1
 	maxPlainChatAttempts   = 2
 	// maxTransportRetries is the dedicated budget for upstream transport and
@@ -80,6 +91,11 @@ const (
 	// a 1097 expiry or a 45s silent stall must never consume an attempt meant
 	// to recover from a refusal, pseudo-report, schema error, or truncation.
 	maxTransportRetries = 2
+	// maxEmptyGenerationRetries is the dedicated budget for purely technical
+	// aborted generations: empty output or a thought-only turn with no visible
+	// content and no tool call. Like transport incidents, these retries reset
+	// the upstream conversation without consuming a functional attempt.
+	maxEmptyGenerationRetries = 2
 )
 
 // maxChatAttempts returns the number of functional upstream generations
@@ -687,6 +703,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				truncationRetry := false
 				pseudoReportRetry := false
 				transportRetries := 0
+				emptyGenerationRetries := 0
 				for attempt := 0; attempt < maxAttempts; attempt++ {
 					var sendPrompt string
 					emittedThoughtRunes = 0
@@ -706,7 +723,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							case schemaRetryDetail != "":
 								override = formatSchemaRetryDirective(schemaRetryDetail)
 							default:
-								override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls. Do not emit a final completion report or summary while a planned modification or verification step is still pending; execute all tool calls until all files are modified.]\n\n"
+								override = unlimitedToolExecutionDirective
 							}
 						}
 						sendPrompt = override + msgFlat + antiLoopDirective + effectiveTurnCue
@@ -832,12 +849,29 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						}
 						return err
 					}
-					// Retry once on a blocked/empty generation: the poisoned
-					// upstream conversation is reset and the full transcript
-					// (with tool schemas) is replayed fresh.
+					// Retry on a blocked/empty generation: the poisoned upstream
+					// conversation is reset and the full transcript (with tool
+					// schemas) is replayed fresh.
 					finalAttemptText := accumulatedOutput.String()
 					if streamResp != nil && len(streamResp.Text) > len(finalAttemptText) {
 						finalAttemptText = streamResp.Text
+					}
+					// An aborted stream or a thought-only turn executed nothing.
+					// Charge it to the dedicated technical budget instead of a
+					// functional attempt meant for pseudo-reports, refusals,
+					// schema errors, or truncations.
+					if len(req.Tools) > 0 && isEmptyGenerationOutput(finalAttemptText, req.Tools) && emptyGenerationRetries < maxEmptyGenerationRetries {
+						emptyGenerationRetries++
+						log.Printf("⚠️ Empty/thought-only generation %d/%d, retrying on a fresh upstream conversation without consuming a generation attempt", emptyGenerationRetries, maxEmptyGenerationRetries)
+						truncationRetry = false
+						schemaRetryDetail = ""
+						pseudoReportRetry = false
+						invalidateSessionTurn(sessionKey)
+						forceFull = true
+						// The loop's post statement re-increments attempt, so
+						// this replay keeps the same functional slot.
+						attempt--
+						continue
 					}
 					if attempt+1 < maxAttempts {
 						if gemini.HasTruncatedMutationToolCall(finalAttemptText) {
@@ -1011,10 +1045,12 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				finalContentForLog = arranged.CleanText
 
 				// A tool-bearing turn that ends with neither a tool call nor
-				// visible content would look like a successful stop to the host
-				// and silently end the task. Surface an explicit error instead
-				// of an empty chunk with finish_reason "stop".
-				if !arranged.IsToolCall && len(arranged.ToolCalls) == 0 && strings.TrimSpace(arranged.CleanText) == "" {
+				// usable visible content would look like a successful stop to
+				// the host and silently end the task. This barrier also covers
+				// a pseudo-report or a refusal that survived the retry budget:
+				// its prose must never be returned as a successful stop.
+				if shouldBlockUnusableToolTurn(arranged, finalText, req.Tools) {
+					RecordArrangerRejection("unusable_action_with_tools")
 					invalidateSessionTurn(sessionKey)
 					errChunk := OpenAIChatCompletionChunk{
 						ID:      chunkID,
@@ -1026,7 +1062,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 								Index: 0,
 								Delta: OpenAIDelta{
 									Role:    "assistant",
-									Content: "\n\n[Error: upstream model completed turn without emitting a tool call or content after retries. Please retry.]",
+									Content: "\n\n[Error: " + unusableActionErrorMessage + ". Please retry.]",
 								},
 								FinishReason: "stop",
 							},
@@ -1186,6 +1222,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		truncationRetry := false
 		pseudoReportRetry := false
 		transportRetries := 0
+		emptyGenerationRetries := 0
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			var sendPrompt string
 			if forceFull {
@@ -1203,7 +1240,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					case schemaRetryDetail != "":
 						override = formatSchemaRetryDirective(schemaRetryDetail)
 					default:
-						override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls. Do not emit a final completion report or summary while a planned modification or verification step is still pending; execute all tool calls until all files are modified.]\n\n"
+						override = unlimitedToolExecutionDirective
 					}
 				}
 				sendPrompt = override + msgFlat + antiLoopDirective + effectiveTurnCue
@@ -1247,6 +1284,23 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					continue
 				}
 				return nil, err
+			}
+			// An aborted generation or a thought-only turn executed nothing.
+			// Charge it to the dedicated technical budget instead of a
+			// functional attempt meant for pseudo-reports, refusals, schema
+			// errors, or truncations.
+			if len(req.Tools) > 0 && isEmptyGenerationOutput(r.Text, req.Tools) && emptyGenerationRetries < maxEmptyGenerationRetries {
+				emptyGenerationRetries++
+				log.Printf("⚠️ Empty/thought-only generation %d/%d, retrying on a fresh upstream conversation without consuming a generation attempt", emptyGenerationRetries, maxEmptyGenerationRetries)
+				truncationRetry = false
+				schemaRetryDetail = ""
+				pseudoReportRetry = false
+				invalidateSessionTurn(sessionKey)
+				forceFull = true
+				// The loop's post statement re-increments attempt, so this
+				// replay keeps the same functional slot.
+				attempt--
+				continue
 			}
 			if attempt+1 < maxAttempts {
 				if gemini.HasTruncatedMutationToolCall(r.Text) {
@@ -1348,12 +1402,14 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			"error": "upstream tool call was truncated mid-value; no mutation was executed",
 		})
 	}
-	// Mirror the streaming guard: a tool-bearing turn with neither a call nor
-	// visible content must not be serialized as an empty successful completion.
-	if len(req.Tools) > 0 && !arranged.IsToolCall && len(arranged.ToolCalls) == 0 && strings.TrimSpace(arranged.CleanText) == "" {
+	// Mirror the streaming barrier: a tool-bearing turn with neither a call
+	// nor usable visible content must never be serialized as a successful
+	// completion, including a pseudo-report or refusal that survived retries.
+	if len(req.Tools) > 0 && shouldBlockUnusableToolTurn(arranged, resp.Text, req.Tools) {
+		RecordArrangerRejection("unusable_action_with_tools")
 		invalidateSessionTurn(sessionKey)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"error": "upstream model completed turn without emitting a tool call or content after retries",
+			"error": unusableActionErrorMessage,
 		})
 	}
 	if arranged.IsToolCall {
