@@ -403,3 +403,15 @@ func BenchmarkToolSchemaRegistry_CompileTools(b *testing.B) {
 		}
 	}
 }
+
+func TestHasInvalidSchemaToolCall_UnclosedThoughtBeforeRealCall(t *testing.T) {
+	// A malformed JSON fragment inside an unclosed thought must not be
+	// validated as an emitted call. The real <tool_call> after the thought is
+	// preserved and validated normally.
+	raw := "<thought>I could call {\"name\":\"write\",\"arguments\":{\"content\":\"x\"}} " +
+		"but a read is safer.<tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"AGENTS.md\"}}</tool_call>"
+
+	if invalid, detail := HasInvalidSchemaToolCall(raw, openCodeToolsFixture()); invalid {
+		t.Fatalf("the thought fragment must be ignored, got schema violation: %s", detail)
+	}
+}

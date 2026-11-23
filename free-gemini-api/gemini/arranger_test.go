@@ -866,3 +866,130 @@ func TestThrottleMutatingToolCalls_ShellAndPatch(t *testing.T) {
 		t.Fatalf("expected only the first mutation (shell), got %+v", out)
 	}
 }
+
+func TestArrangeGeminiOutputWithTools_UnclosedThoughtLeaksNothing(t *testing.T) {
+	// Exact v3.5.3 Hydrogen/Hydrogen-Task stop shape: the stream ends inside
+	// the reasoning block without a closing tag.
+	raw := "<thought>\nThe user provided a system/user prompt detailing an alignment plan for updating project documentations (such as AGENTS"
+
+	res := ArrangeGeminiOutputWithTools(raw, openCodeToolsFixture())
+	if res.IsToolCall {
+		t.Fatal("a thought-only turn must not be classified as a tool call")
+	}
+	if !strings.Contains(res.ReasoningContent, "alignment plan") {
+		t.Errorf("ReasoningContent should capture the unclosed thought, got %q", res.ReasoningContent)
+	}
+	if res.CleanText != "" {
+		t.Errorf("CleanText must be empty for a thought-only turn, got %q", res.CleanText)
+	}
+	for _, tag := range []string{"<thought>", "</thought>", "<thinking>", "</thinking>"} {
+		if strings.Contains(res.CleanText, tag) {
+			t.Errorf("CleanText leaked %q: %q", tag, res.CleanText)
+		}
+		if strings.Contains(res.ReasoningContent, tag) {
+			t.Errorf("ReasoningContent leaked %q: %q", tag, res.ReasoningContent)
+		}
+	}
+}
+
+func TestArrangeGeminiOutputWithTools_UnclosedThoughtBeforeToolCall(t *testing.T) {
+	// The model switches directly to a tool call without closing its thought.
+	raw := "<thought>\nI should read AGENTS.md before editing it.\n" +
+		"<tool_call>\n{\"name\":\"read\",\"arguments\":{\"path\":\"AGENTS.md\"}}\n</tool_call>"
+
+	res := ArrangeGeminiOutputWithTools(raw, openCodeToolsFixture())
+	if !res.IsToolCall {
+		t.Fatalf("expected the preserved tool call to be parsed, got CleanText %q", res.CleanText)
+	}
+	if res.FinishReason != "tool_calls" {
+		t.Errorf("expected finish_reason 'tool_calls', got %q", res.FinishReason)
+	}
+	if len(res.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(res.ToolCalls))
+	}
+	if res.ToolCalls[0].Function.Name != "read" {
+		t.Errorf("expected 'read', got %q", res.ToolCalls[0].Function.Name)
+	}
+	if !strings.Contains(res.ToolCalls[0].Function.Arguments, "AGENTS.md") {
+		t.Errorf("expected the preserved arguments to target AGENTS.md, got %q", res.ToolCalls[0].Function.Arguments)
+	}
+	if !strings.Contains(res.ReasoningContent, "read AGENTS.md") {
+		t.Errorf("ReasoningContent should capture the thought before the call, got %q", res.ReasoningContent)
+	}
+	if strings.Contains(res.ReasoningContent, "<tool_call>") || strings.Contains(res.ReasoningContent, "</thought>") {
+		t.Errorf("ReasoningContent must not contain XML tags, got %q", res.ReasoningContent)
+	}
+	if strings.TrimSpace(res.CleanText) != "" {
+		t.Errorf("expected empty CleanText for a pure tool turn, got %q", res.CleanText)
+	}
+}
+
+func TestArrangeGeminiOutputWithTools_NestedThoughtTags(t *testing.T) {
+	// Exact v3.5.3 Neon Msg 03 shape: an orphan <thought> is opened inside the
+	// first thought and the stream stops before any closing tag.
+	raw := "<thought>\nLet's review what was requested and what has been done:\n" +
+		"1. `audit-2026-11/README.md` was edited to fix the code block (line 55 added ```bash).\n" +
+		"2. Now let's check tests or coverage metrics... or check if any<thought>\n" +
+		"J'ai effectué la correction du bloc de code manquant dans `audit-2"
+
+	res := ArrangeGeminiOutputWithTools(raw, openCodeToolsFixture())
+	if res.IsToolCall {
+		t.Fatal("a nested thought-only turn must not be classified as a tool call")
+	}
+	if !strings.Contains(res.ReasoningContent, "Let's review what was requested") {
+		t.Errorf("ReasoningContent should capture the first thought segment, got %q", res.ReasoningContent)
+	}
+	if !strings.Contains(res.ReasoningContent, "J'ai effectué la correction") {
+		t.Errorf("ReasoningContent should capture the nested segment, got %q", res.ReasoningContent)
+	}
+	if res.CleanText != "" {
+		t.Errorf("CleanText must be empty for a nested thought-only turn, got %q", res.CleanText)
+	}
+	for _, tag := range []string{"<thought>", "</thought>", "<thinking>", "</thinking>"} {
+		if strings.Contains(res.ReasoningContent, tag) {
+			t.Errorf("ReasoningContent leaked nested/orphan tag %q: %q", tag, res.ReasoningContent)
+		}
+	}
+}
+
+func TestArrangeGeminiOutputWithTools_ClosedThoughtQuotingToolCallTag(t *testing.T) {
+	// A closed thought that merely quotes the <tool_call> opening tag is
+	// reasoning, not an action switch. The implicit "any<thought>" nesting
+	// shape must not leak the rest of the reasoning into visible content.
+	raw := "<thought>I will emit a <tool_call> block now, but first let me verify.</thought>\nVisible answer."
+
+	res := ArrangeGeminiOutputWithTools(raw, openCodeToolsFixture())
+	if res.IsToolCall {
+		t.Fatal("a literal <tool_call> mention inside a closed thought must not be executed")
+	}
+	if res.CleanText != "Visible answer." {
+		t.Errorf("CleanText must contain only the visible answer, got %q", res.CleanText)
+	}
+	for _, fragment := range []string{"block now", "first let me verify", "<tool_call>"} {
+		if strings.Contains(res.CleanText, fragment) {
+			t.Errorf("CleanText leaked reasoning fragment %q: %q", fragment, res.CleanText)
+		}
+	}
+	if !strings.Contains(res.ReasoningContent, "block now") {
+		t.Errorf("ReasoningContent should keep the quoted mention, got %q", res.ReasoningContent)
+	}
+}
+
+func TestArrangeGeminiOutputWithTools_NestedClosedThoughts(t *testing.T) {
+	// Nested opening tags are depth-counted so the first inner closing tag
+	// cannot end the outer block and leak its tail as visible content.
+	raw := "<thought>Outer <thought>inner</thought> tail.</thought>Visible."
+
+	res := ArrangeGeminiOutputWithTools(raw, openCodeToolsFixture())
+	if res.IsToolCall {
+		t.Fatal("nested reasoning must not be classified as a tool call")
+	}
+	if res.CleanText != "Visible." {
+		t.Errorf("CleanText must contain only the visible tail, got %q", res.CleanText)
+	}
+	for _, fragment := range []string{"Outer", "inner", "tail."} {
+		if !strings.Contains(res.ReasoningContent, fragment) {
+			t.Errorf("ReasoningContent should capture %q, got %q", fragment, res.ReasoningContent)
+		}
+	}
+}

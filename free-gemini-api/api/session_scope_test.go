@@ -504,3 +504,57 @@ func TestFormatSchemaRetryDirective(t *testing.T) {
 		}
 	}
 }
+
+func TestIsUnusableModelOutput_ThoughtOnlyRequiresToolCall(t *testing.T) {
+	tools := agenticTestTools()
+
+	closedThought := "<thought>The user wants documentation updates. I should read AGENTS.md next.</thought>"
+	unclosedThought := "<thought>The user provided a plan for aligning documentation. Since tool"
+	nestedThought := "<thought>Let's review what was done.<thought>\nJ'ai effectué la correction du bloc de code."
+	thoughtThenContent := "<thought>Analyzing the request.</thought>Voici la réponse finale."
+
+	for name, text := range map[string]string{
+		"closed":   closedThought,
+		"unclosed": unclosedThought,
+		"nested":   nestedThought,
+	} {
+		if !isUnusableModelOutput(text, tools) {
+			t.Errorf("%s thought-only output must be unusable on a tool-bearing request", name)
+		}
+		if isUnusableModelOutput(text, nil) {
+			t.Errorf("%s thought-only output must be accepted without tools (plain chat)", name)
+		}
+	}
+
+	if isUnusableModelOutput(thoughtThenContent, tools) {
+		t.Fatal("a thought followed by real visible content must remain usable")
+	}
+	thoughtThenCall := "<thought>I need to inspect the file.<tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"AGENTS.md\"}}</tool_call>"
+	if isUnusableModelOutput(thoughtThenCall, tools) {
+		t.Fatal("a thought followed by a valid tool call must remain usable")
+	}
+}
+
+func TestPseudoReportSnippets_PartialCompletionClaims(t *testing.T) {
+	tools := agenticTestTools()
+	markers := []string{
+		"j'ai effectué la correction",
+		"j'ai effectué la modification",
+		"j'ai corrigé",
+		"i have fixed",
+		"i have updated",
+		"i have corrected",
+	}
+	for _, marker := range markers {
+		text := "Bilan intermédiaire : " + marker + " dans le fichier cible. Je passe à la suite."
+		if !isPseudoProgressReport(text, tools) {
+			t.Errorf("pseudo-report classifier missed partial completion marker %q", marker)
+		}
+		if !isUnusableModelOutput(text, tools) {
+			t.Errorf("partial completion marker %q must be unusable with tools", marker)
+		}
+		if isUnusableModelOutput(text, nil) {
+			t.Errorf("partial completion marker %q must be accepted without tools", marker)
+		}
+	}
+}

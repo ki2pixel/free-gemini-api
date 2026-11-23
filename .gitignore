@@ -46,3 +46,4 @@ results.sarif
 task-*.txt
 pr_body.md
 
+.commandcode/

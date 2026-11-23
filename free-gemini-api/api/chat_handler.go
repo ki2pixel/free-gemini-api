@@ -1010,6 +1010,35 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				finishReason = arranged.FinishReason
 				finalContentForLog = arranged.CleanText
 
+				// A tool-bearing turn that ends with neither a tool call nor
+				// visible content would look like a successful stop to the host
+				// and silently end the task. Surface an explicit error instead
+				// of an empty chunk with finish_reason "stop".
+				if !arranged.IsToolCall && len(arranged.ToolCalls) == 0 && strings.TrimSpace(arranged.CleanText) == "" {
+					invalidateSessionTurn(sessionKey)
+					errChunk := OpenAIChatCompletionChunk{
+						ID:      chunkID,
+						Object:  "chat.completion.chunk",
+						Created: createdTime,
+						Model:   model,
+						Choices: []OpenAIStreamChoice{
+							{
+								Index: 0,
+								Delta: OpenAIDelta{
+									Role:    "assistant",
+									Content: "\n\n[Error: upstream model completed turn without emitting a tool call or content after retries. Please retry.]",
+								},
+								FinishReason: "stop",
+							},
+						},
+					}
+					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
+						writeChunk(errBytes)
+					}
+					writeRaw("data: [DONE]\n\n")
+					return
+				}
+
 				// Emit any remaining reasoning tokens not yet streamed
 				if arranged.ReasoningContent != "" {
 					rcRunes := []rune(arranged.ReasoningContent)
@@ -1317,6 +1346,14 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		RecordArrangerRejection("mid_value_truncation")
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": "upstream tool call was truncated mid-value; no mutation was executed",
+		})
+	}
+	// Mirror the streaming guard: a tool-bearing turn with neither a call nor
+	// visible content must not be serialized as an empty successful completion.
+	if len(req.Tools) > 0 && !arranged.IsToolCall && len(arranged.ToolCalls) == 0 && strings.TrimSpace(arranged.CleanText) == "" {
+		invalidateSessionTurn(sessionKey)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error": "upstream model completed turn without emitting a tool call or content after retries",
 		})
 	}
 	if arranged.IsToolCall {

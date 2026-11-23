@@ -359,8 +359,15 @@ func truncateRunes(s string, max int) string {
 	return strings.TrimSpace(string(runes[:max-1])) + "…"
 }
 
+// Thought extraction is tag-based rather than regex-based: the upstream model
+// frequently switches directly to a <tool_call> (or the stream is cut off)
+// without ever emitting the closing tag. A regex requiring a matched pair
+// leaks the whole thought into the assistant-visible content.
 var (
-	thoughtRegex  = regexp.MustCompile(`(?s)<(?:thought|thinking)>([\s\S]*?)</(?:thought|thinking)>`)
+	thoughtOpenTags  = []string{"<thought>", "<thinking>"}
+	thoughtCloseTags = []string{"</thought>", "</thinking>"}
+	thoughtTagRegex  = regexp.MustCompile(`</?(?:thought|thinking)>`)
+
 	jsonCodeBlock = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{[\\s\\S]*?\\})\\s*```")
 	// Gemini web auto-linkifies bare URLs in its rendered stream, producing
 	// "[https://x](https://x)" instead of the plain URL. Inside tool-call
@@ -518,22 +525,11 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 
 	text := raw
 
-	// 1. Extract and separate Thinking / Reasoning blocks (<thought> or <thinking>)
-	if matches := thoughtRegex.FindAllStringSubmatch(text, -1); len(matches) > 0 {
-		var thoughts []string
-		for _, m := range matches {
-			if len(m) > 1 {
-				t := strings.TrimSpace(m[1])
-				if t != "" {
-					thoughts = append(thoughts, t)
-				}
-			}
-		}
-		if len(thoughts) > 0 {
-			res.ReasoningContent = strings.Join(thoughts, "\n\n")
-		}
-		text = thoughtRegex.ReplaceAllString(text, "")
-	}
+	// 1. Extract and separate Thinking / Reasoning blocks (<thought> or
+	// <thinking>). The extractor also handles unclosed thoughts (a switch to a
+	// tool call or a truncated stream), nested/orphan tags, and guarantees that
+	// no thought text or tag can leak into the assistant-visible content.
+	text, res.ReasoningContent = extractThoughtsAndContent(raw)
 
 	text = strings.TrimSpace(text)
 
@@ -1470,75 +1466,158 @@ func sanitizeGeminiContent(text string) string {
 	cleaned = subagentTagRegex.ReplaceAllString(cleaned, "")
 	// Clean upstream disclaimers / refusals
 	cleaned = upstreamDisclaimerRegex.ReplaceAllString(cleaned, "")
+	// A thought tag must never be visible to the host, even on an edge path
+	// where extraction did not see a matching opening tag.
+	cleaned = thoughtTagRegex.ReplaceAllString(cleaned, "")
 	// Normalize excessive newlines
 	cleaned = multiNewlineRegex.ReplaceAllString(cleaned, "\n\n")
 	cleaned = strings.TrimSpace(cleaned)
 	return cleaned
 }
 
-// ExtractAvailableThoughts extracts currently generated thoughts from raw stream text,
-// including partially generated/unclosed <thought> or <thinking> blocks.
-func ExtractAvailableThoughts(raw string) string {
-	var sb strings.Builder
+// earliestThoughtTag returns the index and value of the earliest tag from tags
+// found in s, or (-1, "") when none is present.
+func earliestThoughtTag(s string, tags []string) (int, string) {
+	bestIdx := -1
+	bestTag := ""
+	for _, tag := range tags {
+		idx := strings.Index(s, tag)
+		if idx == -1 {
+			continue
+		}
+		if bestIdx == -1 || idx < bestIdx {
+			bestIdx = idx
+			bestTag = tag
+		}
+	}
+	return bestIdx, bestTag
+}
+
+// trimPartialThoughtClose removes a trailing partial closing tag (for example
+// "</" or "</th") from an unclosed thought that was cut off at end of stream.
+func trimPartialThoughtClose(s string) string {
+	for _, closeTag := range thoughtCloseTags {
+		// Start at the longest partial tag (without the final '>') and stop
+		// before the bare "<", which may legitimately end a thought.
+		for i := len(closeTag) - 1; i > 1; i-- {
+			partial := closeTag[:i]
+			if strings.HasSuffix(s, partial) {
+				return s[:len(s)-len(partial)]
+			}
+		}
+	}
+	return s
+}
+
+// extractThoughtsAndContent separates Gemini's private reasoning from the
+// assistant-visible content. It is the single source of truth used by the
+// arranger and by the live-stream accessors.
+//
+// A thought block ends at:
+//   - its matching </thought> or </thinking> closing tag, when present. A
+//     closed thought is wholly private, even when its reasoning quotes a
+//     literal <tool_call> tag;
+//   - otherwise, a <tool_call> tag, which the model emits directly when it
+//     switches to an action without closing its thought (the tool call is
+//     preserved verbatim in cleanedContent);
+//   - otherwise, end of stream, in which case any trailing partial closing
+//     tag is removed.
+//
+// Nested/orphan opening tags are stripped from the reasoning text. The returned
+// cleanedContent never contains a thought tag or text from an unclosed thought.
+func extractThoughtsAndContent(raw string) (cleanedContent string, reasoningContent string) {
+	if !strings.Contains(raw, "<thought>") && !strings.Contains(raw, "<thinking>") {
+		return thoughtTagRegex.ReplaceAllString(raw, ""), ""
+	}
+
+	var cleaned strings.Builder
+	var thoughts []string
 	remaining := raw
 	for {
-		startThought := strings.Index(remaining, "<thought>")
-		startThinking := strings.Index(remaining, "<thinking>")
-		var startIdx int
-		var tag, closeTag string
-		if startThought != -1 && (startThinking == -1 || startThought < startThinking) {
-			startIdx = startThought
-			tag = "<thought>"
-			closeTag = "</thought>"
-		} else if startThinking != -1 {
-			startIdx = startThinking
-			tag = "<thinking>"
-			closeTag = "</thinking>"
-		} else {
+		start, openTag := earliestThoughtTag(remaining, thoughtOpenTags)
+		if start == -1 {
+			cleaned.WriteString(remaining)
 			break
 		}
+		cleaned.WriteString(remaining[:start])
 
-		contentStart := startIdx + len(tag)
-		closeIdx := strings.Index(remaining[contentStart:], closeTag)
-		if closeIdx != -1 {
-			thought := remaining[contentStart : contentStart+closeIdx]
-			if sb.Len() > 0 {
-				sb.WriteString("\n\n")
-			}
-			sb.WriteString(thought)
-			remaining = remaining[contentStart+closeIdx+len(closeTag):]
-		} else {
-			// Unclosed thought block
-			sub := remaining[contentStart:]
-			// Trim any trailing partial closing tag (e.g. "</", "</th", etc.)
-			for i := 1; i < len(closeTag); i++ {
-				partial := closeTag[:i]
-				if strings.HasSuffix(sub, partial) {
-					sub = sub[:len(sub)-len(partial)]
+		// Walk the inside of this thought. An explicit closing tag has
+		// priority: the block is reasoning up to that tag, even when it quotes
+		// a literal <tool_call>. Nested opening tags increase the depth and are
+		// stripped from the reasoning text.
+		pos := start + len(openTag)
+		var segment string
+		if closeIdx, _ := earliestThoughtTag(remaining[pos:], thoughtCloseTags); closeIdx != -1 {
+			depth := 1
+			scan := pos
+			end := len(remaining)
+			closingTag := ""
+			for {
+				nestedIdx, nestedTag := earliestThoughtTag(remaining[scan:], thoughtOpenTags)
+				if nestedIdx != -1 {
+					nestedIdx += scan
+				}
+				closeAt, closeTag := earliestThoughtTag(remaining[scan:], thoughtCloseTags)
+				if closeAt != -1 {
+					closeAt += scan
+				}
+				if nestedIdx == -1 && closeAt == -1 {
+					break
+				}
+				if nestedIdx != -1 && (closeAt == -1 || nestedIdx < closeAt) {
+					depth++
+					scan = nestedIdx + len(nestedTag)
+					continue
+				}
+				end = closeAt
+				scan = closeAt + len(closeTag)
+				depth--
+				if depth == 0 {
+					closingTag = closeTag
 					break
 				}
 			}
-			if sb.Len() > 0 {
-				sb.WriteString("\n\n")
+			segment = remaining[pos:end]
+			pos = end
+			if depth == 0 {
+				pos += len(closingTag)
 			}
-			sb.WriteString(sub)
-			break
+		} else {
+			// Unclosed thought: it ends at a <tool_call> switch (the call is
+			// preserved verbatim in cleanedContent) or at end of stream.
+			end := len(remaining)
+			if toolIdx := strings.Index(remaining[pos:], "<tool_call>"); toolIdx != -1 {
+				end = pos + toolIdx
+			}
+			segment = trimPartialThoughtClose(remaining[pos:end])
+			pos = end
 		}
+		segment = strings.TrimSpace(thoughtTagRegex.ReplaceAllString(segment, ""))
+		if segment != "" {
+			thoughts = append(thoughts, segment)
+		}
+		if pos > len(remaining) {
+			pos = len(remaining)
+		}
+		remaining = remaining[pos:]
 	}
-	return sb.String()
+
+	// Belt-and-braces: a stray tag must never reach the host as visible text.
+	cleanedContent = thoughtTagRegex.ReplaceAllString(cleaned.String(), "")
+	return cleanedContent, strings.Join(thoughts, "\n\n")
+}
+
+// ExtractAvailableThoughts extracts currently generated thoughts from raw stream text,
+// including partially generated/unclosed <thought> or <thinking> blocks.
+func ExtractAvailableThoughts(raw string) string {
+	_, reasoning := extractThoughtsAndContent(raw)
+	return reasoning
 }
 
 // ExtractAvailableContent extracts content outside thoughts from raw stream text.
+// Unlike a matched-pair regex, it also stops an unclosed thought at a
+// <tool_call> switch so the call itself remains available to the parser.
 func ExtractAvailableContent(raw string) string {
-	if !strings.Contains(raw, "<thought>") && !strings.Contains(raw, "<thinking>") {
-		return raw
-	}
-	clean := thoughtRegex.ReplaceAllString(raw, "")
-	if idx := strings.Index(clean, "<thought>"); idx != -1 {
-		clean = clean[:idx]
-	}
-	if idx := strings.Index(clean, "<thinking>"); idx != -1 {
-		clean = clean[:idx]
-	}
-	return clean
+	cleaned, _ := extractThoughtsAndContent(raw)
+	return cleaned
 }

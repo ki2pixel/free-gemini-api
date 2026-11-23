@@ -349,6 +349,15 @@ var pseudoReportSnippets = []string{
 	"je vais formuler la synthèse finale",
 	"summary of modifications",
 	"all target documentation files have been updated",
+	// Partial/intermediate completion claims observed in the v3.5.3
+	// Challenge 7 transcripts: the model narrates the edit it just made and
+	// stops instead of continuing the remaining planned tool calls.
+	"j'ai effectué la correction",
+	"j'ai effectué la modification",
+	"j'ai corrigé",
+	"i have fixed",
+	"i have updated",
+	"i have corrected",
 	// Earlier v3.5.0/v3.5.1 markers retained for regressions.
 	"a été initié",
 	"ont été mis à jour avec succès",
@@ -601,6 +610,17 @@ func isUnusableModelOutput(text string, tools []map[string]any) bool {
 	hasTools := len(tools) > 0
 	if hasTools && isToolRefusalOutput(text, tools) {
 		return true
+	}
+	// A thought-only turn on a tool-bearing request has no visible content
+	// and no call: the model stopped while still reasoning (a closed thought,
+	// an unclosed thought, or a thought cut off before a tool call). Nothing
+	// was executed, so the turn must be replayed on a clean conversation
+	// instead of being returned as a successful stop.
+	if hasTools {
+		arranged := gemini.ArrangeGeminiOutputWithTools(text, tools)
+		if !arranged.IsToolCall && len(arranged.ToolCalls) == 0 && strings.TrimSpace(arranged.CleanText) == "" {
+			return true
+		}
 	}
 	// A purely textual progress/completion summary on a tool-bearing request
 	// means the model stopped before calling the next required tool.

@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.4] - 2026-11-23
+
+### Added
+- **Unified Thought Extraction (`gemini/arranger.go`)**:
+  - Added `extractThoughtsAndContent(raw)`, a tag-based scanner that is now the single source of truth for reasoning separation.
+  - A thought block ends at its explicit `</thought>` / `</thinking>` closing tag when present. An unclosed block ends at a `<tool_call>` switch (the call is preserved verbatim in the visible content) or at end of stream, after trimming a trailing partial closing tag (`</`, `</th`, …).
+  - Nested/orphan opening tags are depth-counted and stripped from `ReasoningContent`; a closed thought that merely quotes a literal `<tool_call>` stays private instead of leaking its tail into visible content.
+  - `ArrangeGeminiOutputWithTools`, `ExtractAvailableThoughts`, and `ExtractAvailableContent` now share this extractor, and `sanitizeGeminiContent` removes any residual thought tag as a final guarantee.
+- **Thought-Only Turn Detection (`api/session_transcripts.go`)**:
+  - On a tool-bearing request, `isUnusableModelOutput` now classifies a turn as unusable when the arranged output has no tool call and no visible text (`CleanText == ""`). The poisoned upstream conversation is invalidated and replayed with the execution directive instead of returning a successful empty stop.
+  - Added the partial/intermediate completion markers `j'ai effectué la correction`, `j'ai effectué la modification`, `j'ai corrigé`, `i have fixed`, `i have updated`, and `i have corrected` to `pseudoReportSnippets`.
+- **End-of-Retries Safety Error (`api/chat_handler.go`)**:
+  - Streaming: when a tool-bearing turn still has neither a call nor visible content after the retry budget, the stream emits `[Error: upstream model completed turn without emitting a tool call or content after retries. Please retry.]` with `finish_reason: "stop"` and closes with `data: [DONE]`, instead of an empty stop chunk that would look like a completed task.
+  - Non-streaming: the same condition returns HTTP 502 with `upstream model completed turn without emitting a tool call or content after retries`.
+
+### Fixed
+- **Unclosed Thought Leak (`gemini/arranger.go`)**:
+  - The matched-pair `thoughtRegex` left an unclosed `<thought>…` block untouched, so the raw reasoning was assigned to `CleanText` and streamed as assistant content. OpenCode received a textual assistant turn with `finish_reason: "stop"` and zero tool calls, then stopped the task (v3.5.3 Challenge 7 on Hydrogen, Hydrogen-Task, and Neon).
+  - A closed thought quoting a literal `<tool_call>` inside its reasoning no longer truncates at the quote and leaks the remaining thought text; closing tags take priority over an internal mention.
+- **Schema Frame Blind Spot (`gemini/schema_validator.go`)**:
+  - `explicitToolCalls` now uses `ExtractAvailableContent(raw)` instead of the removed `thoughtRegex.ReplaceAllString(raw, "")`. JSON or `<tool_call>` fragments inside an unclosed thought are no longer validated as emitted calls, while a real call following the thought is preserved and validated normally.
+
+### Regression Tests
+- `gemini/arranger_test.go`:
+  - `TestArrangeGeminiOutputWithTools_UnclosedThoughtLeaksNothing`: exact v3.5.3 Hydrogen/Hydrogen-Task stop shape; reasoning captured, `CleanText` empty, no thought tag in either field.
+  - `TestArrangeGeminiOutputWithTools_UnclosedThoughtBeforeToolCall`: unclosed thought followed by a valid call; call parsed with `finish_reason: "tool_calls"`, reasoning kept, no XML tag leak.
+  - `TestArrangeGeminiOutputWithTools_NestedThoughtTags`: exact Neon Msg 03 nested/orphan shape; both reasoning segments captured, `CleanText` empty.
+  - `TestArrangeGeminiOutputWithTools_ClosedThoughtQuotingToolCallTag`: a closed thought quoting `<tool_call>` must not execute the mention nor leak its tail.
+  - `TestArrangeGeminiOutputWithTools_NestedClosedThoughts`: depth counting prevents an inner closing tag from ending the outer block early.
+- `api/session_scope_test.go`:
+  - `TestIsUnusableModelOutput_ThoughtOnlyRequiresToolCall`: closed, unclosed, and nested thought-only outputs are unusable with tools and accepted without tools; a thought followed by visible content or a valid call remains usable.
+  - `TestPseudoReportSnippets_PartialCompletionClaims`: each new partial-completion marker is intercepted by `isPseudoProgressReport` and `isUnusableModelOutput` with tools, and accepted without tools.
+- `gemini/schema_validator_test.go`:
+  - `TestHasInvalidSchemaToolCall_UnclosedThoughtBeforeRealCall`: a malformed JSON fragment inside an unclosed thought is ignored while the real call after it validates normally.
+
+### Validation
+| Check | Command | Result |
+|---|---|---|
+| Go formatting | `test -z "$(gofmt -l .)"` | **OK** |
+| Static analysis | `go vet ./...` | **exit 0** |
+| Short tests | `go test -short ./...` | **OK** — `api 1.004s`, `db cached`, `gemini 18.404s` |
+| Race tests | `go test -race -short ./...` | **OK** — `api 4.706s`, `db cached`, `gemini 8.540s`, no race detected |
+| Full audit | `./scripts/audit_check.sh` | **exit 0** — coverage `api 66.6 %`, `db 77.1 %`, `gemini 72.6 %` |
+| Docker rebuild | `docker compose up -d --build` | **OK** — image rebuilt, container recreated |
+| Health | `GET /health` | **online**, 1 extension worker connected, cookie pool healthy (1 account, TTL ~4320 h) |
+| Live smoke | `./scripts/live_middleware_smoke.sh` | **6/6 PASS** |
+
+---
+
 ## [3.5.3] - 2026-11-23
 
 ### Added

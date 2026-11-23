@@ -240,7 +240,7 @@ func explicitToolCalls(raw string) []ToolCall {
 	// Thinking blocks are reasoning, not executable output: the arranger strips
 	// them before parsing, so a plan that quotes a JSON call inside <thought>
 	// must not be validated as if it had been emitted to the host.
-	frame := thoughtRegex.ReplaceAllString(raw, "")
+	frame := ExtractAvailableContent(raw)
 	var calls []ToolCall
 	if strings.Contains(frame, "<tool_call>") {
 		// A nil catalog keeps schema-invalid calls in the result so the caller
