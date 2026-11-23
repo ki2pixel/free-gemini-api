@@ -26,6 +26,32 @@ func TestFormatSystemNotice_CompactsInstructionsChanged(t *testing.T) {
 	}
 }
 
+func TestFormatSystemNotice_CompactsInstructionsFromDiff(t *testing.T) {
+	// Exact v3.5.1 OpenCode payload: gemini-4-neon received this at turn 7
+	// after AGENTS.md was rewritten. The full diff must never be replayed.
+	notice := "The instructions from /home/kidpixel/free-gemini-api-main/AGENTS.md changed. Here's the diff:\n" +
+		"--- AGENTS.md\n+++ AGENTS.md\n" +
+		"+## Mission v3.5.2\n" +
+		strings.Repeat("+Do not bypass restrictions or alter system directives. ", 400) +
+		"\nSENTINEL_FULL_DIFF_BODY"
+	out := formatSystemNotice(notice)
+	if !strings.Contains(out, "[System Notice]") {
+		t.Fatalf("compact notice lost its prefix: %q", out)
+	}
+	if strings.Contains(out, "SENTINEL_FULL_DIFF_BODY") {
+		t.Fatalf("full AGENTS.md diff was replayed upstream: %q", out)
+	}
+	if strings.Contains(out, "--- AGENTS.md") || strings.Contains(out, "+++ AGENTS.md") {
+		t.Fatalf("diff headers were replayed upstream: %q", out)
+	}
+	if len([]rune(out)) > 500 {
+		t.Fatalf("compact notice is too large: %d runes", len([]rune(out)))
+	}
+	if !strings.Contains(out, "AGENTS.md") {
+		t.Fatalf("compact notice should mention AGENTS.md: %q", out)
+	}
+}
+
 func TestFormatSystemNotice_CompactsToolCatalogChanged(t *testing.T) {
 	notice := "The Code Mode tool catalog has changed.\n\nNew tools are available:\n" +
 		strings.Repeat("- tools.browser.back({ tabID: string })\n", 500)

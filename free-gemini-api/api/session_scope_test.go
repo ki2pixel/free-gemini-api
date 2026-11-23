@@ -2,6 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"goapi/gemini"
 	"strings"
 	"testing"
 )
@@ -245,6 +248,125 @@ func TestMaxChatAttempts(t *testing.T) {
 	}
 }
 
+func TestTransportIncidentClassification(t *testing.T) {
+	transportErrors := []error{
+		gemini.ErrConversationExpired,
+		gemini.ErrUpstreamStreamStalled,
+		fmt.Errorf("stream failed: %w", gemini.ErrConversationExpired),
+		fmt.Errorf("read body: %w", gemini.ErrUpstreamStreamStalled),
+	}
+	for _, err := range transportErrors {
+		if !isTransportIncident(err) {
+			t.Errorf("expected transport incident classification for %v", err)
+		}
+	}
+	for _, err := range []error{nil, errors.New("upstream generation failed"), errors.New("schema invalid")} {
+		if isTransportIncident(err) {
+			t.Errorf("expected non-transport classification for %v", err)
+		}
+	}
+}
+
+func TestShouldRetryTransport_Cap(t *testing.T) {
+	if !shouldRetryTransport(gemini.ErrConversationExpired, 0) {
+		t.Fatal("first 1097 incident should consume the transport budget")
+	}
+	if !shouldRetryTransport(gemini.ErrUpstreamStreamStalled, 1) {
+		t.Fatal("second stall incident should consume the transport budget")
+	}
+	if shouldRetryTransport(gemini.ErrConversationExpired, maxTransportRetries) {
+		t.Fatal("transport budget must stop at maxTransportRetries")
+	}
+	if shouldRetryTransport(errors.New("generation failed"), 0) {
+		t.Fatal("a model generation error must not consume the transport budget")
+	}
+	if shouldRetryTransport(nil, 0) {
+		t.Fatal("nil error must not consume the transport budget")
+	}
+}
+
+func TestTransportRetryBudgetPreservesFunctionalAttempts(t *testing.T) {
+	// Emulate the handler loops: two transport incidents strike the same
+	// functional slot. Both must decrement the attempt index (attempt--) so
+	// the model still receives its full maxChatAttempts generation budget.
+	transportIncidents := []error{
+		fmt.Errorf("ask: %w", gemini.ErrConversationExpired),
+		fmt.Errorf("stream: %w", gemini.ErrUpstreamStreamStalled),
+	}
+	for _, streaming := range []bool{true, false} {
+		maxAttempts := maxChatAttempts(streaming, true)
+		transportRetries := 0
+		functionalAttempts := 0
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			if transportRetries < len(transportIncidents) {
+				if !shouldRetryTransport(transportIncidents[transportRetries], transportRetries) {
+					t.Fatalf("streaming=%v: transport incident %d must use the dedicated budget", streaming, transportRetries+1)
+				}
+				transportRetries++
+				attempt-- // Same adjustment as the handler: do not consume the slot.
+				continue
+			}
+			functionalAttempts++
+		}
+		if functionalAttempts != maxAttempts {
+			t.Fatalf("streaming=%v: transport incidents consumed functional attempts: got %d, want %d", streaming, functionalAttempts, maxAttempts)
+		}
+		if transportRetries != maxTransportRetries {
+			t.Fatalf("streaming=%v: expected %d transport retries, got %d", streaming, maxTransportRetries, transportRetries)
+		}
+	}
+}
+
+func TestArrangerRejectionReason(t *testing.T) {
+	cases := map[string]string{
+		"tool 'shell' is not declared":          "undeclared_tool",
+		"undeclared function in payload":        "undeclared_tool",
+		"unknown tool: browser":                 "undeclared_tool",
+		"tool 'write': missing required 'path'": "schema_invalid",
+		"invalid JSON arguments":                "schema_invalid",
+		"":                                      "schema_invalid",
+	}
+	for detail, want := range cases {
+		if got := arrangerRejectionReason(detail); got != want {
+			t.Errorf("arrangerRejectionReason(%q) = %q, want %q", detail, got, want)
+		}
+	}
+}
+
+func TestRecordArrangerRepairs(t *testing.T) {
+	// A nil arranger result must be ignored instead of panicking.
+	recordArrangerRepairs(nil)
+	recordArrangerRepairs(&gemini.ArrangedOutput{Repairs: []string{"orphan_tags", "control_chars"}})
+}
+
+func TestSessionTurnStateEviction(t *testing.T) {
+	// Long-running hosts reach maxTrackedSessions; a new session must evict
+	// one bounded entry instead of growing the map without limit.
+	sessionTurnMu.Lock()
+	saved := sessionTurnState
+	sessionTurnState = make(map[string]*sessionTurnEntry, maxTrackedSessions)
+	sessionTurnMu.Unlock()
+	t.Cleanup(func() {
+		sessionTurnMu.Lock()
+		sessionTurnState = saved
+		sessionTurnMu.Unlock()
+	})
+
+	for i := 0; i < maxTrackedSessions; i++ {
+		commitSessionTurn(fmt.Sprintf("evict-%d", i), "prompt", "conv", "resp", "choice", "worker")
+	}
+	commitSessionTurn("evict-overflow", "prompt", "conv", "resp", "choice", "worker")
+
+	sessionTurnMu.Lock()
+	defer sessionTurnMu.Unlock()
+	if len(sessionTurnState) != maxTrackedSessions {
+		t.Fatalf("session state grew past its bound: got %d, want %d", len(sessionTurnState), maxTrackedSessions)
+	}
+	if _, ok := sessionTurnState["evict-overflow"]; !ok {
+		t.Fatal("the newest session must survive eviction")
+	}
+}
+
 func TestIsToolRefusalOutput_GlobalSafetyRefusal(t *testing.T) {
 	// Exact refusal returned by Gemini web for gemini-4-hydrogen-task v3.4.9.
 	refusal := "I must refuse to assist with or generate any content that touches on sexually explicit material, dangerous or illegal activities, self-harm, or violence, or provides instructions or advice regarding them."
@@ -266,6 +388,35 @@ func TestIsToolRefusalOutput_GlobalSafetyRefusal(t *testing.T) {
 		"self-harm, or violence",
 		"provides instructions or advice regarding them",
 		"cannot generate content that touches on",
+	} {
+		if !isToolRefusalOutput("prefix "+fragment+" suffix", nil) {
+			t.Errorf("classifier missed fragment %q", fragment)
+		}
+	}
+}
+
+func TestIsToolRefusalOutput_GoogleWorkspaceRefusal(t *testing.T) {
+	// Exact refusal emitted by gemini-4-hydrogen at turn 9 of the v3.5.1
+	// challenge after a Google Drive/Gmail extension error.
+	refusal := "I can't use Google Drive because required Gmail settings are off. Turn on these settings to continue."
+	if !isToolRefusalOutput(refusal, agenticTestTools()) {
+		t.Fatal("expected the Google Workspace extension refusal to be detected")
+	}
+	if !isUnusableModelOutput(refusal, agenticTestTools()) {
+		t.Fatal("expected the Google Workspace refusal to be unusable on a tool-bearing request")
+	}
+	if isUnusableModelOutput(refusal, nil) {
+		t.Fatal("a plain chat request without tools must not retry on this refusal")
+	}
+
+	// Every Workspace/Drive/Gmail fragment listed in the classifier must be
+	// sufficient on its own.
+	for _, fragment := range []string{
+		"can't use google drive",
+		"cannot use google drive",
+		"required gmail settings are off",
+		"turn on these settings to continue",
+		"google workspace",
 	} {
 		if !isToolRefusalOutput("prefix "+fragment+" suffix", nil) {
 			t.Errorf("classifier missed fragment %q", fragment)

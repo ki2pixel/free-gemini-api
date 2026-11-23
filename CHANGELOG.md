@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.2] - 2026-11-23
+
+### Added
+- **Dedicated Transport Retry Budget (`api/chat_handler.go`)**:
+  - Added `isTransportIncident` and `shouldRetryTransport` to classify `gemini.ErrConversationExpired` (1097) and `gemini.ErrUpstreamStreamStalled` (45s silence) as transport/session incidents.
+  - Added `maxTransportRetries = 2`, strictly independent from the functional generation budget returned by `maxChatAttempts`.
+  - Both the streaming and non-streaming loops now reset the upstream conversation (`ResetConversationStateSession`), set `forceFull = true`, increment the transport counter, and decrement the attempt index (`attempt--`) on a transport incident. A 1097 or a stall therefore never consumes one of the model's recovery attempts for a refusal, pseudo-report, schema error, or mid-value truncation.
+- **Google Workspace / Drive / Gmail Refusal Detection (`api/session_transcripts.go`)**:
+  - Added `can't use google drive`, `cannot use google drive`, `required gmail settings are off`, `turn on these settings to continue`, and `google workspace` to `refusalSnippets`.
+  - The exact Hydrogen v3.5.1 message `I can't use Google Drive because required Gmail settings are off. Turn on these settings to continue.` is now classified as a tool refusal and retried on a tool-bearing request instead of being returned as a normal `stop` response.
+- **Instruction-Change Notice Variants (`api/session_transcripts.go`)**:
+  - `compactSystemNotice` now recognizes any notice starting with `the instructions` and carrying the explicit `changed` marker, covering both `The instructions changed: ...` and `The instructions from /path/AGENTS.md changed. Here's the diff: ...`.
+  - Initial harness prompts that merely contain `Instructions from:` without a change indicator are still preserved verbatim.
+
+### Fixed
+- **AGENTS.md Diff Replay Loop (`api/session_transcripts.go`)**:
+  - The v3.5.1 `the instructions from ... changed. Here's the diff:` payload is now replaced by the compact neutral reminder. The full diff is no longer replayed upstream, preventing the repeated Google safety refusal (`I cannot fulfill this request.`).
+- **Workspace Refusal Interrupting the Tool Loop (`api/session_transcripts.go`)**:
+  - Workspace extension errors no longer terminate the task as ordinary assistant text; they are retried with the corrective directive instead.
+- **Transport Incidents Starving the Retry Budget (`api/chat_handler.go`)**:
+  - The previous single shared budget let a 1097 at attempt 0 and one unusable generation at attempt 1 exhaust `maxAttempts = 3`, so a truncated mutation at attempt 2 could not be retried. Transport incidents are now charged to their own two-retry budget.
+
+### Regression Tests
+- `api/system_notice_test.go`:
+  - `TestFormatSystemNotice_CompactsInstructionsFromDiff`: exact OpenCode payload with `--- AGENTS.md` / `+++ AGENTS.md`; asserts the diff body and headers are not replayed and the compact notice stays under 500 runes.
+- `api/session_scope_test.go`:
+  - `TestIsToolRefusalOutput_GoogleWorkspaceRefusal`: exact Hydrogen Workspace message plus each new fragment, usable-state checks with and without tools.
+  - `TestTransportIncidentClassification`: direct and wrapped 1097/stall sentinels versus ordinary generation errors.
+  - `TestShouldRetryTransport_Cap`: two transport retries maximum, no transport charge for model errors or `nil`.
+  - `TestTransportRetryBudgetPreservesFunctionalAttempts`: simulated streaming and non-streaming loops prove two transport incidents still leave the full `maxChatAttempts` functional budget.
+  - `TestArrangerRejectionReason`, `TestRecordArrangerRepairs`, `TestSessionTurnStateEviction`: retry-classification, metrics safety, and bounded session-state coverage.
+
+### Validation
+| Check | Command | Result |
+|---|---|---|
+| Go formatting | `test -z "$(gofmt -l .)"` | **OK** |
+| Static analysis | `go vet ./...` | **exit 0** |
+| Short tests | `go test -short ./...` | **OK** — `api 1.015s`, `db 0.025s`, `gemini 7.172s` |
+| Race tests | `go test -race -short ./...` | **OK** — `api 4.618s`, `db 1.100s`, `gemini 35.196s` |
+| Full audit | `./scripts/audit_check.sh` | **exit 0** — coverage `api 66.6 %`, `db 77.1 %`, `gemini 72.1 %` |
+| Docker rebuild | `docker compose up -d --build` | **OK** — image rebuilt, container recreated |
+| Health | `GET /health` | **online**, `status: online`, extension worker connected |
+| Live smoke | `./scripts/live_middleware_smoke.sh` | **6/6 PASS** |
+
+---
+
 ## [3.5.1] - 2026-11-23
 
 ### Added

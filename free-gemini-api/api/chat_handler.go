@@ -75,12 +75,16 @@ const (
 	maxToolChatAttempts    = 3
 	maxPlainStreamAttempts = 1
 	maxPlainChatAttempts   = 2
+	// maxTransportRetries is the dedicated budget for upstream transport and
+	// session incidents. It is independent from the model generation budget:
+	// a 1097 expiry or a 45s silent stall must never consume an attempt meant
+	// to recover from a refusal, pseudo-report, schema error, or truncation.
+	maxTransportRetries = 2
 )
 
-// maxChatAttempts returns the number of upstream generations allowed for one
-// request. A tool-bearing request gets a third attempt so the 1097
-// conversation-expiry self-heal (a transport incident on a fresh conversation)
-// cannot consume the model's functional recovery budget.
+// maxChatAttempts returns the number of functional upstream generations
+// allowed for one request. Transport incidents are retried from a separate
+// budget (see shouldRetryTransport) and never reduce this count.
 func maxChatAttempts(streaming, hasTools bool) int {
 	if hasTools {
 		return maxToolChatAttempts
@@ -89,6 +93,20 @@ func maxChatAttempts(streaming, hasTools bool) int {
 		return maxPlainStreamAttempts
 	}
 	return maxPlainChatAttempts
+}
+
+// isTransportIncident reports whether an upstream failure is a transport or
+// session incident rather than a model generation failure: Google's 1097
+// conversation expiry or a stream that went silent past the stall timeout.
+func isTransportIncident(err error) bool {
+	return errors.Is(err, gemini.ErrConversationExpired) || errors.Is(err, gemini.ErrUpstreamStreamStalled)
+}
+
+// shouldRetryTransport reports whether err must be charged to the dedicated
+// transport budget. When true, the caller resets the upstream conversation and
+// retries without consuming the functional generation attempt.
+func shouldRetryTransport(err error, transportRetries int) bool {
+	return err != nil && isTransportIncident(err) && transportRetries < maxTransportRetries
 }
 
 // recordArrangerRepairs exposes the repair kinds reported by the arranger as
@@ -631,14 +649,14 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				// With tools requested, chunks are buffered (never streamed to
 				// the client until arranged), so a blocked/empty generation can
 				// be retried invisibly on a fresh upstream conversation.
-				// A 1097 self-heal consumes one attempt (transport incident),
-				// so tool-bearing requests keep two functional attempts after
-				// it: one for a refusal/pseudo-report, one for the recovery.
+				// Transport incidents use a dedicated budget and never consume
+				// a functional attempt.
 				maxAttempts := maxChatAttempts(true, len(req.Tools) > 0)
 				forceFull := false
 				schemaRetryDetail := ""
 				truncationRetry := false
 				pseudoReportRetry := false
+				transportRetries := 0
 				for attempt := 0; attempt < maxAttempts; attempt++ {
 					var sendPrompt string
 					emittedThoughtRunes = 0
@@ -756,6 +774,23 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					}, sessionKey)
 					streamResp = sr
 					if err != nil {
+						if shouldRetryTransport(err, transportRetries) {
+							// Transport/session incident: reset the upstream
+							// conversation and retry on a fresh one without
+							// consuming the model's functional attempt.
+							transportRetries++
+							log.Printf("⚠️ Stream transport incident %d/%d (%v), retrying on a fresh upstream conversation without consuming a generation attempt", transportRetries, maxTransportRetries, err)
+							wWorker.Client.ResetConversationStateSession(sessionKey, model)
+							truncationRetry = false
+							schemaRetryDetail = ""
+							pseudoReportRetry = false
+							invalidateSessionTurn(sessionKey)
+							forceFull = true
+							// The loop's post statement re-increments attempt, so
+							// this replay keeps the same functional slot.
+							attempt--
+							continue
+						}
 						if attempt+1 < maxAttempts {
 							log.Printf("⚠️ Stream attempt %d failed (%v), retrying on a fresh upstream conversation", attempt+1, err)
 							truncationRetry = false
@@ -1083,14 +1118,15 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	resp, err := pool.ExecuteQueuedWithTier(ctx, sessionID, requiredTier, func(w *AccountWorker) (*gemini.GeminiResponse, error) {
 		usedWorker = w
 		// Nothing has been emitted yet, so a blocked/empty generation can be
-		// retried invisibly on a fresh upstream conversation. Tool-bearing
-		// requests get a third attempt so one 1097 self-heal on a fresh
-		// conversation does not consume the functional recovery budget.
+		// retried invisibly on a fresh upstream conversation. Transport
+		// incidents use a dedicated budget and never consume a functional
+		// generation attempt.
 		maxAttempts := maxChatAttempts(false, len(req.Tools) > 0)
 		forceFull := false
 		schemaRetryDetail := ""
 		truncationRetry := false
 		pseudoReportRetry := false
+		transportRetries := 0
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			var sendPrompt string
 			if forceFull {
@@ -1133,17 +1169,22 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			}
 			r, err := w.Client.AskModelSession(sendPrompt, model, sessionKey)
 			if err != nil {
-				// A 1097 expiry or a silent upstream stall is a transport
-				// incident, not a model failure: reset the conversation and
-				// replay on a fresh one. The extra tool-request attempt keeps
-				// this from consuming the functional recovery budget.
-				if attempt+1 < maxAttempts && (errors.Is(err, gemini.ErrConversationExpired) || errors.Is(err, gemini.ErrUpstreamStreamStalled)) {
-					log.Printf("⚠️ Non-stream attempt %d hit a transport incident (%v), retrying on a fresh upstream conversation", attempt+1, err)
+				if shouldRetryTransport(err, transportRetries) {
+					// A 1097 expiry or a silent upstream stall is a transport
+					// incident, not a model failure: reset the conversation and
+					// replay on a fresh one without consuming the functional
+					// recovery budget.
+					transportRetries++
+					log.Printf("⚠️ Non-stream transport incident %d/%d (%v), retrying on a fresh upstream conversation without consuming a generation attempt", transportRetries, maxTransportRetries, err)
+					w.Client.ResetConversationStateSession(sessionKey, model)
 					truncationRetry = false
 					schemaRetryDetail = ""
 					pseudoReportRetry = false
 					invalidateSessionTurn(sessionKey)
 					forceFull = true
+					// The loop's post statement re-increments attempt, so this
+					// replay keeps the same functional slot.
+					attempt--
 					continue
 				}
 				return nil, err

@@ -301,6 +301,11 @@ func isToolRefusalOutput(text string, tools []map[string]any) bool {
 		"unable to fulfill this request",
 		"i cannot fulfill",
 		"i can't fulfill",
+		"can't use google drive",
+		"cannot use google drive",
+		"required gmail settings are off",
+		"turn on these settings to continue",
+		"google workspace",
 		"which you can save to",
 		"which you can save as",
 		"save this to",
@@ -445,7 +450,7 @@ func compactToolErrorSnippet(content string) string {
 // of the prompt.
 const maxInlineSystemNoticeRunes = 4000
 
-// compactSystemNotice recognizes the two large OpenCode notices that must be
+// compactSystemNotice recognizes the large OpenCode replay notices that must be
 // neutralized and returns a short, non-authoritative reminder. It returns
 // ok=false for every other system message.
 func compactSystemNotice(content string) (string, bool) {
@@ -454,13 +459,17 @@ func compactSystemNotice(content string) (string, bool) {
 		return "", false
 	}
 	lower := strings.ToLower(trimmed)
+	// OpenCode emits several variants of the instruction-change notice:
+	// "The instructions changed: ..." and
+	// "The instructions from /path/AGENTS.md changed. Here's the diff: ...".
+	// Both start with "the instructions" and carry the explicit "changed"
+	// indicator. Never match on a bare "Instructions from:" substring: an
+	// initial harness system prompt legitimately embeds the project
+	// instructions and must not be replaced by the compact reminder.
+	instructionsChanged := strings.HasPrefix(lower, "the instructions") && strings.Contains(lower, "changed")
 	switch {
-	case strings.HasPrefix(lower, "the instructions changed"),
+	case instructionsChanged,
 		strings.HasPrefix(lower, "the code mode tool catalog has changed"):
-		// Both replay notices start with an explicit "changed" marker. Do not
-		// match on a bare "Instructions from:" substring here: an initial
-		// harness system prompt may legitimately contain the project
-		// instructions and must not be replaced by the compact reminder.
 		if strings.HasPrefix(lower, "the code mode tool catalog has changed") {
 			return "The tool catalog was refreshed. The [AVAILABLE TOOLS] section at the top is authoritative; do not restate the catalog.", true
 		}
