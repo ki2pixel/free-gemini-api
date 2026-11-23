@@ -232,23 +232,59 @@ func toolFunctionDefinition(tool map[string]any) map[string]any {
 	return nil
 }
 
-// HasInvalidSchemaToolCall parses raw model output without schema filtering and
-// reports the first tool call that violates the declared schemas. It is used by
-// the API layer to trigger an abstract-error retry before any call reaches the
-// host.
+// explicitToolCalls extracts only the calls the model explicitly framed as
+// tool invocations: <tool_call> envelopes or Markdown JSON fences. It never
+// scans arbitrary prose for balanced JSON objects, because a final answer may
+// legitimately quote {"name":"read"} while explaining the work it performed.
+func explicitToolCalls(raw string) []ToolCall {
+	// Thinking blocks are reasoning, not executable output: the arranger strips
+	// them before parsing, so a plan that quotes a JSON call inside <thought>
+	// must not be validated as if it had been emitted to the host.
+	frame := thoughtRegex.ReplaceAllString(raw, "")
+	var calls []ToolCall
+	if strings.Contains(frame, "<tool_call>") {
+		// A nil catalog keeps schema-invalid calls in the result so the caller
+		// can report the precise violation instead of silently dropping it.
+		tagged, _ := extractTaggedToolCalls(frame, nil)
+		calls = append(calls, tagged...)
+	}
+	for _, match := range jsonCodeBlock.FindAllStringSubmatch(frame, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		if tc, ok := parseSingleToolCall(strings.TrimSpace(match[1])); ok {
+			calls = append(calls, tc)
+		}
+	}
+	return calls
+}
+
+// HasInvalidSchemaToolCall reports the first explicitly framed tool call that
+// violates the declared schemas. It is used by the API layer to trigger an
+// abstract-error retry before any call reaches the host.
+//
+// Only calls explicitly framed by the model (<tool_call> tags or a Markdown
+// JSON fence) are validated. Final prose often mentions tool names and may
+// quote JSON fragments; the catalog-aware arranger keeps those as text instead
+// of promoting them to calls, so a legitimate synthesis is not rejected with a
+// spurious "missing required property" error.
 func HasInvalidSchemaToolCall(raw string, tools []map[string]any) (bool, string) {
 	if len(tools) == 0 {
-		return false, ""
-	}
-	arranged := ArrangeGeminiOutput(raw)
-	if !arranged.IsToolCall || len(arranged.ToolCalls) == 0 {
 		return false, ""
 	}
 	catalog, _ := DefaultToolSchemaRegistry.CompileTools(tools)
 	if catalog == nil {
 		return false, ""
 	}
-	for _, tc := range arranged.ToolCalls {
+	arranged := ArrangeGeminiOutputWithTools(raw, tools)
+	calls := explicitToolCalls(raw)
+	if len(calls) == 0 {
+		// A call without an explicit envelope is considered only when the
+		// catalog-aware arranger accepted it; arbitrary prose JSON and dropped
+		// schema violations were already discarded by that pass.
+		calls = arranged.ToolCalls
+	}
+	for _, tc := range calls {
 		if ok, detail := catalog.ValidateCall(tc.Function.Name, tc.Function.Arguments); !ok {
 			return true, fmt.Sprintf("tool '%s': %s", tc.Function.Name, detail)
 		}

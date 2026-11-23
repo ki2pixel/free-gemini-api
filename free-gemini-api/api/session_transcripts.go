@@ -326,6 +326,30 @@ func isToolRefusalOutput(text string, tools []map[string]any) bool {
 // next tool call and leave the task unfinished, so they must be retried with a
 // corrective directive instead of being returned as a valid stop.
 var pseudoReportSnippets = []string{
+	// Intermediate progress updates observed when the model announces the next
+	// file instead of calling the read/edit tools.
+	"je continue la mise à jour",
+	"suite à la mise à jour de",
+	"je poursuis avec",
+	"je m'apprête à",
+	"je passe maintenant à",
+	"i will now proceed with",
+	"continuing with the update",
+	// Premature completion summaries emitted before the planned tool loop has
+	// actually run (the v3.5.2 Hydrogen and Hydrogen-Task stop shapes).
+	"a été fully réalisée",
+	"a été réalisée et vérifiée",
+	"a été effectuée avec succès",
+	"récapitulatif des modifications",
+	"récapitulatif des actions",
+	"conformément au plan d'alignement",
+	"tous les fichiers documentaires cibles",
+	"ont été mis à jour et synchronisés",
+	"je peux maintenant rédiger la réponse de synthèse",
+	"je vais formuler la synthèse finale",
+	"summary of modifications",
+	"all target documentation files have been updated",
+	// Earlier v3.5.0/v3.5.1 markers retained for regressions.
 	"a été initié",
 	"ont été mis à jour avec succès",
 	"rapport d'exécution",
@@ -479,13 +503,73 @@ func compactSystemNotice(content string) (string, bool) {
 	}
 }
 
+// systemUpdateOpenTag and systemUpdateCloseTag delimit the fallback wrapper
+// OpenCode 2.4.0 uses when it downgrades a chronological system message to the
+// ordinary "user" role. The upstream API rejects mid-conversation system
+// messages, so the harness serializes them as visibly lower-authority user text
+// and XML-escapes the payload (see packages/ai/src/protocols/shared.ts).
+const (
+	systemUpdateOpenTag  = "<system-update>"
+	systemUpdateCloseTag = "</system-update>"
+)
+
+// systemUpdateUnescaper reverses OpenCode's XML escaping. A strings.Replacer
+// performs a single left-to-right pass, so an escaped literal such as
+// "&amp;lt;" decodes to "&lt;" and is never double-decoded into "<".
+var systemUpdateUnescaper = strings.NewReplacer(
+	"&lt;", "<",
+	"&gt;", ">",
+	"&amp;", "&",
+)
+
+// splitOpenCodeSystemUpdates separates the real user instruction from any
+// chronologically injected <system-update> wrappers. OpenCode can either emit
+// a standalone user message containing only the wrapper or append it to the
+// previous user message ("${previous.content}\n<system-update>..."), so the
+// surrounding text is preserved verbatim as the user prompt while every
+// wrapper payload is returned separately, unescaped. A wrapper therefore can
+// never replace the actual task instruction.
+func splitOpenCodeSystemUpdates(content string) (string, []string) {
+	var userParts []string
+	var notices []string
+	rest := content
+	for {
+		start := strings.Index(rest, systemUpdateOpenTag)
+		if start == -1 {
+			userParts = append(userParts, rest)
+			break
+		}
+		userParts = append(userParts, rest[:start])
+		body := rest[start+len(systemUpdateOpenTag):]
+		end := strings.Index(body, systemUpdateCloseTag)
+		if end == -1 {
+			// An unclosed wrapper is still a notice: keep its payload out of
+			// the user prompt instead of treating instructions as a task.
+			notices = append(notices, strings.TrimSpace(systemUpdateUnescaper.Replace(body)))
+			break
+		}
+		notices = append(notices, strings.TrimSpace(systemUpdateUnescaper.Replace(body[:end])))
+		rest = body[end+len(systemUpdateCloseTag):]
+	}
+	return strings.TrimSpace(strings.Join(userParts, "\n")), notices
+}
+
 // formatSystemNotice renders an inline system notice for the upstream prompt.
 // Known OpenCode notices are replaced by a compact neutral reminder; unknown
-// notices are capped so a single notice cannot saturate the prompt.
+// notices are capped so a single notice cannot saturate the prompt. A payload
+// that still carries an OpenCode <system-update> wrapper (for example a system
+// message replayed without the user-role downgrade) is unwrapped and unescaped
+// first, so the same neutralization applies on both paths.
 func formatSystemNotice(content string) string {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
 		return ""
+	}
+	if _, notices := splitOpenCodeSystemUpdates(trimmed); len(notices) > 0 {
+		trimmed = strings.TrimSpace(strings.Join(notices, "\n"))
+		if trimmed == "" {
+			return ""
+		}
 	}
 	if compact, ok := compactSystemNotice(trimmed); ok {
 		return "[System Notice]: " + compact

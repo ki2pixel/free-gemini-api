@@ -147,6 +147,26 @@ func firstUserMessageContent(msgs []OpenAIChatMessage) string {
 	return ""
 }
 
+// appendUserTurnPrompt renders one user-role turn into the upstream prompt and
+// returns the real user instruction. OpenCode's <system-update> wrappers are
+// stripped from the instruction and appended as compact system notices, so a
+// chronologically replayed notice can never replace the task prompt.
+func appendUserTurnPrompt(builder *strings.Builder, content string) string {
+	userText, notices := splitOpenCodeSystemUpdates(content)
+	if userText != "" {
+		builder.WriteString("User: ")
+		builder.WriteString(userText)
+		builder.WriteString("\n")
+	}
+	for _, notice := range notices {
+		if formatted := formatSystemNotice(notice); formatted != "" {
+			builder.WriteString(formatted)
+			builder.WriteString("\n")
+		}
+	}
+	return userText
+}
+
 // HandleUnifiedChat handles /chat endpoint (text, images, screen recordings, ref videos)
 func HandleUnifiedChat(c fiber.Ctx) error {
 	input, err := GetChatService().DecodeUnifiedChat(c)
@@ -440,10 +460,13 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	for _, m := range nonSystemMessages {
 		contentStr := FlattenContent(m.Content)
 		if strings.EqualFold(m.Role, "user") {
-			prompt = contentStr
-			fullPromptBuilder.WriteString("User: ")
-			fullPromptBuilder.WriteString(contentStr)
-			fullPromptBuilder.WriteString("\n")
+			// OpenCode 2.4.0 downgrades chronological system messages to the
+			// user role and wraps them in <system-update>...</system-update>.
+			// Treat that payload as a notice, never as the user's task: the
+			// real instruction may precede the wrapper in the same message.
+			if userText := appendUserTurnPrompt(&fullPromptBuilder, contentStr); userText != "" {
+				prompt = userText
+			}
 		} else if strings.EqualFold(m.Role, "assistant") {
 			if len(m.ToolCalls) > 0 {
 				tcJSON, _ := json.Marshal(m.ToolCalls)
@@ -467,7 +490,14 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 
 	if prompt == "" && len(nonSystemMessages) > 0 {
 		lastM := nonSystemMessages[len(nonSystemMessages)-1]
-		prompt = FlattenContent(lastM.Content)
+		fallback := FlattenContent(lastM.Content)
+		if strings.EqualFold(lastM.Role, "user") {
+			// Never fall back to an OpenCode notice-only wrapper: if the
+			// conversation carries no real user instruction, leave `prompt`
+			// empty rather than logging/injecting the notice as the task.
+			fallback, _ = splitOpenCodeSystemUpdates(fallback)
+		}
+		prompt = fallback
 	}
 
 	// Multi-agent & session affinity resolution

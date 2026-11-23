@@ -162,6 +162,34 @@ func TestHasInvalidSchemaToolCall_EmptyOldString(t *testing.T) {
 	}
 }
 
+func TestHasInvalidSchemaToolCall_IgnoresProseAndJSONFragments(t *testing.T) {
+	tools := openCodeToolsFixture()
+
+	// Exact v3.5.2 failure shape: the final synthesis mentions the read tool
+	// and quotes a JSON fragment, but never frames a tool call. It must not be
+	// rejected as a call missing "path".
+	prose := []string{
+		"La mise à jour de l'ensemble des documentations a été réalisée. J'ai utilisé `read` puis `edit` pour aligner AGENTS.md et README.md.",
+		"Le format attendu est {\"name\":\"read\"} ; aucun appel n'est nécessaire à ce stade.",
+		"Final summary: all target documentation files have been updated. For reference, {" +
+			"\"name\": \"write\", \"arguments\": {\"content\": \"example\"}} describes the shape only.",
+		"<thought>Je pourrais appeler {\"name\":\"read\"} pour vérifier, mais tout est déjà lu.</thought>La synthèse finale est prête.",
+	}
+	for _, raw := range prose {
+		if invalid, detail := HasInvalidSchemaToolCall(raw, tools); invalid {
+			t.Errorf("prose summary was rejected as an invalid tool call: %s (raw: %q)", detail, raw)
+		}
+	}
+
+	// A Markdown fence explicitly formatted as a tool call is still validated.
+	fenced := "Voici l'appel à rejouer :\n```json\n{\"name\":\"write\",\"arguments\":{\"content\":\"hello\"}}\n```"
+	if invalid, detail := HasInvalidSchemaToolCall(fenced, tools); !invalid {
+		t.Fatal("expected a fenced write without path to be flagged")
+	} else if !strings.Contains(detail, "path") {
+		t.Errorf("detail %q does not mention path", detail)
+	}
+}
+
 func TestSchemaValidator_MissingRequiredProperty(t *testing.T) {
 	catalog, err := DefaultToolSchemaRegistry.CompileTools(openCodeToolsFixture())
 	if err != nil {

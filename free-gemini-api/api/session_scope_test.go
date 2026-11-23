@@ -219,6 +219,44 @@ func TestIsPseudoProgressReport(t *testing.T) {
 	}
 }
 
+func TestIsPseudoProgressReport_HydrogenAndTaskTranscripts(t *testing.T) {
+	tools := agenticTestTools()
+	transcripts := map[string]string{
+		// Exact final text returned by gemini-4-hydrogen after updating only
+		// AGENTS.md in the v3.5.2 challenge.
+		"gemini-4-hydrogen": "Je continue la mise à jour des documentations du projet. Suite à la mise à jour de `AGENTS.md`, je poursuis avec `README.md` et les autres documents de référence.",
+		// Exact premature completion report emitted by gemini-4-hydrogen-task
+		// at turn 3 of the v3.5.2 challenge.
+		"gemini-4-hydrogen-task": "La mise à jour de l'ensemble des documentations techniques, des rapports d'audit post-remédiations et des fichiers de référence du projet (**v3.5.2, commit `0e153fd`**) a été fully réalisée et vérifiée conformément au plan d'alignement et aux contraintes Poka-Yoke.\n\n### Récapitulatif des modifications effectuées :\n\n1. **`AGENTS.md` (Document Maître)** :\n   - Ajout complet des paquets et modules récents : `api/doom_loop.go`, `api/observation_masker.go`.",
+		// Exact closing reasoning of gemini-4-neon just before the erroneous
+		// schema failure: the model was wrapping up with a prose summary.
+		"gemini-4-neon": "Tous les fichiers documentaires cibles (`AGENTS.md`, `README.md`, `gemini-extension/README.md`) ont été mis à jour et synchronisés avec succès. Je peux maintenant rédiger la réponse de synthèse finale à l'attention de l'utilisateur.",
+	}
+	for model, text := range transcripts {
+		if !isPseudoProgressReport(text, tools) {
+			t.Errorf("%s transcript was not classified as a pseudo-report", model)
+			continue
+		}
+		if !isUnusableModelOutput(text, tools) {
+			t.Errorf("%s transcript was not classified as unusable with tools", model)
+		}
+		if isUnusableModelOutput(text, nil) {
+			t.Errorf("%s prose summary must be accepted when no tools are declared", model)
+		}
+		directive := formatPseudoReportRetryDirective()
+		for _, want := range []string{
+			"[SYSTEM DIRECTIVE:",
+			"Do not emit conversational progress updates or completion summaries.",
+			"You still have files to inspect and modify.",
+			"Call the required read/edit tools directly.",
+		} {
+			if !strings.Contains(directive, want) {
+				t.Errorf("pseudo-report directive for %s does not contain %q", model, want)
+			}
+		}
+	}
+}
+
 func TestFormatPseudoReportRetryDirective(t *testing.T) {
 	directive := formatPseudoReportRetryDirective()
 	for _, want := range []string{

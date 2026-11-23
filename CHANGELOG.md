@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.3] - 2026-11-23
+
+### Added
+- **OpenCode `<system-update>` Neutralization on the User Role (`api/chat_handler.go`, `api/session_transcripts.go`)**:
+  - Added `splitOpenCodeSystemUpdates`, which extracts every `<system-update>...</system-update>` wrapper from a `role: "user"` message and XML-unescapes the payload (`&lt;`, `&gt;`, `&amp;`).
+  - Each extracted payload is passed to `formatSystemNotice`, so instruction-change diffs and tool-catalog updates are compacted exactly like `role: "system"` notices.
+  - The surrounding user text is preserved verbatim as the real task prompt. Text preceding the wrapper (the `${previous.content}\n<system-update>...` fusion shape) and text after it are kept; a notice-only message never overwrites `prompt`.
+  - `formatSystemNotice` also unwraps a wrapped payload directly, covering clients that replay the wrapper on the system role.
+  - The fallback that fills an empty `prompt` from the last message now strips wrappers instead of promoting a notice to the task instruction.
+- **Extended Pseudo-Report Coverage (`api/session_transcripts.go`)**:
+  - Added the v3.5.2 progress markers `je continue la mise à jour`, `suite à la mise à jour de`, `je poursuis avec`, `je m'apprête à`, `je passe maintenant à`, `i will now proceed with`, and `continuing with the update`.
+  - Added the premature completion markers `a été fully réalisée`, `a été réalisée et vérifiée`, `a été effectuée avec succès`, `récapitulatif des modifications`, `récapitulatif des actions`, `conformément au plan d'alignement`, `tous les fichiers documentaires cibles`, `ont été mis à jour et synchronisés`, `je peux maintenant rédiger la réponse de synthèse`, `je vais formuler la synthèse finale`, `summary of modifications`, and `all target documentation files have been updated`.
+  - These turns are now classified by `isPseudoProgressReport` / `isUnusableModelOutput` and retried with `formatPseudoReportRetryDirective()` instead of terminating with `finish_reason: "stop"`.
+
+### Fixed
+- **Schema False Positive on Final Synthesis (`gemini/schema_validator.go`)**:
+  - `HasInvalidSchemaToolCall` now compiles the request catalog and calls `ArrangeGeminiOutputWithTools(raw, tools)` instead of the catalog-less `ArrangeGeminiOutput(raw)`. The no-catalog fallback (`findFirstJSONToolCall`) could promote a JSON fragment quoted in the final prose to a tool call, then reject it for a missing property (`tool 'read': missing required property 'path'`).
+  - Added `explicitToolCalls`, which validates only calls explicitly framed by the model: `<tool_call>` envelopes or Markdown JSON fences. Plain prose, inline JSON examples, and reasoning inside `<thought>` / `<thinking>` blocks are no longer treated as malformed calls.
+  - A fenced JSON block explicitly formatted as a tool call is still validated, and a genuinely malformed `<tool_call>` still triggers the abstract-error retry.
+
+### Regression Tests
+- `api/system_notice_test.go`:
+  - `TestFormatSystemNotice_HandlesOpenCodeWrappedUserSystemUpdate`: exact OpenCode 2.4.0 wrapper with XML-escaped instruction diff; asserts the user instruction is preserved, entities are unescaped, the compact notice keeps `[System Notice]` / `AGENTS.md`, the diff headers and body are not replayed, the notice stays under 500 runes, and a standalone wrapper does not leak into user text.
+- `api/session_scope_test.go`:
+  - `TestIsPseudoProgressReport_HydrogenAndTaskTranscripts`: exact `gemini-4-hydrogen`, `gemini-4-hydrogen-task`, and `gemini-4-neon` v3.5.2 excerpts must be intercepted by `isPseudoProgressReport` and `isUnusableModelOutput` with tools, accepted without tools, and associated with `formatPseudoReportRetryDirective()`.
+- `gemini/schema_validator_test.go`:
+  - `TestHasInvalidSchemaToolCall_IgnoresProseAndJSONFragments`: final prose mentioning `read`/`write` and quoting `{"name":"read"}` or a thought-block JSON fragment is not rejected; a fenced tool call missing `path` is still flagged.
+
+### Validation
+| Check | Command | Result |
+|---|---|---|
+| Go formatting | `test -z "$(gofmt -l .)"` | **OK** |
+| Static analysis | `go vet ./...` | **exit 0** |
+| Short tests | `go test -short ./...` | **OK** — `api`, `db`, `gemini` |
+| Race tests | `go test -race -short ./...` | **OK** — `api`, `db`, `gemini`, no race detected |
+| Full audit | `./scripts/audit_check.sh` | **exit 0** — coverage `api 66.7 %`, `db 77.1 %`, `gemini 72.4 %` |
+| Docker rebuild | `docker compose up -d --build` | **OK** — image rebuilt, container recreated |
+| Health | `GET /health` | **online**, `status: online`, 1 extension worker connected, cookie pool healthy (1 account) |
+| Live smoke | `./scripts/live_middleware_smoke.sh` | **6/6 PASS** |
+
+---
+
 ## [3.5.2] - 2026-11-23
 
 ### Added
