@@ -210,8 +210,14 @@ func writeAgenticMetrics(b *strings.Builder) {
 // writeLabeledCounter renders a counter family, keeping the known label values
 // visible at zero and appending any additional observed labels in sorted order.
 func writeLabeledCounter(b *strings.Builder, name, help, label string, store *sync.Map, known []string) {
-	b.WriteString("# HELP " + name + " " + help + "\n")
-	b.WriteString("# TYPE " + name + " counter\n")
+	b.WriteString("# HELP ")
+	b.WriteString(name)
+	b.WriteString(" ")
+	b.WriteString(help)
+	b.WriteString("\n")
+	b.WriteString("# TYPE ")
+	b.WriteString(name)
+	b.WriteString(" counter\n")
 
 	seen := make(map[string]struct{}, len(known))
 	for _, value := range known {

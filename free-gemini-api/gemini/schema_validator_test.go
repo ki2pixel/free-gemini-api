@@ -309,8 +309,7 @@ func BenchmarkToolSchemaRegistry_CompileTools(b *testing.B) {
 	if _, err := registry.CompileTools(tools); err != nil {
 		b.Fatalf("warm-up CompileTools: %v", err)
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := registry.CompileTools(tools); err != nil {
 			b.Fatalf("CompileTools: %v", err)
 		}

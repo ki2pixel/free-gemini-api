@@ -365,28 +365,39 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 
 	// Write System directives & tool schemas at the very top of the prompt
 	if systemContent != "" {
-		fullPromptBuilder.WriteString("[System]: " + systemContent + "\n\n")
+		fullPromptBuilder.WriteString("[System]: ")
+		fullPromptBuilder.WriteString(systemContent)
+		fullPromptBuilder.WriteString("\n\n")
 	}
 	if tiBlock != "" {
-		fullPromptBuilder.WriteString(tiBlock + "\n\n")
+		fullPromptBuilder.WriteString(tiBlock)
+		fullPromptBuilder.WriteString("\n\n")
 	}
 
 	for _, m := range nonSystemMessages {
 		contentStr := FlattenContent(m.Content)
 		if strings.EqualFold(m.Role, "user") {
 			prompt = contentStr
-			fullPromptBuilder.WriteString("User: " + contentStr + "\n")
+			fullPromptBuilder.WriteString("User: ")
+			fullPromptBuilder.WriteString(contentStr)
+			fullPromptBuilder.WriteString("\n")
 		} else if strings.EqualFold(m.Role, "assistant") {
 			if len(m.ToolCalls) > 0 {
 				tcJSON, _ := json.Marshal(m.ToolCalls)
-				fullPromptBuilder.WriteString("Assistant called tools: " + string(tcJSON) + "\n")
+				fullPromptBuilder.WriteString("Assistant called tools: ")
+				fullPromptBuilder.Write(tcJSON)
+				fullPromptBuilder.WriteString("\n")
 			} else if contentStr != "" {
-				fullPromptBuilder.WriteString("Assistant: " + contentStr + "\n")
+				fullPromptBuilder.WriteString("Assistant: ")
+				fullPromptBuilder.WriteString(contentStr)
+				fullPromptBuilder.WriteString("\n")
 			}
 		} else if strings.EqualFold(m.Role, "tool") {
 			fullPromptBuilder.WriteString(fmt.Sprintf("[Tool Result for %s]: %s\n", m.Name, contentStr))
 		} else if strings.EqualFold(m.Role, "system") {
-			fullPromptBuilder.WriteString("[System Notice]: " + contentStr + "\n")
+			fullPromptBuilder.WriteString("[System Notice]: ")
+			fullPromptBuilder.WriteString(contentStr)
+			fullPromptBuilder.WriteString("\n")
 		}
 	}
 

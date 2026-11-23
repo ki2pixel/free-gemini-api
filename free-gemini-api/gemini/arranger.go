@@ -358,7 +358,6 @@ func truncateRunes(s string, max int) string {
 
 var (
 	thoughtRegex  = regexp.MustCompile(`(?s)<(?:thought|thinking)>([\s\S]*?)</(?:thought|thinking)>`)
-	toolCallRegex = regexp.MustCompile(`(?s)<tool_call>([\s\S]*?)</tool_call>`)
 	jsonCodeBlock = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{[\\s\\S]*?\\})\\s*```")
 	// Gemini web auto-linkifies bare URLs in its rendered stream, producing
 	// "[https://x](https://x)" instead of the plain URL. Inside tool-call
@@ -1184,13 +1183,14 @@ func autoCloseJSONBraces(s string) (string, bool) {
 			inStr = true
 			continue
 		}
-		if c == '{' || c == '[' {
+		switch c {
+		case '{', '[':
 			stack = append(stack, c)
-		} else if c == '}' {
+		case '}':
 			if len(stack) > 0 && stack[len(stack)-1] == '{' {
 				stack = stack[:len(stack)-1]
 			}
-		} else if c == ']' {
+		case ']':
 			if len(stack) > 0 && stack[len(stack)-1] == '[' {
 				stack = stack[:len(stack)-1]
 			}
@@ -1225,9 +1225,10 @@ func autoCloseJSONBraces(s string) (string, bool) {
 	}
 
 	for i := len(stack) - 1; i >= 0; i-- {
-		if stack[i] == '{' {
+		switch stack[i] {
+		case '{':
 			closer.WriteByte('}')
-		} else if stack[i] == '[' {
+		case '[':
 			closer.WriteByte(']')
 		}
 	}

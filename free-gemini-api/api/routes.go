@@ -307,6 +307,9 @@ func RegisterRoutesWithAuth(app *fiber.App, adminToken, apiToken string) {
 				})
 			}
 		}
+		if err := rows.Err(); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
 		return c.JSON(fiber.Map{"media": mediaList})
 	})
 

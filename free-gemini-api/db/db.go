@@ -210,6 +210,9 @@ func GetRecentMessages(conversationID string, limit int) ([]map[string]any, erro
 			})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -241,6 +244,9 @@ func SearchMessages(query string, limit int) ([]map[string]any, error) {
 				"created_at": createdAt,
 			})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -287,6 +293,9 @@ func GetMediaByPrompt(mediaType, query string, limit int) ([]map[string]any, err
 			})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -329,6 +338,9 @@ func GetSystemStats() (map[string]any, error) {
 					"tokens":   mTok,
 				}
 			}
+		}
+		if err := mRows.Err(); err != nil {
+			return nil, err
 		}
 	}
 
@@ -425,6 +437,9 @@ func GetAccounts() ([]map[string]any, error) {
 			})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return accounts, nil
 }
 
@@ -458,6 +473,9 @@ func GetAllMessagesForExport() ([]map[string]any, error) {
 				"created_at":      createdAt,
 			})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return list, nil
 }
@@ -493,6 +511,9 @@ func GetAllMediaForExport() ([]map[string]any, error) {
 			})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return list, nil
 }
 
@@ -524,6 +545,9 @@ func GetAllRequestLogsForExport() ([]map[string]any, error) {
 				"created_at":  createdAt,
 			})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return list, nil
 }

@@ -18,7 +18,7 @@ import (
 // UserSessions is a bounded, expiring cache. The eviction hook closes idle
 // transport resources so a flood of distinct session identifiers cannot grow
 // the process without limit (F-13).
-var UserSessions = NewLRUCache[string, *gemini.GeminiClient](1024, 30*time.Minute, func(_ string, client *gemini.GeminiClient) {
+var UserSessions = NewLRUCache(1024, 30*time.Minute, func(_ string, client *gemini.GeminiClient) {
 	if client != nil {
 		client.Close()
 	}

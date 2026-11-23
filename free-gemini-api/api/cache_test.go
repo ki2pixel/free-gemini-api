@@ -10,7 +10,7 @@ import (
 
 func TestLRUCacheCapacityAndEvictionOrder(t *testing.T) {
 	var evicted []string
-	cache := NewLRUCache[string, int](2, 0, func(key string, value int) {
+	cache := NewLRUCache(2, 0, func(key string, value int) {
 		evicted = append(evicted, fmt.Sprintf("%s=%d", key, value))
 	})
 	defer cache.Close()
@@ -55,7 +55,7 @@ func TestLRUCacheTTLExpiry(t *testing.T) {
 
 func TestLRUCachePurgeExpiredAndCallback(t *testing.T) {
 	var evicted atomic.Int64
-	cache := NewLRUCache[int, int](8, 15*time.Millisecond, func(_, _ int) {
+	cache := NewLRUCache(8, 15*time.Millisecond, func(_, _ int) {
 		evicted.Add(1)
 	})
 	defer cache.Close()
@@ -78,7 +78,7 @@ func TestLRUCachePurgeExpiredAndCallback(t *testing.T) {
 func TestLRUCacheDeleteAndCloseCallbacks(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string]int{}
-	cache := NewLRUCache[string, int](4, 0, func(key string, value int) {
+	cache := NewLRUCache(4, 0, func(key string, value int) {
 		mu.Lock()
 		seen[key] = value
 		mu.Unlock()
