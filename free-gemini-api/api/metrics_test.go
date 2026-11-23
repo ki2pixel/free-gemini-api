@@ -17,6 +17,16 @@ func TestMetricsPrometheusFormat(t *testing.T) {
 	RecordHTTPRequest(299)
 	RecordTokenUsage("metrics-format-tier", 42)
 	RecordRateLimitDrop()
+	RecordDoomLoopIntervention("repeat")
+	RecordDoomLoopIntervention("cycle")
+	RecordDoomLoopIntervention("passive_read")
+	RecordArrangerRepair("control_chars")
+	RecordArrangerRepair("brace_envelope")
+	RecordArrangerRepair("disclaimer")
+	RecordArrangerRejection("mid_value_truncation")
+	RecordArrangerRejection("schema_invalid")
+	RecordArrangerRejection("undeclared_tool")
+	RecordRefusalRetry()
 
 	stats := WorkerPoolStats{
 		Workers: []WorkerStats{
@@ -48,6 +58,24 @@ func TestMetricsPrometheusFormat(t *testing.T) {
 		"# HELP gemini_rate_limit_drops_total",
 		"# TYPE gemini_rate_limit_drops_total counter",
 		"gemini_rate_limit_drops_total ",
+		"# HELP gemini_doom_loop_interventions_total",
+		"# TYPE gemini_doom_loop_interventions_total counter",
+		`gemini_doom_loop_interventions_total{signal="repeat"} `,
+		`gemini_doom_loop_interventions_total{signal="cycle"} `,
+		`gemini_doom_loop_interventions_total{signal="passive_read"} `,
+		"# HELP gemini_arranger_repairs_total",
+		"# TYPE gemini_arranger_repairs_total counter",
+		`gemini_arranger_repairs_total{kind="control_chars"} `,
+		`gemini_arranger_repairs_total{kind="brace_envelope"} `,
+		`gemini_arranger_repairs_total{kind="disclaimer"} `,
+		"# HELP gemini_arranger_rejections_total",
+		"# TYPE gemini_arranger_rejections_total counter",
+		`gemini_arranger_rejections_total{reason="mid_value_truncation"} `,
+		`gemini_arranger_rejections_total{reason="schema_invalid"} `,
+		`gemini_arranger_rejections_total{reason="undeclared_tool"} `,
+		"# HELP gemini_refusal_retries_total",
+		"# TYPE gemini_refusal_retries_total counter",
+		"gemini_refusal_retries_total ",
 		"# HELP gemini_workers_total",
 		"# TYPE gemini_workers_total gauge",
 		`gemini_workers_total{tier="free"} 1`,
@@ -231,6 +259,92 @@ func TestMetricsMiddlewareCountsStatuses(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics output missing %q", want)
 		}
+	}
+}
+
+func TestMetricsAgenticCounters(t *testing.T) {
+	beforeRepeat := counterValue(&doomLoopInterventions, "repeat")
+	RecordDoomLoopIntervention("repeat")
+	RecordDoomLoopIntervention("repeat")
+	if got := counterValue(&doomLoopInterventions, "repeat"); got != beforeRepeat+2 {
+		t.Fatalf("doom-loop repeat counter = %d, want %d", got, beforeRepeat+2)
+	}
+
+	beforeRepair := counterValue(&arrangerRepairs, "control_chars")
+	RecordArrangerRepair("control_chars")
+	if got := counterValue(&arrangerRepairs, "control_chars"); got != beforeRepair+1 {
+		t.Fatalf("arranger repair counter = %d, want %d", got, beforeRepair+1)
+	}
+
+	beforeRejection := counterValue(&arrangerRejections, "schema_invalid")
+	RecordArrangerRejection("schema_invalid")
+	if got := counterValue(&arrangerRejections, "schema_invalid"); got != beforeRejection+1 {
+		t.Fatalf("arranger rejection counter = %d, want %d", got, beforeRejection+1)
+	}
+
+	beforeRefusal := refusalRetries.Load()
+	RecordRefusalRetry()
+	if got := refusalRetries.Load(); got != beforeRefusal+1 {
+		t.Fatalf("refusal retry counter = %d, want %d", got, beforeRefusal+1)
+	}
+
+	body := string(renderMetricsWithStats(WorkerPoolStats{}))
+	for _, want := range []string{
+		`gemini_doom_loop_interventions_total{signal="repeat"} `,
+		`gemini_arranger_repairs_total{kind="control_chars"} `,
+		`gemini_arranger_rejections_total{reason="schema_invalid"} `,
+		"gemini_refusal_retries_total ",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output missing %q", want)
+		}
+	}
+}
+
+func TestAgenticMetricLabelNormalization(t *testing.T) {
+	before := counterValue(&doomLoopInterventions, "passive_read")
+	RecordDoomLoopIntervention("  Passive_Read  ")
+	if got := counterValue(&doomLoopInterventions, "passive_read"); got != before+1 {
+		t.Fatalf("normalized doom-loop counter = %d, want %d", got, before+1)
+	}
+}
+
+func TestAgenticMetricsConcurrentRecording(t *testing.T) {
+	const workers = 16
+	const iterations = 100
+
+	beforeCycles := counterValue(&doomLoopInterventions, "cycle")
+	beforeRepairs := counterValue(&arrangerRepairs, "disclaimer")
+	beforeRejections := counterValue(&arrangerRejections, "undeclared_tool")
+	beforeRefusals := refusalRetries.Load()
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				RecordDoomLoopIntervention("cycle")
+				RecordArrangerRepair("disclaimer")
+				RecordArrangerRejection("undeclared_tool")
+				RecordRefusalRetry()
+				_ = renderMetricsWithStats(WorkerPoolStats{})
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got, want := counterValue(&doomLoopInterventions, "cycle"), beforeCycles+workers*iterations; got != want {
+		t.Fatalf("concurrent doom-loop counter = %d, want %d", got, want)
+	}
+	if got, want := counterValue(&arrangerRepairs, "disclaimer"), beforeRepairs+workers*iterations; got != want {
+		t.Fatalf("concurrent repair counter = %d, want %d", got, want)
+	}
+	if got, want := counterValue(&arrangerRejections, "undeclared_tool"), beforeRejections+workers*iterations; got != want {
+		t.Fatalf("concurrent rejection counter = %d, want %d", got, want)
+	}
+	if got, want := refusalRetries.Load(), beforeRefusals+workers*iterations; got != want {
+		t.Fatalf("concurrent refusal counter = %d, want %d", got, want)
 	}
 }
 

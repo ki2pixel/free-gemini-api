@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.7] - 2026-11-23
+
+### Added
+- **Stateful Doom-Loop Gateway (`api/doom_loop.go`)**:
+  - Added `DoomLoopTracker`, a mutex-protected per-session tracker keyed by canonical `(tool, sorted_args)` fingerprints.
+  - Signal A: identical consecutive calls now inject an anti-loop directive at 3 repetitions and trip a hard circuit breaker at 5. Rotating A/B/A/B and A/B/C/A/B/C cycles are detected independently, warned at 2 full repetitions and stopped at 3.
+  - Signal B: more than 4 consecutive read-only calls (`read`, `glob`, `grep`, `list`) without a mutation inject a maximum-recency `role: user` reminder listing the files already inspected.
+  - `Reset()` clears the tracker when a new user turn or a fresh task starts, so a circuit break never locks a session permanently.
+- **Block Observation Masking (`api/observation_masker.go`)**:
+  - Added `MaskOldToolObservations`, which compacts tool results older than the last 4 when the replayed prompt exceeds 60% of `maxPromptBytes` (or 15 user turns).
+  - Compacted observations keep their first 3 lines (capped at 2 KiB) and append `... [compacted: N bytes omitted; re-read if needed]`, preserving role, `tool_call_id` and UTF-8 validity without mutating the caller's messages.
+- **Agentic Prometheus Metrics (`api/metrics.go`)**:
+  - Added `gemini_doom_loop_interventions_total{signal="repeat|cycle|passive_read"}`, `gemini_arranger_repairs_total{kind="control_chars|brace_envelope|disclaimer"}`, `gemini_arranger_rejections_total{reason="mid_value_truncation|schema_invalid|undeclared_tool"}` and `gemini_refusal_retries_total`.
+  - Wired schema rejections, truncated mutations, arranger repairs and refusal retries into the new counters.
+- **Session Integration (`api/session_transcripts.go`, `api/chat_handler.go`)**:
+  - Each `sessionTurnEntry` now owns a `*DoomLoopTracker`; `getOrCreateSessionTracker` and `recordSessionToolCalls` expose thread-safe access from the chat pipeline, and the tracker survives every `commitSessionTurn`.
+  - The streaming and non-streaming paths check the tracker before calling upstream, inject warnings at maximum recency, and return an explicit HTTP 429 `doom_loop_error` when the circuit breaker trips.
+  - Emitted tool calls (after schema validation and Write-Serial throttling) are recorded for the next turn.
+- **Regression Tests**:
+  - `api/doom_loop_test.go`: identical repeats, A/B and A/B/C cycles, passive reads, mutation resets, canonical fingerprints, reset, new-user-turn detection and concurrent access.
+  - `api/observation_masker_test.go`: size and turn triggers, recent-result preservation, UTF-8 safety, role preservation, overhead accounting and non-mutation of the input.
+  - `api/session_tracker_test.go`: tracker persistence across commits and tool-call recording.
+  - `api/metrics_test.go` and `gemini/arranger_test.go`: agentic counter exposition/increments and arranger repair reporting.
+
+### Changed
+- **Arranger (`gemini/arranger.go`)**:
+  - Exported `IsMutatingTool` for API-layer bookkeeping.
+  - `ArrangedOutput` now reports the repair kinds applied (`disclaimer`, `control_chars`, `brace_envelope`) so the API can expose them as metrics.
+
+---
+
 ## [3.4.6] - 2026-11-22
 
 ### Added

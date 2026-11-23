@@ -34,6 +34,7 @@ type sessionTurnEntry struct {
 	lastChoiceID string // upstream choice pointer
 	lastWorkerID string // pool worker (account) that holds the client-side state
 	convValid    bool   // false after a failed/blocked turn: conversation must be reset
+	tracker      *DoomLoopTracker
 }
 
 var (
@@ -106,19 +107,70 @@ func contentScopeKey(s string) string {
 func commitSessionTurn(sessionKey, flat, convID, respID, choiceID, workerID string) {
 	sessionTurnMu.Lock()
 	defer sessionTurnMu.Unlock()
-	if len(sessionTurnState) >= maxTrackedSessions {
-		for k := range sessionTurnState {
-			delete(sessionTurnState, k)
-			break
+
+	entry := sessionTurnState[sessionKey]
+	if entry == nil {
+		if len(sessionTurnState) >= maxTrackedSessions {
+			evictOneSessionLocked()
 		}
+		entry = &sessionTurnEntry{}
+		sessionTurnState[sessionKey] = entry
 	}
-	sessionTurnState[sessionKey] = &sessionTurnEntry{
-		lastFlat:     flat,
-		lastConvID:   convID,
-		lastRespID:   respID,
-		lastChoiceID: choiceID,
-		lastWorkerID: workerID,
-		convValid:    true,
+	// Update the existing entry in place so the session's doom-loop tracker
+	// survives every successful turn.
+	entry.lastFlat = flat
+	entry.lastConvID = convID
+	entry.lastRespID = respID
+	entry.lastChoiceID = choiceID
+	entry.lastWorkerID = workerID
+	entry.convValid = true
+	if entry.tracker == nil {
+		entry.tracker = NewDoomLoopTracker()
+	}
+}
+
+func evictOneSessionLocked() {
+	for key := range sessionTurnState {
+		delete(sessionTurnState, key)
+		break
+	}
+}
+
+// getOrCreateSessionTracker returns the thread-safe doom-loop tracker bound to
+// a session. The tracker lives inside the bounded sessionTurnEntry map, so it
+// is evicted together with the rest of the session's continuation state.
+func getOrCreateSessionTracker(sessionKey string) *DoomLoopTracker {
+	sessionTurnMu.Lock()
+	defer sessionTurnMu.Unlock()
+
+	if entry := sessionTurnState[sessionKey]; entry != nil {
+		if entry.tracker == nil {
+			entry.tracker = NewDoomLoopTracker()
+		}
+		return entry.tracker
+	}
+	if len(sessionTurnState) >= maxTrackedSessions {
+		evictOneSessionLocked()
+	}
+	entry := &sessionTurnEntry{tracker: NewDoomLoopTracker()}
+	sessionTurnState[sessionKey] = entry
+	return entry.tracker
+}
+
+// recordSessionToolCalls records the tool calls actually emitted to the host
+// (after schema validation and Write-Serial throttling) so the next turn can
+// detect identical repeats, rotating cycles and passive-read streaks.
+func recordSessionToolCalls(sessionKey string, calls []gemini.ToolCall) {
+	if len(calls) == 0 {
+		return
+	}
+	tracker := getOrCreateSessionTracker(sessionKey)
+	for _, call := range calls {
+		tracker.RecordToolCall(
+			call.Function.Name,
+			call.Function.Arguments,
+			gemini.IsMutatingTool(call.Function.Name),
+		)
 	}
 }
 

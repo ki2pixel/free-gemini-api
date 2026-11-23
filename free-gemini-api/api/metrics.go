@@ -23,9 +23,13 @@ const (
 )
 
 var (
-	httpRequestCounters sync.Map // status string -> *atomic.Uint64
-	tokenCounters       sync.Map // tier string -> *atomic.Uint64
-	rateLimitDrops      atomic.Uint64
+	httpRequestCounters   sync.Map // status string -> *atomic.Uint64
+	tokenCounters         sync.Map // tier string -> *atomic.Uint64
+	doomLoopInterventions sync.Map // signal string -> *atomic.Uint64
+	arrangerRepairs       sync.Map // kind string -> *atomic.Uint64
+	arrangerRejections    sync.Map // reason string -> *atomic.Uint64
+	rateLimitDrops        atomic.Uint64
+	refusalRetries        atomic.Uint64
 )
 
 // RecordHTTPRequest increments the HTTP status counter exposed on /metrics.
@@ -47,6 +51,30 @@ func RecordTokenUsage(tier string, tokens int) {
 // RecordRateLimitDrop increments the limiter drop counter.
 func RecordRateLimitDrop() {
 	rateLimitDrops.Add(1)
+}
+
+// RecordDoomLoopIntervention increments the anti-loop counter for a signal
+// ("repeat", "cycle" or "passive_read").
+func RecordDoomLoopIntervention(signal string) {
+	incrementCounter(&doomLoopInterventions, normalizeMetricLabel(signal), 1)
+}
+
+// RecordArrangerRepair increments the arranger repair counter for a kind
+// ("control_chars", "brace_envelope" or "disclaimer").
+func RecordArrangerRepair(kind string) {
+	incrementCounter(&arrangerRepairs, normalizeMetricLabel(kind), 1)
+}
+
+// RecordArrangerRejection increments the arranger rejection counter for a
+// reason ("mid_value_truncation", "schema_invalid" or "undeclared_tool").
+func RecordArrangerRejection(reason string) {
+	incrementCounter(&arrangerRejections, normalizeMetricLabel(reason), 1)
+}
+
+// RecordRefusalRetry counts a transparent conversation reset triggered by a
+// false tool refusal.
+func RecordRefusalRetry() {
+	refusalRetries.Add(1)
 }
 
 func incrementCounter(store *sync.Map, key string, delta uint64) {
@@ -141,10 +169,68 @@ func renderMetricsWithStats(stats WorkerPoolStats) []byte {
 	b.WriteString("# TYPE gemini_rate_limit_drops_total counter\n")
 	fmt.Fprintf(&b, "gemini_rate_limit_drops_total %d\n", rateLimitDrops.Load())
 
+	writeAgenticMetrics(&b)
 	writeWorkerMetrics(&b, stats)
 	writeCookieHealthMetric(&b)
 
 	return []byte(b.String())
+}
+
+func writeAgenticMetrics(b *strings.Builder) {
+	writeLabeledCounter(
+		b,
+		"gemini_doom_loop_interventions_total",
+		"Doom-loop warnings and circuit breaks by signal.",
+		"signal",
+		&doomLoopInterventions,
+		[]string{"repeat", "cycle", "passive_read"},
+	)
+	writeLabeledCounter(
+		b,
+		"gemini_arranger_repairs_total",
+		"Tool-call repairs applied by the output arranger.",
+		"kind",
+		&arrangerRepairs,
+		[]string{"control_chars", "brace_envelope", "disclaimer"},
+	)
+	writeLabeledCounter(
+		b,
+		"gemini_arranger_rejections_total",
+		"Tool calls rejected by the arranger or the schema validator.",
+		"reason",
+		&arrangerRejections,
+		[]string{"mid_value_truncation", "schema_invalid", "undeclared_tool"},
+	)
+
+	b.WriteString("# HELP gemini_refusal_retries_total Transparent conversation resets triggered by a false tool refusal.\n")
+	b.WriteString("# TYPE gemini_refusal_retries_total counter\n")
+	fmt.Fprintf(b, "gemini_refusal_retries_total %d\n", refusalRetries.Load())
+}
+
+// writeLabeledCounter renders a counter family, keeping the known label values
+// visible at zero and appending any additional observed labels in sorted order.
+func writeLabeledCounter(b *strings.Builder, name, help, label string, store *sync.Map, known []string) {
+	b.WriteString("# HELP " + name + " " + help + "\n")
+	b.WriteString("# TYPE " + name + " counter\n")
+
+	seen := make(map[string]struct{}, len(known))
+	for _, value := range known {
+		seen[value] = struct{}{}
+		fmt.Fprintf(b, "%s{%s=\"%s\"} %d\n", name, label, escapeLabelValue(value), counterValue(store, value))
+	}
+
+	var extra []string
+	store.Range(func(key, _ any) bool {
+		value := key.(string)
+		if _, ok := seen[value]; !ok {
+			extra = append(extra, value)
+		}
+		return true
+	})
+	sort.Strings(extra)
+	for _, value := range extra {
+		fmt.Fprintf(b, "%s{%s=\"%s\"} %d\n", name, label, escapeLabelValue(value), counterValue(store, value))
+	}
 }
 
 func writeHTTPRequestMetrics(b *strings.Builder) {

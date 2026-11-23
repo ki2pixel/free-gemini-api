@@ -516,6 +516,45 @@ func TestArrangeGeminiOutput_SafeEnvelopeAutoClose(t *testing.T) {
 	}
 }
 
+func TestArrangeGeminiOutput_ReportsRepairs(t *testing.T) {
+	hasRepair := func(res *ArrangedOutput, want string) bool {
+		for _, kind := range res.Repairs {
+			if kind == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "brace envelope",
+			raw:  `<tool_call>{"name":"write","arguments":{"path":"test.txt","content":"complete content"`,
+			want: "brace_envelope",
+		},
+		{
+			name: "control chars",
+			raw:  "<tool_call>\n{\"name\": \"write\", \"arguments\": {\"path\": \"test.txt\", \"content\": \"line1\nline2\"}}\n</tool_call>",
+			want: "control_chars",
+		},
+		{
+			name: "disclaimer",
+			raw:  `<tool_call>{"name":"list","arguments":{"path":"."}}</tool_call> I'm just a language model and can't help with that.`,
+			want: "disclaimer",
+		},
+	}
+	for _, tc := range cases {
+		res := ArrangeGeminiOutput(tc.raw)
+		if !hasRepair(res, tc.want) {
+			t.Errorf("%s: repairs = %v, want %q", tc.name, res.Repairs, tc.want)
+		}
+	}
+}
+
 func TestFindUpstreamDisclaimerOffset_UTF8FrenchApostrophes(t *testing.T) {
 	// Typographic apostrophes are 3 bytes each. The previous implementation
 	// normalized them to ASCII (1 byte) before computing the offset, then sliced

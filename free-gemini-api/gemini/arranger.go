@@ -28,6 +28,10 @@ type ArrangedOutput struct {
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	IsToolCall       bool       `json:"is_tool_call"`
 	FinishReason     string     `json:"finish_reason"` // "tool_calls" or "stop"
+	// Repairs lists the repair kinds applied while arranging the raw output
+	// ("disclaimer", "control_chars", "brace_envelope"). The API layer turns
+	// them into Prometheus counters.
+	Repairs []string `json:"repairs,omitempty"`
 }
 
 const (
@@ -420,6 +424,13 @@ func isMutatingTool(name string) bool {
 	}
 }
 
+// IsMutatingTool reports whether name designates a tool that can change
+// filesystem or process state. It is the exported counterpart of
+// isMutatingTool for API-layer bookkeeping (doom-loop tracking).
+func IsMutatingTool(name string) bool {
+	return isMutatingTool(name)
+}
+
 // isMutatingToolPayload infers whether a raw (possibly truncated) tool-call
 // payload targets a mutating tool. The tool name is normally emitted first,
 // but a content-first payload is also classified as a mutation.
@@ -495,6 +506,13 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 	res := &ArrangedOutput{
 		FinishReason: "stop",
 	}
+	if start, _ := findUpstreamDisclaimerOffset(raw); start != -1 {
+		res.Repairs = append(res.Repairs, "disclaimer")
+	}
+	if (strings.Contains(raw, "<tool_call>") || strings.Contains(raw, `"arguments"`)) &&
+		normalizeJSONStringLiterals(raw) != raw {
+		res.Repairs = append(res.Repairs, "control_chars")
+	}
 
 	text := raw
 
@@ -530,6 +548,7 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 			res.IsToolCall = true
 			res.FinishReason = "tool_calls"
 			res.CleanText = sanitizeGeminiContent(cleanText)
+			noteBraceEnvelopeRepair(res, raw)
 			return res
 		}
 	}
@@ -570,6 +589,7 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 			res.IsToolCall = true
 			res.FinishReason = "tool_calls"
 			res.CleanText = ""
+			noteBraceEnvelopeRepair(res, raw)
 			return res
 		}
 	}
@@ -577,6 +597,19 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 	// 4. Clean up any raw internal artifacts or trailing disclaimers
 	res.CleanText = sanitizeGeminiContent(text)
 	return res
+}
+
+// noteBraceEnvelopeRepair records that a tool call was recovered from an
+// unclosed <tool_call> envelope (for example when the upstream stream stopped
+// before the closing tag). It is purely observational and does not alter the
+// arranged result.
+func noteBraceEnvelopeRepair(res *ArrangedOutput, raw string) {
+	if res == nil || !res.IsToolCall {
+		return
+	}
+	if strings.Contains(raw, "<tool_call>") && !strings.Contains(raw, "</tool_call>") {
+		res.Repairs = append(res.Repairs, "brace_envelope")
+	}
 }
 
 // extractTaggedToolCalls extracts tool calls from <tool_call> blocks even if the model
