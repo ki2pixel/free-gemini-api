@@ -92,7 +92,7 @@ func TestObservationMaskerCompactsOldKeepsRecent(t *testing.T) {
 }
 
 func TestObservationMaskerTurnThresholdTriggers(t *testing.T) {
-	// Total size stays far below the byte threshold; the 16 user turns alone
+	// Total size stays far below the byte threshold; the 32 messages alone
 	// must trigger block masking.
 	messages := make([]OpenAIChatMessage, 0, 32)
 	for turn := 0; turn < 16; turn++ {
@@ -115,6 +115,178 @@ func TestObservationMaskerTurnThresholdTriggers(t *testing.T) {
 	}
 	if compacted != 12 {
 		t.Fatalf("compacted tool results = %d, want 12 (16 - 4 recent)", compacted)
+	}
+}
+
+func TestObservationMaskerLongHorizonToolTurnsTriggers(t *testing.T) {
+	// Reproduces the Hydrogen v3.4.9 run: one initial user message followed by
+	// 20 assistant/tool turns (41 messages total). The transcript is smaller
+	// than the byte threshold, so only the tool-observation signal can fire.
+	const turns = 20
+	body := strings.Repeat("x", 300)
+	messages := []OpenAIChatMessage{
+		{Role: "user", Content: contentRawString("align the documentation")},
+	}
+	for turn := 0; turn < turns; turn++ {
+		messages = append(messages, OpenAIChatMessage{
+			Role: "assistant",
+			ToolCalls: []OpenAIToolCall{{
+				ID:   fmt.Sprintf("call_%d", turn),
+				Type: "function",
+				Function: OpenAIToolCallFunction{
+					Name:      "read",
+					Arguments: fmt.Sprintf(`{"path":"file-%d.md"}`, turn),
+				},
+			}},
+		})
+		messages = append(messages, maskerToolMessage(
+			fmt.Sprintf("read-%d", turn),
+			fmt.Sprintf("header %d\nsecond\nthird\n%s", turn, body),
+		))
+	}
+	if len(messages) != 2*turns+1 {
+		t.Fatalf("fixture message count = %d, want %d", len(messages), 2*turns+1)
+	}
+
+	masked := MaskOldToolObservations(messages, 4, 1<<20)
+	if len(masked) != len(messages) {
+		t.Fatalf("message count = %d, want %d", len(masked), len(messages))
+	}
+
+	compacted := 0
+	for index, message := range masked {
+		content := FlattenContent(message.Content)
+		if message.Role != "tool" {
+			continue
+		}
+		if strings.Contains(content, "compacted:") {
+			compacted++
+			if len(content) > 300 {
+				t.Errorf("compacted observation at index %d is still %d bytes", index, len(content))
+			}
+			if !strings.HasPrefix(content, fmt.Sprintf("header %d\nsecond\nthird", (index-2)/2)) {
+				t.Errorf("compacted observation at index %d lost its header: %q", index, content)
+			}
+		}
+	}
+	if compacted != turns-4 {
+		t.Fatalf("compacted tool results = %d, want %d (20 - 4 recent)", compacted, turns-4)
+	}
+
+	// The four most recent tool results stay byte-identical.
+	for index := len(messages) - 8; index < len(messages); index++ {
+		if messages[index].Role != "tool" {
+			continue
+		}
+		if got, want := FlattenContent(masked[index].Content), FlattenContent(messages[index].Content); got != want {
+			t.Fatalf("recent observation at index %d was modified: %q", index, got)
+		}
+	}
+}
+
+func TestObservationMaskerSixObservationsStayUntouched(t *testing.T) {
+	// Exactly six tool observations must not trigger on their own; the seventh
+	// crosses the threshold.
+	messages := []OpenAIChatMessage{
+		{Role: "user", Content: contentRawString("task")},
+	}
+	for i := 0; i < 6; i++ {
+		messages = append(messages, maskerToolMessage(
+			fmt.Sprintf("read-%d", i),
+			fmt.Sprintf("header %d\nsecond\nthird\n%s", i, strings.Repeat("x", 300)),
+		))
+	}
+
+	masked := MaskOldToolObservations(messages, 4, 1<<20)
+	for i, message := range masked {
+		if got, want := FlattenContent(message.Content), FlattenContent(messages[i].Content); got != want {
+			t.Fatalf("six observations must stay untouched, message %d changed", i)
+		}
+	}
+
+	messages = append(messages, maskerToolMessage("read-6", "header 6\nsecond\nthird\n"+strings.Repeat("x", 300)))
+	masked = MaskOldToolObservations(messages, 4, 1<<20)
+	compacted := 0
+	for _, message := range masked {
+		if message.Role == "tool" && strings.Contains(FlattenContent(message.Content), "compacted:") {
+			compacted++
+		}
+	}
+	if compacted != 3 {
+		t.Fatalf("compacted tool results = %d, want 3 (7 - 4 recent)", compacted)
+	}
+}
+
+func TestObservationMaskerMessageThresholdTriggers(t *testing.T) {
+	// Six tool observations and twelve messages are below the tool-count
+	// signal, but the thirteenth message alone must trigger masking.
+	messages := []OpenAIChatMessage{
+		{Role: "user", Content: contentRawString("task")},
+	}
+	for i := 0; i < 6; i++ {
+		messages = append(messages, maskerToolMessage(
+			fmt.Sprintf("read-%d", i),
+			fmt.Sprintf("header %d\nsecond\nthird\n%s", i, strings.Repeat("x", 300)),
+		))
+	}
+	for i := 0; i < 6; i++ {
+		messages = append(messages, OpenAIChatMessage{
+			Role:    "assistant",
+			Content: contentRawString(fmt.Sprintf("assistant step %d", i)),
+		})
+	}
+	if len(messages) != observationMaskMessageThreshold+1 {
+		t.Fatalf("fixture message count = %d, want %d", len(messages), observationMaskMessageThreshold+1)
+	}
+
+	masked := MaskOldToolObservations(messages, 4, 1<<20)
+	compacted := 0
+	for _, message := range masked {
+		if message.Role == "tool" && strings.Contains(FlattenContent(message.Content), "compacted:") {
+			compacted++
+		}
+	}
+	if compacted != 2 {
+		t.Fatalf("compacted tool results = %d, want 2 (6 - 4 recent)", compacted)
+	}
+}
+
+func TestObservationMaskerCountsAssistantToolCalls(t *testing.T) {
+	// Five tool results plus four assistant tool-call messages are nine agentic
+	// observations: the trigger must fire even though only five result bodies
+	// exist.
+	messages := []OpenAIChatMessage{
+		{Role: "user", Content: contentRawString("task")},
+	}
+	for i := 0; i < 5; i++ {
+		messages = append(messages, maskerToolMessage(
+			fmt.Sprintf("read-%d", i),
+			fmt.Sprintf("header %d\nsecond\nthird\n%s", i, strings.Repeat("x", 300)),
+		))
+	}
+	for i := 0; i < 4; i++ {
+		messages = append(messages, OpenAIChatMessage{
+			Role: "assistant",
+			ToolCalls: []OpenAIToolCall{{
+				ID:       fmt.Sprintf("call_%d", i),
+				Type:     "function",
+				Function: OpenAIToolCallFunction{Name: "read", Arguments: `{"path":"x"}`},
+			}},
+		})
+	}
+	if got := countToolObservations(messages); got != 9 {
+		t.Fatalf("countToolObservations = %d, want 9", got)
+	}
+
+	masked := MaskOldToolObservations(messages, 4, 1<<20)
+	compacted := 0
+	for _, message := range masked {
+		if message.Role == "tool" && strings.Contains(FlattenContent(message.Content), "compacted:") {
+			compacted++
+		}
+	}
+	if compacted != 1 {
+		t.Fatalf("compacted tool results = %d, want 1 (5 - 4 recent)", compacted)
 	}
 }
 

@@ -19,6 +19,16 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
+// Upstream HTTP exchange budgets. The former 900-second timeout let a silent
+// upstream stall freeze an agentic request for 15 minutes. The request is now
+// bounded to two minutes, and stream_guard.go aborts as soon as the body stops
+// producing bytes for 45 seconds so the proxy can reset the conversation and
+// retry on a fresh session.
+const (
+	upstreamRequestTimeout     = 120 * time.Second
+	upstreamStreamStallTimeout = 45 * time.Second
+)
+
 type GeminiClient struct {
 	client         tls_client.HttpClient
 	quicClient     *stdhttp.Client
@@ -129,7 +139,7 @@ func secureReqID() int {
 func NewClient(cookiesFile string) (*GeminiClient, error) {
 	jar := tls_client.NewCookieJar()
 	options := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(900),
+		tls_client.WithTimeoutSeconds(int(upstreamRequestTimeout / time.Second)),
 		tls_client.WithClientProfile(profiles.Chrome_152),
 		tls_client.WithCookieJar(jar),
 	}
@@ -152,7 +162,7 @@ func NewClient(cookiesFile string) (*GeminiClient, error) {
 		},
 	}
 	quicClient := &stdhttp.Client{
-		Timeout:   10 * time.Second,
+		Timeout:   upstreamRequestTimeout,
 		Transport: quicTransport,
 	}
 

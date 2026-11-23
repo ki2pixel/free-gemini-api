@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -65,7 +66,10 @@ var (
 )
 
 func (c *GeminiClient) doStreamRequestQUIC(fullURL string, data url.Values, modelCfg *ModelConfig, onChunk func(text string)) (string, error) {
-	req, err := stdhttp.NewRequest("POST", fullURL, strings.NewReader(data.Encode()))
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamRequestTimeout)
+	defer cancel()
+
+	req, err := stdhttp.NewRequestWithContext(ctx, "POST", fullURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -92,17 +96,22 @@ func (c *GeminiClient) doStreamRequestQUIC(fullURL string, data url.Values, mode
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
+		_ = resp.Body.Close()
 		return "", fmt.Errorf("QUIC status %d", resp.StatusCode)
 	}
 
-	return c.readAndProcessStream(resp.Body, onChunk)
+	guard := newStallGuardReader(resp.Body, cancel, upstreamStreamStallTimeout)
+	defer guard.Close()
+	return c.readAndProcessStream(guard, onChunk)
 }
 
 func (c *GeminiClient) doStreamRequestHTTP2(fullURL string, data url.Values, modelCfg *ModelConfig, onChunk func(text string)) (string, error) {
-	req, err := http.NewRequest("POST", fullURL, strings.NewReader(data.Encode()))
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamRequestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -129,17 +138,22 @@ func (c *GeminiClient) doStreamRequestHTTP2(fullURL string, data url.Values, mod
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
+		_ = resp.Body.Close()
 		return "", fmt.Errorf("HTTP2 status %d", resp.StatusCode)
 	}
 
-	return c.readAndProcessStream(resp.Body, onChunk)
+	guard := newStallGuardReader(resp.Body, cancel, upstreamStreamStallTimeout)
+	defer guard.Close()
+	return c.readAndProcessStream(guard, onChunk)
 }
 
 func (c *GeminiClient) sendRequestQUIC(fullURL string, data url.Values, modelCfg *ModelConfig) (string, error) {
-	req, err := stdhttp.NewRequest("POST", fullURL, strings.NewReader(data.Encode()))
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamRequestTimeout)
+	defer cancel()
+
+	req, err := stdhttp.NewRequestWithContext(ctx, "POST", fullURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -166,13 +180,16 @@ func (c *GeminiClient) sendRequestQUIC(fullURL string, data url.Values, modelCfg
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
+		_ = resp.Body.Close()
 		return "", fmt.Errorf("QUIC HTTP %d", resp.StatusCode)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	guard := newStallGuardReader(resp.Body, cancel, upstreamStreamStallTimeout)
+	defer guard.Close()
+
+	bodyBytes, err := io.ReadAll(guard)
 	if err != nil {
 		return "", err
 	}
@@ -180,7 +197,10 @@ func (c *GeminiClient) sendRequestQUIC(fullURL string, data url.Values, modelCfg
 }
 
 func (c *GeminiClient) sendRequestHTTP2(fullURL string, data url.Values, modelCfg *ModelConfig) (string, error) {
-	req, err := http.NewRequest("POST", fullURL, strings.NewReader(data.Encode()))
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamRequestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -207,15 +227,18 @@ func (c *GeminiClient) sendRequestHTTP2(fullURL string, data url.Values, modelCf
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
 		log.Printf("❌ [sendRequestHTTP2] Failed with status %d: %s (Headers: %+v)", resp.StatusCode, string(bodyBytes[:min(len(bodyBytes), 300)]), resp.Header)
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	guard := newStallGuardReader(resp.Body, cancel, upstreamStreamStallTimeout)
+	defer guard.Close()
+
+	bodyBytes, err := io.ReadAll(guard)
 	if err != nil {
 		return "", err
 	}

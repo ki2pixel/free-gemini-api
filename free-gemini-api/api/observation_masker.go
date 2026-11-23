@@ -12,28 +12,39 @@ const (
 	defaultObservationMaskKeepRecent = 4
 
 	// defaultObservationMaskThreshold is 60% of the prompt budget. Masking is
-	// triggered once a replay would consume more than that, or once the
-	// conversation exceeds observationMaskTurnThreshold user turns.
+	// triggered once a replay would consume more than that.
 	defaultObservationMaskThreshold = maxPromptBytes * 6 / 10
 
 	// Only tool observations larger than this are worth compacting.
 	observationMaskMinBodyBytes = 200
 
-	// Keep the first three lines of each old observation, capped so a single
-	// enormous line cannot defeat the mask.
+	// Keep the first three lines of each old observation, capped at 200 bytes
+	// so a single enormous line cannot defeat the mask and a long-horizon
+	// replay stays small enough for the upstream backend.
 	observationMaskHeaderLines    = 3
-	observationMaskMaxHeaderBytes = 2000
+	observationMaskMaxHeaderBytes = 200
 
-	observationMaskTurnThreshold = 15
+	// observationMaskToolObservationThreshold is the number of agentic tool
+	// messages (a tool result, or an assistant message carrying tool calls)
+	// beyond which masking triggers even when the transcript is still small.
+	// OpenCode-style harnesses send one initial user message and then append
+	// assistant/tool pairs indefinitely, so counting user turns never fires.
+	observationMaskToolObservationThreshold = 6
+
+	// observationMaskMessageThreshold triggers masking once the flattened
+	// transcript would replay more than this many messages, regardless of how
+	// many tool observations it contains.
+	observationMaskMessageThreshold = 12
 )
 
 // MaskOldToolObservations compacts old, large tool results when the message
-// history exceeds sizeThresholdBytes (or 15 user turns). The most recent
-// maxRecentKept tool results are preserved byte-for-byte. The API flattens
-// role:"tool" messages into "[Tool Result for ...]" blocks, so masking the
-// source messages is equivalent to masking those blocks. The input slice and
-// its messages are never modified; a shallow copy with rewritten tool contents
-// is returned.
+// history exceeds sizeThresholdBytes, contains more than six tool observations
+// (tool results or assistant tool calls), or exceeds twelve messages. The most
+// recent maxRecentKept tool results are preserved byte-for-byte. The API
+// flattens role:"tool" messages into "[Tool Result for ...]" blocks, so masking
+// the source messages is equivalent to masking those blocks. The input slice
+// and its messages are never modified; a shallow copy with rewritten tool
+// contents is returned.
 func MaskOldToolObservations(messages []OpenAIChatMessage, maxRecentKept int, sizeThresholdBytes int) []OpenAIChatMessage {
 	return maskOldToolObservations(messages, maxRecentKept, sizeThresholdBytes, 0)
 }
@@ -58,7 +69,13 @@ func maskOldToolObservations(messages []OpenAIChatMessage, maxRecentKept, sizeTh
 	}
 
 	totalBytes := overheadBytes + estimateMessagesBytes(messages)
-	if totalBytes <= sizeThresholdBytes && countConversationTurns(messages) <= observationMaskTurnThreshold {
+	// Trigger on any of three independent signals. The tool-observation and
+	// message-count signals are what make masking effective for agentic
+	// harnesses, which keep a single user message and grow through
+	// assistant/tool pairs until the upstream backend refuses to replay them.
+	if totalBytes <= sizeThresholdBytes &&
+		countToolObservations(messages) <= observationMaskToolObservationThreshold &&
+		len(messages) <= observationMaskMessageThreshold {
 		return messages
 	}
 
@@ -102,17 +119,20 @@ func estimateMessagesBytes(messages []OpenAIChatMessage) int {
 	return total
 }
 
-func countConversationTurns(messages []OpenAIChatMessage) int {
-	turns := 0
+// countToolObservations counts agentic tool activity: tool results and
+// assistant messages that carry tool calls. Both are observations of work
+// already performed and drive the long-horizon masking trigger.
+func countToolObservations(messages []OpenAIChatMessage) int {
+	count := 0
 	for _, message := range messages {
-		if strings.EqualFold(message.Role, "user") {
-			turns++
+		if strings.EqualFold(message.Role, "tool") || len(message.ToolCalls) > 0 {
+			count++
 		}
 	}
-	return turns
+	return count
 }
 
-// compactObservation keeps the first three lines (bounded to 2 KiB) and
+// compactObservation keeps the first three lines (bounded to 200 bytes) and
 // replaces the rest with an explicit, re-readable marker. The result is always
 // valid UTF-8.
 func compactObservation(content string) string {

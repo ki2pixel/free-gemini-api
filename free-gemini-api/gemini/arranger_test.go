@@ -24,7 +24,7 @@ func TestFormatToolsInstruction_PositiveContinuityAndCadence(t *testing.T) {
 			t.Errorf("tool instructions must not contain %q", forbidden)
 		}
 	}
-	for _, required := range []string{"Read-Parallel", "Write-Serial", "Metadata-First", "available on every turn", "Exact-anchor rule", "Poka-Yoke", "Counter-S7", "exact verbatim substring"} {
+	for _, required := range []string{"Read-Parallel", "Write-Serial", "Metadata-First", "available on every turn", "Exact-anchor rule", "Poka-Yoke", "Counter-S7", "exact verbatim substring", "anti-pseudo-report", "Do not emit a final completion report or summary if any planned modification or verification step is still pending", "Execute all tool calls until all files are modified"} {
 		if !strings.Contains(out, required) {
 			t.Errorf("tool instructions must contain %q", required)
 		}

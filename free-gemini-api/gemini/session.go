@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -324,6 +325,16 @@ func (c *GeminiClient) executeWithRetry(actionName string, runFunc func() error)
 	err := runFunc()
 	if err == nil {
 		return nil
+	}
+
+	// An expired conversation (1097) or a silent stream stall is not a cookie
+	// problem: refreshing the session would keep the same poisoned conversation
+	// pointer and waste another full timeout. Return immediately so the API
+	// layer resets the conversation and replays the masked transcript on a
+	// genuinely fresh upstream session.
+	if errors.Is(err, ErrConversationExpired) || errors.Is(err, ErrUpstreamStreamStalled) {
+		log.Printf("⚠️ [%s] Upstream requires a fresh conversation (%v); skipping cookie resync", actionName, err)
+		return err
 	}
 
 	log.Printf("⚠️ [%s] Request failed: %v. Triggering automatic cookie sync and session refresh...", actionName, err)

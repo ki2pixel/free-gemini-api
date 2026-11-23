@@ -109,6 +109,34 @@ func TestIsToolRefusalOutput(t *testing.T) {
 	}
 }
 
+func TestIsToolRefusalOutput_GlobalSafetyRefusal(t *testing.T) {
+	// Exact refusal returned by Gemini web for gemini-4-hydrogen-task v3.4.9.
+	refusal := "I must refuse to assist with or generate any content that touches on sexually explicit material, dangerous or illegal activities, self-harm, or violence, or provides instructions or advice regarding them."
+	if !isToolRefusalOutput(refusal) {
+		t.Fatal("expected the Google global safety refusal to be classified as a tool refusal")
+	}
+	if !isUnusableModelOutput(refusal, true) {
+		t.Fatal("expected the global safety refusal to be unusable when tools are active")
+	}
+	if isUnusableModelOutput(refusal, false) {
+		t.Fatal("a plain chat request without tools must not be retried for this refusal")
+	}
+
+	// Every individual fragment listed in the classifier must be sufficient.
+	for _, fragment := range []string{
+		"I must refuse to assist with",
+		"touches on sexually explicit material",
+		"dangerous or illegal activities",
+		"self-harm, or violence",
+		"provides instructions or advice regarding them",
+		"cannot generate content that touches on",
+	} {
+		if !isToolRefusalOutput("prefix " + fragment + " suffix") {
+			t.Errorf("classifier missed fragment %q", fragment)
+		}
+	}
+}
+
 func TestIsSchemaInvalidOutput(t *testing.T) {
 	tools := []map[string]any{{
 		"type": "function",

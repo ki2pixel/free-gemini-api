@@ -366,9 +366,12 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	}
 
 	// Block Observation Masking: once a replay would consume more than 60% of
-	// the prompt budget (or the chat exceeds 15 user turns), compact old tool
+	// the prompt budget, the transcript contains more than six tool
+	// observations, or the chat exceeds twelve messages, compact old tool
 	// observations while keeping the four most recent ones intact. This runs
-	// before flattening so stale logs are never replayed byte-for-byte.
+	// before flattening so stale logs are never replayed byte-for-byte, and it
+	// keeps the 1097 replay (one user message followed by a long assistant/tool
+	// chain) compact enough for the upstream backend.
 	nonSystemMessages = MaskOldToolObservationsWithOverhead(
 		nonSystemMessages,
 		defaultObservationMaskKeepRecent,
@@ -623,7 +626,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							case schemaRetryDetail != "":
 								override = formatSchemaRetryDirective(schemaRetryDetail)
 							default:
-								override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls.]\n\n"
+								override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls. Do not emit a final completion report or summary while a planned modification or verification step is still pending; execute all tool calls until all files are modified.]\n\n"
 							}
 						}
 						sendPrompt = override + msgFlat + antiLoopDirective + effectiveTurnCue
@@ -1051,7 +1054,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					case schemaRetryDetail != "":
 						override = formatSchemaRetryDirective(schemaRetryDetail)
 					default:
-						override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls.]\n\n"
+						override = "[SYSTEM DIRECTIVE: Execute the next step by emitting a <tool_call> XML block. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Complete the current task directly with tool calls. Do not emit a final completion report or summary while a planned modification or verification step is still pending; execute all tool calls until all files are modified.]\n\n"
 					}
 				}
 				sendPrompt = override + msgFlat + antiLoopDirective + effectiveTurnCue

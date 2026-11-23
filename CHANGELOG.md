@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.0] - 2026-11-23
+
+### Added
+- **Transport Stall Guard (`gemini/transport.go`, `gemini/stream_guard.go`)**:
+  - Every streaming and non-streaming upstream body is now wrapped by `stallGuardReader`. When no body byte arrives for **45 seconds**, the request context is cancelled and the body is closed, returning the explicit `ErrUpstreamStreamStalled` sentinel instead of freezing until the transport timeout.
+  - The timer is re-armed on every successful read, so slow but progressing generations are preserved.
+  - Added `isConversationExpiredBody` and `ErrConversationExpired` to detect Google's `Can't continue conversation ... (1097)` payload, reset the session conversation pointer, and return immediately.
+  - `executeWithRetry` skips the cookie resynchronization detour for both sentinels: these conditions require a fresh conversation, not fresh cookies.
+- **Long-Horizon Refusal Regression (`api/session_scope_test.go`)**:
+  - Added a dedicated test for the exact Google global safety refusal observed on `gemini-4-hydrogen-task` in v3.4.9.
+
+### Changed
+- **Observation Masking Trigger (`api/observation_masker.go`, `api/chat_handler.go`)**:
+  - Masking no longer depends on the number of `user` messages. It now triggers when the transcript contains **more than 6 tool observations** (`role == "tool"` or assistant messages with `tool_calls`), **more than 12 messages**, or more than 60% of the prompt budget.
+  - The four most recent tool results remain byte-identical. Older results are reduced to the first three lines, capped at **200 bytes**, with an explicit re-read marker.
+  - This keeps the full-transcript replay after a `1097` error compact enough for the upstream backend; a long agentic session with one initial user message is now masked correctly.
+- **Upstream Transport Budget (`gemini/client.go`)**:
+  - Replaced `tls_client.WithTimeoutSeconds(900)` with the shared **120-second** `upstreamRequestTimeout`.
+  - Aligned the QUIC client timeout with the same budget.
+- **Refusal Classifier (`api/session_transcripts.go`)**:
+  - Added the Google global safety-refusal shapes: `i must refuse to assist with`, `touches on sexually explicit material`, `dangerous or illegal activities`, `self-harm, or violence`, `provides instructions or advice regarding them`, and `cannot generate content that touches on`.
+- **Anti-Pseudo-Report Directive (`gemini/arranger.go`, `api/chat_handler.go`)**:
+  - `FormatToolsInstruction` now includes an explicit completion gate: *"Do not emit a final completion report or summary if any planned modification or verification step is still pending. Execute all tool calls until all files are modified."*
+  - The abstract retry directive used after a refusal repeats the same instruction, covering Neon's premature textual completion report.
+- **Live Smoke Suite (`scripts/live_middleware_smoke.sh`)**:
+  - Added a fifth deterministic control that runs `TestIsToolRefusalOutput_GlobalSafetyRefusal` (local Go, Docker fallback) and verifies the `dangerous or illegal activities` refusal is intercepted.
+  - The suite now reports **6/6** controls.
+
+### Regression Tests
+- `api/observation_masker_test.go`: 41-message single-user long-horizon replay, exactly-six-observation boundary, message-count trigger, assistant `tool_calls` counting, and header/UTF-8 preservation.
+- `gemini/stream_guard_test.go`: silent-stream cancellation, timer re-arming on progressing bytes, idempotent close, 1097 detection, and skip-cookie-resync behavior.
+- `gemini/arranger_test.go`: anti-pseudo-report directive presence.
+
+---
+
 ## [3.4.9] - 2026-11-23
 
 ### Added

@@ -3,7 +3,9 @@
 #
 # These tests exercise the real Gemini upstream, so they consume a small
 # amount of quota and depend on a healthy cookie/extension worker. They are
-# intentionally NOT part of scripts/audit_check.sh.
+# intentionally NOT part of scripts/audit_check.sh. The refusal-classifier
+# control is deterministic (it runs the Go unit test); the other controls
+# exercise the live upstream.
 #
 # Usage:
 #   API_TOKEN=... ./scripts/live_middleware_smoke.sh
@@ -47,7 +49,7 @@ post_json() {
     --data-binary "@$payload" "$BASE_URL/v1/chat/completions"
 }
 
-echo "=== [1/5] Runtime sync: agentic counters exposed ==="
+echo "=== [1/6] Runtime sync: agentic counters exposed ==="
 metrics="$(curl -s -m 10 "${auth[@]}" "$BASE_URL/metrics")"
 for counter in \
   'gemini_doom_loop_interventions_total' \
@@ -60,7 +62,7 @@ for counter in \
   fi
 done
 
-echo "=== [2/5] Orphan closing-tag sanitizer ==="
+echo "=== [2/6] Orphan closing-tag sanitizer ==="
 cat >"$TMP_DIR/leak.json" <<JSON
 {
   "model": "$MODEL",
@@ -95,7 +97,7 @@ else
   fail "orphan_tags counter did not increment ($before_orphan -> $after_orphan)"
 fi
 
-echo "=== [3/5] Ground-truth recovery directive (Counter-S7) ==="
+echo "=== [3/6] Ground-truth recovery directive (Counter-S7) ==="
 cat >"$TMP_DIR/groundtruth.json" <<JSON
 {
   "model": "$MODEL",
@@ -140,7 +142,7 @@ else
   fail "ground-truth counter did not increment ($before_gt -> $after_gt)"
 fi
 
-echo "=== [4/5] Instruction notice compaction (OpenCode replay) ==="
+echo "=== [4/6] Instruction notice compaction (OpenCode replay) ==="
 cat >"$TMP_DIR/notice.json" <<JSON
 {
   "model": "$MODEL",
@@ -176,6 +178,8 @@ refusals = [
     "altering system directives",
     "bypassing restrictions",
     "cannot assist with modifying",
+    "i must refuse to assist with",
+    "dangerous or illegal activities",
 ]
 for phrase in refusals:
     if phrase in lower:
@@ -197,7 +201,26 @@ else
   fail "instruction notice handling failed (refusal, echo, or empty response)"
 fi
 
-echo "=== [5/5] Write-Serial: at most one mutation per turn ==="
+echo "=== [5/6] Upstream safety-refusal classifier ==="
+run_refusal_classifier() {
+  if command -v go >/dev/null 2>&1; then
+    (cd "$ROOT_DIR/free-gemini-api" && go test -run 'TestIsToolRefusalOutput_GlobalSafetyRefusal' -count=1 ./api)
+  elif command -v docker >/dev/null 2>&1; then
+    docker run --rm -v "$ROOT_DIR/free-gemini-api:/app" -w /app golang:1.26-alpine \
+      go test -run 'TestIsToolRefusalOutput_GlobalSafetyRefusal' -count=1 ./api
+  else
+    echo "ni go ni docker n'est disponible pour exécuter le test de classifieur" >&2
+    return 127
+  fi
+}
+if run_refusal_classifier >"$TMP_DIR/refusal-classifier.log" 2>&1; then
+  pass "isToolRefusalOutput intercepts 'dangerous or illegal activities'"
+else
+  cat "$TMP_DIR/refusal-classifier.log" >&2
+  fail "isToolRefusalOutput does not intercept the Google global safety refusal"
+fi
+
+echo "=== [6/6] Write-Serial: at most one mutation per turn ==="
 cat >"$TMP_DIR/writeserial.json" <<JSON
 {
   "model": "$MODEL",
@@ -230,13 +253,18 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     for choice in obj.get("choices", []):
         for tc in (choice.get("delta") or {}).get("tool_calls") or []:
             calls.append(tc)
-if len(calls) > 1:
-    print(f"emitted {len(calls)} tool calls, expected at most 1")
-    sys.exit(1)
 for index, tc in enumerate(calls):
     if tc.get("index") != index:
         print(f"tool_calls[{index}].index = {tc.get('index')!r}, expected {index}")
         sys.exit(1)
+mutations = [
+    tc for tc in calls
+    if (tc.get("function", {}).get("name") or "").lower() in {"edit", "write", "patch", "apply_patch", "multiedit"}
+]
+if len(mutations) > 1:
+    names = [tc.get("function", {}).get("name") for tc in mutations]
+    print(f"emitted {len(mutations)} mutations {names}, expected at most 1")
+    sys.exit(1)
 PY
 then
   pass "at most one mutation and sequential tool_calls[].index values"

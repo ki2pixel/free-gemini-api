@@ -3,6 +3,7 @@ package gemini
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -246,7 +247,19 @@ func (c *GeminiClient) executeStreamRequestSession(prompt string, modelName stri
 	}
 
 	if err != nil {
+		if errors.Is(err, ErrUpstreamStreamStalled) {
+			// The stream produced no bytes: the current upstream conversation
+			// (possibly a very large replay) is the most likely culprit. Drop
+			// the pointer so the API retry starts a genuinely fresh session.
+			c.ResetConversationStateSession(sessionKey, modelCfg.ID)
+		}
 		return nil, err
+	}
+
+	if isConversationExpiredBody(rawBody) {
+		log.Printf("⚠️ [chat.go] Upstream returned 1097 (Can't continue conversation); resetting session conversation")
+		c.ResetConversationStateSession(sessionKey, modelCfg.ID)
+		return nil, ErrConversationExpired
 	}
 
 	response := &GeminiResponse{}
@@ -307,6 +320,10 @@ func nextStreamDelta(sent, snapshot string) (delta, newSent string) {
 	return "", sent
 }
 
+// readAndProcessStream consumes the upstream SSE-like body line by line.
+// Transport callers wrap the body with newStallGuardReader, so a body that
+// stops producing bytes does not block here forever: the guard cancels the
+// request context and surfaces ErrUpstreamStreamStalled.
 func (c *GeminiClient) readAndProcessStream(body io.Reader, onChunk func(text string)) (string, error) {
 	var rawBody strings.Builder
 	reader := bufio.NewReader(body)
@@ -604,7 +621,16 @@ func (c *GeminiClient) sendRequestSession(prompt string, tool string, imageRef [
 	}
 
 	if err != nil {
+		if errors.Is(err, ErrUpstreamStreamStalled) {
+			c.ResetConversationStateSession(sessionKey, modelCfg.ID)
+		}
 		return "", nil, err
+	}
+
+	if isConversationExpiredBody(rawBody) {
+		log.Printf("⚠️ [chat.go] Upstream returned 1097 (Can't continue conversation); resetting session conversation")
+		c.ResetConversationStateSession(sessionKey, modelCfg.ID)
+		return "", nil, ErrConversationExpired
 	}
 
 	log.Printf("Raw Body Length: %d, Response: %s", len(rawBody), rawBody[:min(len(rawBody), 500)])
