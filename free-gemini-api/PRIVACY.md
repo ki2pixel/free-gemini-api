@@ -58,6 +58,20 @@ Les fichiers médias présents dans `output/` ne sont pas supprimés
 automatiquement par ce travailleur ; l'exploitant doit appliquer sa propre
 politique de purge des fichiers si nécessaire.
 
+### 4.1 Journaux sans contenu
+
+Les journaux de tour (`📊 [TURN SUMMARY]`) ne contiennent **aucun prompt brut,
+aucun argument d'outil, aucun cookie**. Ils se limitent à des longueurs, des
+hashes tronqués SHA-256 et des labels normalisés (`replay=<reason>`,
+`class=<label>`, `finish=<stop|error>`). Les identifiants de session et de
+conversation y figurent sous forme hachée. Cette conception permet de
+diagnostiquer une dérive comportementale sans constituer un nouveau traitement
+de données à caractère personnel.
+
+Les journaux de requêtes (endpoint, méthode, IP, statut, latence) restent
+soumis à `RETENTION_DAYS` et ne sont jamais exportés dans les rapports
+analytiques.
+
 ## 5. Droit à l'effacement (article 17)
 
 La route suivante supprime tous les messages et métadonnées de médias associés
@@ -92,9 +106,47 @@ stockés dans `cookies/` avec les permissions `0600` et le répertoire avec
 - envoyés à un service tiers ;
 - inclus dans un billet, un journal ou une capture d'écran.
 
+### 6.1 Chiffrement au repos
+
+Recommandé : définir `COOKIE_ENCRYPTION_KEY` pour chiffrer les fichiers
+`cookies/account_*.json` et les caches `cookies/session_*.json` en
+**AES-256-GCM** avant leur écriture atomique.
+
+```bash
+openssl rand -hex 32   # génère une clé de 32 octets
+```
+
+- Une valeur de **64 caractères hexadécimaux** est utilisée directement comme
+  clé ; toute autre valeur passe par PBKDF2-HMAC-SHA256 (100 000 itérations).
+- Les fichiers historiques en clair restent lisibles et sont réécrits sous
+  forme chiffrée dès qu'ils sont lus ou resynchronisés avec une clé active.
+- `REQUIRE_COOKIE_ENCRYPTION=true` refuse le démarrage si la clé est absente.
+
+Conséquence pour la conformité : un vol de disque ou une sauvegarde non
+chiffrée ne révèle plus les cookies. La clé, elle, doit être protégée
+séparément (KMS, Vault ou secrets Docker) — voir
+[`THREAT_MODEL.md`](THREAT_MODEL.md) §4.
+
+### 6.2 Isolation par sous-domaine
+
+Un export Chrome contient les mêmes noms de cookies (`OSID`,
+`__Secure-OSID`, `COMPASS`) pour `gemini.google.com`, `myaccount.google.com` et
+`console.cloud.google.com`, avec des **valeurs différentes**. Le proxy utilise
+un jar RFC 6265 (`publicsuffix`) et enregistre chaque cookie contre **l'hôte
+unique qui le possède** ; un cookie host-only est stocké sans attribut
+`Domain`. Les cookies des hôtes frères ne sont donc jamais injectés dans
+l'identité Gemini, et l'en-tête `Cookie` est résolu en direct à chaque requête.
+
+Détail technique et tests :
+[`../docs/architecture/cookie_scoping_rfc6265.md`](../docs/architecture/cookie_scoping_rfc6265.md).
+
+### 6.3 Rotation après exposition
+
 En cas de compromission suspectée, révoquer les sessions Google du compte
-concerné depuis `https://myaccount.google.com/security`, puis resynchroniser
-les cookies avec l'extension.
+concerné depuis `https://myaccount.google.com/security`, supprimer les anciens
+fichiers `cookies/account_*.json` / `session_*.json`, puis resynchroniser les
+cookies avec l'extension. La procédure complète figure dans
+[`SECURITY.md`](SECURITY.md) §4.
 
 ## 7. Destinataires et transferts
 

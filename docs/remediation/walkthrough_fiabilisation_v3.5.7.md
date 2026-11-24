@@ -1,7 +1,7 @@
 # Journal de bord — Fiabilisation Gemini 4 (audit 2026-11)
 
 Dernière mise à jour : 2026-11-23
-Référence : [`docs/recherches/audit-opencode-antigravity-auth-gemini-fiabilisation.md`](docs/recherches/audit-opencode-antigravity-auth-gemini-fiabilisation.md)
+Référence : [`docs/recherches/audit-opencode-antigravity-auth-gemini-fiabilisation.md`](../recherches/audit-opencode-antigravity-auth-gemini-fiabilisation.md)
 
 ## 1. État des vagues
 

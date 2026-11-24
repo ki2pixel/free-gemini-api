@@ -133,7 +133,7 @@ Après une rotation de clé, les anciens fichiers chiffrés ne sont plus lisible
 ressynchronisez les cookies depuis l'extension ou supprimez les fichiers
 concernés.
 
-## 4 ter. Métriques Prometheus (A-27)
+## 4 ter. Métriques Prometheus (A-27, étendu v3.5.7 P1)
 
 `GET /metrics` expose un format texte Prometheus (`text/plain; version=0.0.4`)
 avec la santé des comptes, l'état des workers, les requêtes HTTP, les tokens et
@@ -143,6 +143,29 @@ les rejets du limiteur de débit. Par défaut la route exige `API_TOKEN` (ou
 `PUBLIC_METRICS=true` autorise un scrape **sans jeton uniquement depuis le
 loopback** (`127.0.0.1` ou `::1`). Ne l'activez pas derrière un reverse proxy
 qui présenterait toutes les requêtes comme locales.
+
+### Métriques de classification (v3.5.7)
+
+Ces quatre familles exposent **pourquoi** un tour a été rejoué, bloqué ou
+accepté. Elles sont le principal signal de détection d'une dérive
+comportementale des modèles :
+
+| Métrique | Labels | Lecture |
+|---|---|---|
+| `gemini_turn_classification_total` | `class="tool_call\|greeting\|incomplete\|refusal\|pseudo_report\|unbacked_completion\|untagged_mutation\|schema_invalid\|ok"` | quelle sortie a été retenue ou rejouée |
+| `gemini_delta_replay_total` | `reason="new\|conv_mismatch\|worker_mismatch\|prefix_mismatch\|identical\|forced"` | coût des replays complets |
+| `gemini_quarantine_total` | `kind="untagged_mutation\|schema_invalid\|truncated"` | charges retirées du texte visible |
+| `gemini_upstream_suspected_stop_total` | `model` | générations interrompues suspectées |
+
+Métriques complémentaires : `gemini_arranger_repairs_total{kind}`,
+`gemini_doom_loop_interventions_total{signal}` et
+`gemini_ground_truth_directives_total`.
+
+Une hausse de `gemini_delta_replay_total{reason="conv_mismatch"}` signale que le
+pool ne parvient plus à conserver la conversation amont ; une hausse de
+`gemini_turn_classification_total{class="greeting"}` signale un prompt ou une
+continuité de session dégradée. Aucun prompt brut, aucun argument d'outil et
+aucun cookie n'est exposé par ces compteurs.
 
 ## 5. Permissions sur disque
 
@@ -246,22 +269,52 @@ et métadonnées de médias de la conversation. L'opération est idempotente et
 journalisée (`audit action=gdpr_delete`). Voir `PRIVACY.md` pour la base légale
 et les droits des personnes.
 
-## 11. Chaîne d'approvisionnement et scan de secrets (A-28)
+## 11. Chaîne d'approvisionnement et scan de secrets (A-28, local-first v3.5.7)
 
-- `go mod verify` est exécuté en CI avant les tests pour détecter toute
-  altération des modules téléchargés.
-- `gitleaks` scanne l'historique Git et les PR avec la configuration
-  `.gitleaks.toml` (règles par défaut + cookies Google + clé de chiffrement).
-- `.github/dependabot.yml` ouvre au plus 5 PR par semaine pour les modules Go
-  et les actions GitHub.
-- Les actions GitHub restent épinglées par SHA ; la CI conserve
-  `permissions: contents: read`.
-
-Pour scanner localement :
+Ce dépôt **n'a pas de pipeline CI distant**. L'assurance qualité est un runner
+local conteneurisé, reproductible sur toute machine disposant de Docker :
 
 ```bash
-gitleaks git --config .gitleaks.toml --redact --no-banner .
+./scripts/audit_check.sh
 ```
+
+Trois barrières, dans cet ordre :
+
+| Barrière | Commande | Échec si |
+|---|---|---|
+| Formatage | `gofmt -l .` | un fichier est mal formaté |
+| Analyse statique | `docker run … golang:1.26-alpine go vet ./...` | `go vet` signale un problème |
+| Tests + couverture | `docker run … golang:1.26-alpine go test -short -cover ./...` | un test échoue |
+
+**Vérification de la chaîne d'approvisionnement :**
+
+- `go mod verify` doit être exécuté avant les tests pour détecter toute
+  altération des modules téléchargés :
+
+  ```bash
+  cd free-gemini-api && go mod verify
+  ```
+
+- `govulncheck` identifie les vulnérabilités **atteignables** dans le graphe
+  d'appels réel :
+
+  ```bash
+  cd free-gemini-api && govulncheck ./...
+  ```
+
+- `gitleaks` scanne l'historique Git avec la configuration `.gitleaks.toml`
+  (règles par défaut + cookies Google `__Secure-1PSID`/`__Secure-3PSID` + clé
+  `COOKIE_ENCRYPTION_KEY`) :
+
+  ```bash
+  gitleaks git --config .gitleaks.toml --redact --no-banner .
+  ```
+
+**Mise à jour des dépendances :** sans Dependabot, la revue est manuelle et
+explicite. Toute montée de version doit être suivie de `go mod verify`,
+`govulncheck` et de `./scripts/audit_check.sh` avant d'être considérée comme
+validée. Les dépendances directes sont épinglées dans `go.mod` / `go.sum` ; le
+verrou `go.sum` est la garantie d'intégrité, pas une signature distante.
 
 ## 12. Limites connues
 

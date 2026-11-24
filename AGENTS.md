@@ -2,24 +2,35 @@
 
 High-signal instructions and operational context for AI agents working in this repository.
 
+**Target version: v3.5.7** — post-audit hardening (waves 1–3) plus in-flight
+benchmark waves P0 / P1 / P2. Sécurité : voir
+[`free-gemini-api/SECURITY.md`](free-gemini-api/SECURITY.md). Hub documentaire :
+[`docs/README.md`](docs/README.md).
+
 ---
 
 ## 1. Project Overview & Architecture
+
 Open-source, drop-in OpenAI-compatible proxy engine in pure Go unlocking Google's Gemini 4 lineup (Hydrogen, Neon, Argon, Carbon), thinking depth controls, and Agentic Task Mode (`[40]`).
 
 ### Directory & Package Boundaries
 - **`free-gemini-api/`**: Main Go server root (all build/test commands run here).
-  - `api/`: REST & SSE streaming handlers, OpenAI schema conversions, auth middleware, rate-limiting, SQLite metrics/analytics, MCP and queue.
-  - `gemini/`: Gemini web/client driver, cookies/session managers, output arranger (tool calls, thinking extraction, JSON repair), model registry.
-  - `data/`: Local SQLite database (`gemini.db` + WAL/SHM).
-- **`gemini-extension/`**: Companion Chrome extension for automated browser session & cookie syncing via WebSocket (`ws://127.0.0.1:9226`).
+  - `api/`: REST & SSE streaming handlers, OpenAI schema conversions, auth middleware, rate-limiting, SQLite metrics/analytics, MCP and queue. Contient l'état de session (`session_transcripts.go`), le coupe-circuit (`doom_loop.go`), le masquage d'observations (`observation_masker.go`) et les métriques Prometheus (`metrics.go`).
+  - `gemini/`: Gemini web/client driver, cookies/session managers, output arranger (tool calls, thinking extraction, JSON repair), model registry, `schema_validator.go`, `stream_guard.go`, `thinking.go`, `crypto.go`.
+  - `db/`: SQLite access layer (`sqlite` WAL), retention worker, exports.
+  - `data/`: Local SQLite database (`gemini.db` + WAL/SHM). Runtime only, never commit.
+  - `cookies/`: Cookie jars (`account_*.json`, `session_*.json`), `0700`/`0600`. Never commit.
+  - `output/`: Generated media served by `GET /output/*`. Never commit.
+- **`gemini-extension/`**: Companion Chrome extension (MV3) for automated browser session & cookie syncing via WebSocket (`ws://127.0.0.1:9226`).
+- **`scripts/`**: Local quality and live-test tooling (`audit_check.sh`, `live_middleware_smoke.sh`, `benchmark_matrix.sh`).
+- **`docs/`**: Documentation hub. `architecture/` (living specs), `remediation/` (v3.4.8 → v3.5.7 archives), `recherches/` (theoretical papers and comparative audits).
 - **`audit-2026-11/`**: Security audit reports, CVSS registry, proof-of-concept exploits, and remediation documentation.
+
+> Les commandes Go s'exécutent **dans** `free-gemini-api/`. Les scripts s'exécutent depuis la **racine** du dépôt.
 
 ---
 
-## 2. Key Developer Commands
-
-All Go commands must be executed inside `free-gemini-api/`:
+## 2. Key Developer Commands & Runbooks
 
 ### Build & Run
 ```bash
@@ -29,6 +40,17 @@ go run main.go
 ```
 
 ### Tests & Quality Checks
+
+**Runner officiel (recommandé) — depuis la racine :**
+```bash
+./scripts/audit_check.sh
+```
+Trois barrières, dans cet ordre : `gofmt -l .` (échec si un fichier est mal
+formaté), `go vet ./...` via Docker `golang:1.26-alpine`, puis
+`go test -short -cover ./...` via le même conteneur. Toute tâche déclarée
+terminée doit avoir franchi ces trois barrières.
+
+**Suite locale (si le toolchain Go ≥ 1.26 est installé) :**
 ```bash
 cd free-gemini-api
 
@@ -40,6 +62,10 @@ go test -race -short ./...
 go test -v ./gemini -run TestArrangeGeminiOutput
 go test -v ./api -run TestIsToolRefusalOutput
 
+# Fuzzing actif (5 s par cible)
+go test -short -fuzz=FuzzQuarantineUntaggedToolJSON -fuzztime=5s ./gemini
+go test -short -fuzz=FuzzSanitizeThoughtArtifacts -fuzztime=5s ./gemini
+
 # Linting & Formatting verification
 test -z "$(gofmt -l .)"
 go vet ./...
@@ -48,6 +74,32 @@ go vet ./...
 > ```bash
 > docker run --rm -v $(pwd)/free-gemini-api:/app -w /app golang:1.26-alpine go test -short ./...
 > ```
+
+**Tests de fumée live (consomme du quota Google) :**
+```bash
+API_TOKEN=... ./scripts/live_middleware_smoke.sh
+MODEL=gemini-4-neon ./scripts/live_middleware_smoke.sh
+```
+Six contrôles : compteurs agentiques exposés, sanitizer de balises fermantes
+orphelines, directive de récupération ground-truth, compaction des notices
+d'instructions, classifieur de refus amont, Write-Serial (au plus une mutation
+par tour + `tool_calls[].index` séquentiels). Requiert un worker sain et une
+extension connectée. **Ne pas lancer en boucle** : chaque exécution consomme du
+quota réel. Volontairement exclu de `audit_check.sh`.
+
+**Banc de benchmark `pass^k` :**
+```bash
+./scripts/benchmark_matrix.sh
+BENCHMARK_RUNS=3 BENCHMARK_MODELS="gemini-4-neon gemini-4-hydrogen" ./scripts/benchmark_matrix.sh
+BENCHMARK_STRICT=1 ./scripts/benchmark_matrix.sh   # exit non-zéro si un modèle échoue
+```
+Rejoue le plan v3.5.7 via OpenCode pour quatre modèles, `k` fois, dans des
+git worktrees isolés créés depuis un instantané du working tree courant. Détecte
+les tool calls, greetings, faux quotas (`0 remaining`), claims S7, prose courte
+inachevée et `finish_reason`. Écrit `results.tsv`, `summary.txt` et les
+transcripts dans `debug/benchmark_matrix_<ts>/`. Le working tree principal n'est
+**jamais** réinitialisé ni nettoyé. Prérequis : `opencode`, `python3`, `jq`
+(facultatif), proxy démarré et authentifié.
 
 ### Docker Deployment
 ```bash
@@ -58,12 +110,135 @@ curl -s http://127.0.0.1:8100/health
 
 ---
 
-## 3. Tech Stack & Implementation Details
+### Matrice des tests de non-régression v3.5.7
+
+Exécution ciblée depuis `free-gemini-api/` :
+
+| Domaine | Test | Commande |
+|---|---|---|
+| Continuité + ancre | `TestPlanSessionTurn_IdentityAndContinuationAnchor` | `go test -v ./api -run TestPlanSessionTurn_IdentityAndContinuationAnchor` |
+| Raisons de replay | `TestPlanSessionTurn_ReplayReasons` | `go test -v ./api -run TestPlanSessionTurn_ReplayReasons` |
+| Greeting Neon | `TestIsConversationalReset_NeonGreeting` | `go test -v ./api -run TestIsConversationalReset_NeonGreeting` |
+| Fuite JSON Hydrogen | `TestQuarantineUntaggedToolJSON_HydrogenLeak` | `go test -v ./api -run TestQuarantineUntaggedToolJSON_HydrogenLeak` |
+| S7 non étayé | `TestSessionLedger_UnbackedCompletion_HydrogenS7` | `go test -v ./api -run TestSessionLedger_UnbackedCompletion_HydrogenS7` |
+| Preuve de validation S7 | `TestUnbackedCompletion_ValidationEvidence` | `go test -v ./api -run TestUnbackedCompletion_ValidationEvidence` |
+| Prose Argon | `TestIsIncompleteFinalProse_ArgonProse` | `go test -v ./api -run TestIsIncompleteFinalProse_ArgonProse` |
+| Routage Task → Chat | `TestTaskModeRouting_ToolBearingRequest` | `go test -v ./api -run TestTaskModeRouting` |
+| Métriques par classe | `TestMetrics_ClassificationAndReplayExposition` | `go test -v ./api -run TestMetrics_ClassificationAndReplayExposition` |
+| Budget LRU | `TestSessionLRU_GlobalMemoryBudgetEviction` | `go test -v ./api -run TestSessionLRU_GlobalMemoryBudgetEviction` |
+| Budget configurable | `TestConfigureSessionMemoryBudget` | `go test -v ./api -run TestConfigureSessionMemoryBudget` |
+| `finish_reason` terminal | `TestTerminalFinishReason_ErrorOnUnusableOutput` | `go test -v ./api -run TestTerminalFinishReason_ErrorOnUnusableOutput` |
+| Chunk d'erreur SSE | `TestNewStreamErrorChunk_FinishReasonError` | `go test -v ./api -run TestNewStreamErrorChunk_FinishReasonError` |
+| Absence de *Pink Elephant* | `TestPromptHasNoPinkElephant` | `go test -v ./gemini -run TestPromptHasNoPinkElephant` |
+| Sanitizer `<thought` | `TestSanitizeThoughtArtifacts` | `go test -v ./gemini -run TestSanitizeThoughtArtifacts` |
+| Artefact Argon exact | `TestArgonSanitizedThoughtArtifact` | `go test -v ./gemini -run TestArgonSanitizedThoughtArtifact` |
+| Fenced citations préservées | `TestArrangeGeminiOutput_PreservesFencedThoughtCitations` | `go test -v ./gemini -run TestArrangeGeminiOutput_PreservesFencedThoughtCitations` |
+| Propriété P1 (mutation tronquée) | `TestProperty_MidValueMutationRejection` | `go test -v ./api -run TestProperty_MidValueMutationRejection` |
+| Propriété P2 (quarantaine) | `TestProperty_QuarantineCompleteness` | `go test -v ./api -run TestProperty_QuarantineCompleteness` |
+| Propriété P3 (identité delta) | `TestProperty_DeltaIdentitySafety` | `go test -v ./api -run TestProperty_DeltaIdentitySafety` |
+| Propriété P4 (terminaison) | `TestProperty_MonotonicRetryTermination` | `go test -v ./api -run TestProperty_MonotonicRetryTermination` |
+| Scope cookies | `TestLoadCookiesKeepsSubdomainCookiesScoped` | `go test -v ./gemini -run TestLoadCookiesKeepsSubdomainCookiesScoped` |
+| Jar par hôte | `TestCookieJarScopesByRequestHost` | `go test -v ./gemini -run TestCookieJarScopesByRequestHost` |
+| Host-only vs Domain | `TestCookieJar_HostOnlyVsDomainAttribute` | `go test -v ./gemini -run TestCookieJar_HostOnlyVsDomainAttribute` |
+| Stall Guard | `TestStallGuardReaderRejectsSilentStream` | `go test -v ./gemini -run TestStallGuardReader` |
+
+Lancer l'ensemble des propriétés et du sanitizer d'un coup :
+```bash
+cd free-gemini-api
+go test -v ./api -run "TestProperty_|TestArgonSanitized|TestPseudoReportLexicon_P2|TestUnbackedCompletion_"
+go test -v ./gemini -run "TestSanitizeThought"
+```
+
+---
+
+## 3. Tech Stack & Invariants v3.5.7 (post-benchmark)
 
 - **Web Framework**: Fiber v3 (`github.com/gofiber/fiber/v3`) with HTTP/3 & QUIC support (`github.com/quic-go/quic-go`).
 - **TLS Fingerprinting**: Bogdan Finn's `tls-client` and `fhttp` simulating Chrome 152 JA4 fingerprints.
 - **Database & Metrics**: Pure Go SQLite (`modernc.org/sqlite`) in WAL mode tracking tokens, latency, cost savings, with dual export to JSON and Excel (`github.com/xuri/excelize/v2`).
 - **Streaming & Arranger**: Real-time SSE parser separating live `<thought>` tags and auto-repairing unescaped control characters in JSON `<tool_call>` arguments.
+
+### Invariants P0 / P1 / P2
+
+```text
+I1  delta ⇒ identité worker + conversation + préfixe exact
+I2  tools ∧ ¬tool_call ∧ greeting ⇒ retry, jamais stop
+I3  CleanText ne contient aucun JSON d'outil déclaré
+I4  claim(path) ⇒ path ∈ mutations confirmées par le tool result
+I5  finish_reason = stop ⇒ tool_call ∨ réponse finale validée
+I6  prompt système sans "0 remaining" / "maximum number of tool" / "search calls"
+I7  tout retry est couvert par un budget plafonné et monotone
+I8  mémoire des sessions bornée (256 sessions, 64 Mio cumulés)
+```
+
+**Cookie jar RFC 6265.** `tls_client.NewCookieJar()` est volontairement évité :
+il regroupe par eTLD+1 et déduplique sur le nom seul. Le client utilise
+`fhttp/cookiejar` avec `golang.org/x/net/publicsuffix`. `loadCookies` enregistre
+chaque cookie contre **l'hôte unique qui le possède** ; un cookie host-only est
+stocké **sans** attribut `Domain`. `rawCookies` est rendu depuis le jar pour
+`gemini.google.com`. L'en-tête `Cookie` est résolu **en direct** à chaque
+requête, jamais depuis un instantané de chargement.
+
+**Stall Guard 45 s.** `stallGuardReader` (`gemini/stream_guard.go`) arme un
+minuteur de `upstreamStreamStallTimeout = 45s`, réarmé à chaque lecture
+produisant des octets. Sans octet pendant 45 s, il annule le contexte et ferme
+le corps, ce qui débloque un `Read` en attente avec
+`ErrUpstreamStreamStalled`. Indispensable : un flux amont bloqué garde la
+connexion ouverte sans émettre un octet, donc un timeout de transport classique
+ne se déclenche jamais (cause du gel de 14 min en v3.5.0).
+
+**Validation Draft 2020-12.** Les appels explicites sont validés contre le
+schéma de `req.Tools`. Les schémas compactés filtrent `required` contre
+`properties` (A-01) et synthétisent `items: {type: "string"}` pour les tableaux
+sans `items` (A-02). Les signatures `STRICT PARAMETERS` sont calculées sur le
+schéma effectif.
+
+**Quarantaine des mutations non taggées.** Un objet JSON nu n'est promu en
+`tool_call` que s'il est complet, schéma-valide et **non mutateur**. Toute
+mutation non taggée est retirée de `CleanText`, marquée `UntaggedMutation` et
+rejouée. `CleanText` ne contient jamais un JSON d'outil déclaré.
+
+**Continuité de session stricte.** Un delta exige
+`curConvID == lastConvID`, le même worker et un préfixe de transcript exact.
+Sinon : replay complet sur conversation vierge. Un delta sans instruction
+utilisateur reçoit l'ancre éphémère `[Continuation]`, jamais stockée dans
+`lastFlat`.
+
+**Salutations et prose inachevée.** `isConversationalReset` classe les greetings
+comme inutilisables sur une requête avec outils. `isIncompleteFinalProse`
+intercepte les fragments de 10 à 80 runes sans ponctuation finale.
+
+**`finish_reason` véridique.** Un tour inutilisable épuisé émet
+`finish_reason: "error"` via `newStreamErrorChunk`, jamais `"stop"`. OpenCode
+2.4.0 mappe `"error"` vers une `AIError` et `"stop"` vers un succès : rapporter
+`"stop"` faisait passer l'hôte en `idle` sans retry.
+
+**Hygiène cognitive.** Les littéraux `0 remaining`, `maximum number of tool` et
+`search calls` sont absents du prompt système et des directives de replay. Ils
+restent uniquement dans les classifieurs de sortie.
+
+**Routage produit Task → Chat.** Une requête déclarant des outils est
+requalifiée de `[40]` vers `[0]` (`hydrogen-task` → `hydrogen`,
+`neon-task` → `neon`), sauf opt-in `X-Allow-Task-Mode-For-Tools: true` ou
+`ALLOW_TASK_MODE_FOR_TOOLS=true`.
+
+**Budget mémoire LRU.** 256 sessions maximum, 64 Mio cumulés de `lastFlat`
+(`SESSION_MEMORY_BUDGET_MB`). L'éviction dégrade toujours vers un replay
+complet, jamais vers un delta orphelin.
+
+**Budgets de retry (terminaison garantie).**
+```text
+maxToolChatAttempts      = 4
+maxEmptyGenerationRetries = 2
+maxTransportRetries       = 2
+maxChatLoopIterations     = 8
+```
+
+**Métriques Prometheus.** `gemini_turn_classification_total{class}`,
+`gemini_delta_replay_total{reason}`, `gemini_quarantine_total{kind}`,
+`gemini_upstream_suspected_stop_total{model}`, plus
+`gemini_arranger_repairs_total{kind}`, `gemini_doom_loop_interventions_total` et
+`gemini_ground_truth_directives_total`.
 
 ---
 
@@ -71,6 +246,23 @@ curl -s http://127.0.0.1:8100/health
 
 - **Authentication (P0 Hardening)**: Every route except `GET /health` strictly requires authentication:
   - Header: `Authorization: Bearer $API_TOKEN` or `X-API-Token: $API_TOKEN`.
+  - Comparaison à temps constant. `API_TOKEN` vide ⇒ `401` partout, jamais d'ouverture silencieuse.
+- **Admin hierarchy**:
+  - `ADMIN_TOKEN` non vide ⇒ il est le **seul** jeton accepté sur `POST /v1/models`, `POST /v1/models/discover` et `POST /api/sync-cookies`.
+  - `ADMIN_TOKEN` vide ⇒ repli sur `API_TOKEN`.
+  - Les pré-vols `OPTIONS` sont exemptés. `PUBLIC_HELP=true` rend `GET /` et `GET /help` publics.
+- **Cookie encryption at rest**:
+  - `COOKIE_ENCRYPTION_KEY` active AES-256-GCM sur `cookies/account_*.json` et les caches de session.
+  - 64 caractères hexadécimaux = clé directe ; toute autre valeur passe par PBKDF2-HMAC-SHA256 (100 000 itérations).
+  - `REQUIRE_COOKIE_ENCRYPTION=true` transforme l'absence de clé en erreur fatale.
+  - Générer : `openssl rand -hex 32`.
+- **Critical environment variables**:
+  - `ALLOW_TASK_MODE_FOR_TOOLS` (défaut `false`) — conserve Task `[40]` sur requêtes avec outils.
+  - `SESSION_MEMORY_BUDGET_MB` (défaut `64`) — budget cumulé des transcripts.
+  - `PUBLIC_METRICS` (défaut `false`) — scrape `/metrics` sans jeton, **loopback uniquement**.
+  - `RETENTION_DAYS` (défaut `30`, `0` désactive) — purge RGPD.
+  - `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_SECONDS` (défaut `600` / `60`).
+  - `WS_TOKEN`, `MCP_TOKEN` — repli sur `API_TOKEN` s'ils sont vides.
 - **Default Ports**:
   - REST & SSE API: `http://127.0.0.1:8100`
   - Cookie Bridge WebSocket: `ws://127.0.0.1:9226`
@@ -79,3 +271,60 @@ curl -s http://127.0.0.1:8100/health
   - `gemini-4-neon` : Pro tier, reasoning frontier model.
   - `gemini-4-hydrogen-task` / `[40]` : Dedicated Agentic Task mode.
   - Thinking depth tiers : `neon-high`, `neon-medium`, `neon-low`.
+- **Never commit**: `cookies/`, `data/`, `output/`, `.env`, `*.db*`.
+- **Never** edit `.commandcode/taste/` or `~/.commandcode/taste/` if present.
+
+### API routes — source de vérité
+
+`free-gemini-api/api/routes.go` est la référence. Les routes fréquemment
+oubliées dans la documentation :
+
+| Method | Endpoint | Auth |
+|---|---|---|
+| `GET` | `/metrics` | API/ADMIN (loopback si `PUBLIC_METRICS=true`) |
+| `GET` | `/api/pool` | API — alias de `/v1/workers` |
+| `POST` | `/api/sync-cookies` | **Admin** |
+| `POST` | `/v1/models` | **Admin** |
+| `POST` | `/v1/models/discover` | **Admin** |
+| `POST` | `/reset` | API |
+| `GET` | `/status` | API |
+| `GET` | `/history` | API |
+| `DELETE` | `/history/:conversation_id` | API — RGPD art. 17, idempotent |
+| `GET` | `/history/search` | API |
+| `GET` | `/media` | API |
+| `GET` | `/export/json` | API — 5 req/min |
+| `POST` | `/chat`, `/music` | API |
+| `GET` | `/output/*` | API — confinement `safeOutputPath` |
+
+---
+
+## 5. Documentation Map
+
+| Document | Usage |
+|---|---|
+| [`docs/README.md`](docs/README.md) | Hub : parcours par profil + matrice v3.4.8 → v3.5.7 |
+| [`docs/architecture/pipeline_flow.md`](docs/architecture/pipeline_flow.md) | Cycle de requête complet, étape par étape |
+| [`docs/architecture/cookie_scoping_rfc6265.md`](docs/architecture/cookie_scoping_rfc6265.md) | Jar, host-only, sous-domaines, chiffrement |
+| [`docs/architecture/agentic_resilience.md`](docs/architecture/agentic_resilience.md) | Schémas, quarantaine, ledger, budgets, preuves |
+| [`docs/remediation/README.md`](docs/remediation/README.md) | Index chronologique des remédiations |
+| [`docs/recherches/README.md`](docs/recherches/README.md) | Arbitrages et papiers théoriques |
+| [`CHANGELOG.md`](CHANGELOG.md) | Vérité sémantique par version |
+| [`free-gemini-api/SECURITY.md`](free-gemini-api/SECURITY.md) | Rotation, chiffrement, pipeline qualité |
+| [`free-gemini-api/THREAT_MODEL.md`](free-gemini-api/THREAT_MODEL.md) | STRIDE, T-01 → T-18 |
+| [`free-gemini-api/PRIVACY.md`](free-gemini-api/PRIVACY.md) | RGPD, rétention, effacement |
+
+---
+
+## 6. Working Rules for Agents
+
+1. **Do not commit.** Leave changes in the working tree unless explicitly asked.
+2. **Run `./scripts/audit_check.sh`** before declaring a task complete.
+3. **Never claim** a test, build or audit passed without executing it — this is
+   exactly the rule the proxy's `SessionLedger` enforces on models.
+4. **Never write secrets** (`API_TOKEN`, `ADMIN_TOKEN`, cookies,
+   `COOKIE_ENCRYPTION_KEY`) into a tracked file.
+5. **Preserve the invariants.** Any change to `arranger.go`, `session_transcripts.go`,
+   `chat_handler.go` or the cookie path must keep I1–I8 true and the relevant
+   regression tests green.
+6. **Cite the source.** Documentation claims must be verifiable in
+   `free-gemini-api/`. Do not invent routes, env vars, metrics or test names.

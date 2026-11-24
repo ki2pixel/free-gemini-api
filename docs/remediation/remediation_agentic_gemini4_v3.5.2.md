@@ -1,6 +1,6 @@
 # Remédiation agentique Gemini 4 — v3.5.2
 
-**Date :** 2026-11-23  
+**Date :** 2026-11-23
 **Contexte :** cinquième passe de durcissement après le challenge d'édition multi-fichiers v3.5.1. Les transcripts des modèles `gemini-4-hydrogen`, `gemini-4-neon` et `gemini-4-hydrogen-task` sont archivés dans `debug/`.
 
 ---

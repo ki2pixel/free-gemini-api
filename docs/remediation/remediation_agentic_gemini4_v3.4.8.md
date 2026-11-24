@@ -1,8 +1,8 @@
 # Remédiation agentique Gemini 4 — Rapport de challenge & validation (v3.4.8)
 
-**Date :** 2026-11-23  
-**Périmètre :** `free-gemini-api` (middleware, arranger, validation de schémas, protocole live)  
-**Plan source :** « Plan de remédiation des écueils des modèles Gemini 4 & Protocole de tests live »  
+**Date :** 2026-11-23
+**Périmètre :** `free-gemini-api` (middleware, arranger, validation de schémas, protocole live)
+**Plan source :** « Plan de remédiation des écueils des modèles Gemini 4 & Protocole de tests live »
 **Agent de challenge :** DeepSeek V4.1 Flash Free sous OpenCode
 
 ---

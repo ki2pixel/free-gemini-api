@@ -1,6 +1,6 @@
 # Remédiation agentique Gemini 4 — v3.5.1
 
-**Date :** 2026-11-23  
+**Date :** 2026-11-23
 **Contexte :** quatrième passe de durcissement après le challenge d'alignement documentaire v3.5.0. Les transcripts sont archivés dans `debug/` pour `gemini-4-hydrogen`, `gemini-4-hydrogen-task` et `gemini-4-neon`.
 
 ---

@@ -1,6 +1,6 @@
 # Remédiation agentique Gemini 4 — v3.5.4
 
-**Date :** 2026-11-23  
+**Date :** 2026-11-23
 **Contexte :** septième passe de durcissement après le challenge d'alignement documentaire v3.5.3. Les transcripts des modèles `gemini-4-hydrogen`, `gemini-4-hydrogen-task` et `gemini-4-neon` sont archivés dans `debug/6_*.json`. Le code source d'OpenCode 2.4.0 utilisé pour l'analyse se trouve dans `/home/kidpixel/Téléchargements/opencode-2.4.0/`.
 
 ---

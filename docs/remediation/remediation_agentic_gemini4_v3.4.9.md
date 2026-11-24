@@ -1,6 +1,6 @@
 # Remédiation agentique Gemini 4 — v3.4.9
 
-**Date :** 2026-11-23  
+**Date :** 2026-11-23
 **Contexte :** arrêts prématurés de `gemini-4-neon` et `gemini-4-hydrogen` après l’écriture d’`AGENTS.md` et la réinjection par OpenCode de la notice `The instructions changed: ... AGENTS.md`.
 
 ---

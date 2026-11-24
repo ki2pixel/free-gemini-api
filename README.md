@@ -15,7 +15,34 @@
 
 [⭐ Star this repo on GitHub](https://github.com/kodelyx/free-gemini-api) • [⚡ Quickstart](#-quickstart) • [📊 Model Matrix](#-supported-models--thinking-matrix) • [💻 Code Examples](#-code-examples) • [🔌 Integrations](#-third-party-client-integrations)
 
+**[📚 Documentation Hub](docs/README.md)** • **[🛡️ Security Audit 2026-11](audit-2026-11/README.md)** • **[🤖 AGENTS.md](AGENTS.md)** • **[📜 CHANGELOG](CHANGELOG.md)**
+
 </div>
+
+---
+
+## 🛡️ v3.5.7 — Post-Benchmark Resilience (P0 / P1 / P2)
+
+The proxy now refuses to report success on an unusable turn. Each failure mode
+observed in the in-flight benchmark is either intercepted or replayed on a fresh
+upstream conversation, and any exhausted turn terminates with a truthful
+`finish_reason: "error"`.
+
+| Mechanism | Guarantee |
+|---|---|
+| **Strict session continuity** | A delta is sent only when the worker, the upstream conversation ID and the exact transcript prefix all match. Any mismatch replays the full transcript on a fresh conversation. |
+| **RFC 6265 cookie jar** | Every cookie is registered against the single host that owns it. Host-only cookies carry no `Domain` attribute, so `console.cloud.google.com` can never overwrite a `gemini.google.com` token of the same name. |
+| **Stall Guard 45 s** | A silent upstream stream is cancelled after 45 s without a byte and surfaces as `ErrUpstreamStreamStalled`. A plain transport timeout would leave the session frozen (14-minute freeze in v3.5.0). |
+| **Draft 2020-12 schema validation** | Explicit tool calls are validated against `req.Tools`. Compacted schemas filter `required` against `properties` and synthesize `items` for arrays. |
+| **Untagged JSON quarantine** | A bare JSON object is promoted only if it is complete, schema-valid and **non-mutating**. Any untagged mutation is stripped from the visible text and replayed. |
+| **`SessionLedger` anti-S7** | A completion claim that cites an unconfirmed path, or asserts a test success without recorded validation evidence, is classified `unbacked_completion` and retried. |
+| **Interrupted prose detection** | Visible fragments of 10–80 runes without terminal punctuation are retried, then terminated with `finish_reason: "error"`. |
+| **Global LRU transcript budget** | 256 sessions and 64 MiB of cumulative transcripts (`SESSION_MEMORY_BUDGET_MB`). Eviction always degrades to a full replay, never to an orphan delta. |
+| **Task → Chat routing** | Tool-bearing requests to `*-task` aliases are requalified to the Chat alias of the same family, preserving the external tool loop. Opt in with `X-Allow-Task-Mode-For-Tools: true`. |
+| **`<thought` sanitizer** | Orphan opening and closing thought artifacts are removed from the visible text only. Complete tag citations inside fenced code blocks are preserved, and reasoning content is never altered. |
+
+See [`docs/README.md`](docs/README.md) for the full documentation hub and
+[`CHANGELOG.md`](CHANGELOG.md) for the semantic history.
 
 ---
 
@@ -288,18 +315,65 @@ Add the provider configuration in `~/.config/opencode/opencode.json`:
 
 ## 📡 API Reference & Endpoints
 
-| Method | Endpoint | Description |
+Every route except `GET /health` requires `Authorization: Bearer $API_TOKEN` or
+`X-API-Token: $API_TOKEN`. `[Admin]` marks routes that accept **only**
+`ADMIN_TOKEN` when that variable is set (otherwise they fall back to
+`API_TOKEN`). Source of truth: [`free-gemini-api/api/routes.go`](free-gemini-api/api/routes.go).
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|:---:|---|
+| `POST` | `/v1/chat/completions` | API | OpenAI-compatible chat & streaming completions (Models: `hydrogen`, `neon-high`, `auto`, etc.) |
+| `GET` | `/v1/models` | API | List all dynamic models, aliases, tiers, and thinking levels |
+| `POST` | `/v1/models` | **[Admin]** | Register custom model hashes & mode IDs dynamically at runtime |
+| `POST` | `/v1/models/discover` | **[Admin]** | Autonomously probe Google backend for newly rolled out models |
+| `GET` | `/v1/workers` | API | Real-time worker pool metrics, active account tiers & throughput |
+| `GET` | `/api/pool` | API | Alias of `/v1/workers` |
+| `POST` | `/api/sync-cookies` | **[Admin]** | Direct HTTP cookie sync fallback for the Chrome extension |
+| `GET` | `/metrics` | API | Prometheus metrics (workers, cookies, HTTP, tokens, classifier counters). Loopback-only unauthenticated scrape when `PUBLIC_METRICS=true` |
+| `POST` | `/chat` | API | Unified multimodal chat (text, images, MP4 screen recordings, reference videos) |
+| `POST` | `/music` | API | AI music generation via Gemini Lyria |
+| `POST` | `/reset` | API | Reset an active agent/user session |
+| `GET` | `/status` | API | Active session status, initialization flag & upstream conversation ID |
+| `GET` | `/history` | API | Query conversation history (`?conversation_id=…&limit=…`) |
+| `GET` | `/history/search` | API | Full-text search across stored conversations (`?q=…&limit=…`) |
+| `DELETE` | `/history/:conversation_id` | API | GDPR art. 17 deletion. Authenticated, idempotent, audited (`audit action=gdpr_delete`) |
+| `GET` | `/media` | API | 50 most recent media generations (type, prompt, file, URL) |
+| `GET` | `/stats` | API | SQLite token accounting, messages count & financial ROI savings |
+| `GET` | `/v1/analytics` | API | Machine-readable JSON analytics report (5 req/min) |
+| `GET` | `/export/json` | API | JSON analytics export (5 req/min) |
+| `GET` | `/export/excel` | API | Download comprehensive multi-sheet Excel report (`.xlsx`, 5 req/min) |
+| `GET` | `/output/*` | API | Generated media files, confined to `./output` by `safeOutputPath` |
+| `GET` | `/health` | **Public** | Live cookie health, TTL inspector & extension status |
+| `GET` | `/help` | API | Terminal developer CLI manual (`?format=json` for JSON) |
+| `GET` | `/` | API | Same CLI manual. Public when `PUBLIC_HELP=true` |
+
+### Standard parameters & headers
+
+| Name | Type | Effect |
 |---|---|---|
-| `POST` | `/v1/chat/completions` | OpenAI-compatible chat & streaming completions (Models: `hydrogen`, `neon-high`, `auto`, etc.) |
-| `GET` | `/v1/models` | List all dynamic models, aliases, tiers, and thinking levels |
-| `POST` | `/v1/models` | Register custom model hashes & mode IDs dynamically at runtime |
-| `POST` | `/v1/models/discover` | Autonomously probe Google backend for newly rolled out models |
-| `GET` | `/v1/workers` | Real-time worker pool metrics, active account tiers & throughput |
-| `GET` | `/stats` | SQLite token accounting, messages count & financial ROI savings |
-| `GET` | `/export/excel` | Download comprehensive multi-sheet Excel report (`.xlsx`) |
-| `GET` | `/v1/analytics` | Machine-readable JSON analytics report |
-| `GET` | `/health` | Live cookie health, TTL inspector & extension status |
-| `GET` | `/help` | Terminal developer CLI manual |
+| `reasoning_effort` | body field | Maps an OpenAI reasoning level onto a thinking variant by **name**, without mutating shared model config. Explicit aliases (`neon-high`, …) take precedence. |
+| `X-Gemini-Mode: task` | header | Requests Task Mode `[40]` instead of Chat `[0]`. |
+| `X-Allow-Task-Mode-For-Tools: true` | header | Keeps Task Mode `[40]` on tool-bearing requests. Default is to requalify to Chat `[0]`. Server-wide equivalent: `ALLOW_TASK_MODE_FOR_TOOLS=true`. |
+| `X-Agent-ID: <id>` | header | Sticky affinity binding: keeps an agent thread on the same account. |
+| `X-Session-ID: <id>` | header | Custom session identifier. |
+| `X-Conversation-ID: <id>` | header | Gemini server-side thread continuation. |
+
+### Antigravity Hub aliases
+
+Upstream `gemini-4-<family>-<tier>` identifiers are registered as aliases of the
+canonical `gemini-4-<family>-thinking-<tier>` models:
+
+| Upstream ID | Canonical ID | `ThinkingLevel` |
+|---|---|---|
+| `gemini-4-argon-high` | `gemini-4-argon-thinking-high` | 2 |
+| `gemini-4-argon-medium` | `gemini-4-argon-thinking-medium` | 4 |
+| `gemini-4-argon-low` | `gemini-4-argon-thinking-low` | 1 |
+| `gemini-4-neon-high` | `gemini-4-neon-thinking-high` | 2 |
+| `gemini-4-neon-medium` | `gemini-4-neon-thinking-medium` | 4 |
+| `gemini-4-neon-low` | `gemini-4-neon-thinking-low` | 1 |
+| `gemini-4-hydrogen-high` | `gemini-4-hydrogen-thinking-high` | 2 |
+| `gemini-4-hydrogen-medium` | `gemini-4-hydrogen-thinking-medium` | 4 |
+| `gemini-4-hydrogen-low` | `gemini-4-hydrogen-thinking-low` | 1 |
 
 ---
 
@@ -317,9 +391,32 @@ Add the provider configuration in `~/.config/opencode/opencode.json`:
 
 ## 🔒 Security & Privacy
 
-- **Zero Hardcoded Secrets**: Credentials and cookies are stored strictly in local memory and local files; nothing is sent to external third parties.
-- **Local Network Isolation**: All WebSocket discovery and cookie sync happen strictly over localhost or your local private LAN.
-- **Safe Version Control**: Pre-configured `.gitignore` prevents private Google session tokens and cookies from ever being committed to git.
+- **Mandatory authentication**: every route except `GET /health` requires
+  `Authorization: Bearer $API_TOKEN`. An empty `API_TOKEN` returns `401`
+  everywhere instead of silently opening the API. A separate `ADMIN_TOKEN`
+  gates the three administrative mutations.
+- **AES-256-GCM at rest**: setting `COOKIE_ENCRYPTION_KEY` encrypts
+  `cookies/account_*.json` and session caches before their atomic write.
+  `REQUIRE_COOKIE_ENCRYPTION=true` refuses to start without a key.
+- **Per-subdomain cookie scoping**: the RFC 6265 jar registers each cookie
+  against the single host that owns it. Host-only cookies never reach a sibling
+  Google subdomain. See
+  [`docs/architecture/cookie_scoping_rfc6265.md`](docs/architecture/cookie_scoping_rfc6265.md).
+- **Zero hardcoded secrets**: credentials and cookies live strictly in local
+  memory and local `0600` files; nothing is sent to third parties other than
+  Google for inference.
+- **Local network isolation**: WebSocket discovery and cookie sync happen
+  strictly over loopback or your local private LAN. The extension no longer
+  scans the LAN.
+- **Safe version control**: `.gitignore` prevents Google session tokens, cookie
+  jars, SQLite databases and generated media from being committed.
+
+**Audit posture (2026-11-22):** maturity score **74.25/100**, GO for local
+mono-user deployment, NO-GO maintained for public or multi-tenant exposure. See
+[`audit-2026-11/RAPPORT_POST_AUDIT.md`](audit-2026-11/RAPPORT_POST_AUDIT.md),
+[`free-gemini-api/SECURITY.md`](free-gemini-api/SECURITY.md),
+[`free-gemini-api/THREAT_MODEL.md`](free-gemini-api/THREAT_MODEL.md) and
+[`free-gemini-api/PRIVACY.md`](free-gemini-api/PRIVACY.md).
 
 ---
 

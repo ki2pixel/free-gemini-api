@@ -25,14 +25,54 @@ A lightweight, automated Chrome Extension (Manifest V3) that automatically syncs
    cookies to the local API server in real time.
 
 > [!NOTE]
-> The popup stores a single token used for both WebSocket sync and the HTTP
-> fallback. Leave `ADMIN_TOKEN`/`WS_TOKEN` empty (recommended) or set them to the
-> same value as `API_TOKEN`.
+> The popup stores a **single token** used for both WebSocket sync and the HTTP
+> fallback. The recommended configuration leaves `ADMIN_TOKEN` and `WS_TOKEN`
+> empty on the server, so both fall back to `API_TOKEN`:
+>
+> | Server variable | Empty value falls back to | Used by |
+> |---|---|---|
+> | `API_TOKEN` | — (mandatory) | every HTTP route, including `POST /api/sync-cookies` |
+> | `WS_TOKEN` | `API_TOKEN` | WebSocket bridge handshake (`?token=…`) |
+> | `ADMIN_TOKEN` | `API_TOKEN` | `POST /v1/models`, `POST /v1/models/discover`, `POST /api/sync-cookies` |
+>
+> If you set `WS_TOKEN` or `ADMIN_TOKEN` to a distinct value, the extension's
+> single token can only satisfy one of them. Either keep them empty or align
+> them with `API_TOKEN`.
 
 > [!IMPORTANT]
 > The extension no longer scans the LAN or hardcodes server IPs. Non-loopback
 > servers must use HTTPS/WSS, and raw cookies can no longer be copied to the
 > clipboard.
+
+---
+
+## 🍪 Cookie scoping and subdomain isolation
+
+Chrome exports carry the **same cookie names** (`OSID`, `__Secure-OSID`,
+`COMPASS`) for `gemini.google.com`, `myaccount.google.com` and
+`console.cloud.google.com`, with **different values**. The server does not
+concatenate them blindly:
+
+- it uses an **RFC 6265 jar** backed by the public suffix list;
+- each cookie is registered against the **single host that owns it**;
+- a **host-only** cookie is stored without a `Domain` attribute, so it never
+  reaches a sibling Google host;
+- the `Cookie` header is resolved **live from the jar** on every request, so
+  rotated tokens (`__Secure-1PSIDTS`, `__Secure-3PSIDTS`) are sent immediately.
+
+Consequence: the subscription path (Neon and thinking tiers) keeps the
+Gemini-scoped `OSID` / `__Secure-OSID` / `COMPASS` set instead of a
+`console.cloud.google.com` value that would cause a `401`.
+
+Full specification and regression tests:
+[`../docs/architecture/cookie_scoping_rfc6265.md`](../docs/architecture/cookie_scoping_rfc6265.md).
+
+> [!TIP]
+> The HTTP fallback `POST /api/sync-cookies` accepts an optional `profile_id`.
+> Sending it names the file `account_profile_<N>.json` instead of deriving the
+> name from a rotating cookie hash, which otherwise mints a duplicate worker for
+> the same Google account on nearly every refresh. The Chrome extension does not
+> send it and keeps the hash-based naming.
 
 ---
 

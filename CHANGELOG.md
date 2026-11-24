@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.5.7] - 2026-11-24
 
-> Release de clôture du benchmark « en vol » v3.5.7. Les trois vagues P0, P1 et P2 sont intégrées dans cette version ; le rapport officiel est [`docs/remediation_agentic_gemini4_v3.5.7.md`](docs/remediation_agentic_gemini4_v3.5.7.md).
+> Release de clôture du benchmark « en vol » v3.5.7. Les trois vagues P0, P1 et P2 sont intégrées dans cette version ; le rapport officiel est [`docs/remediation/remediation_agentic_gemini4_v3.5.7.md`](docs/remediation/remediation_agentic_gemini4_v3.5.7.md).
 
 ### Added
 - **Wave P0 — In-flight reliability hardening (`api/session_transcripts.go`, `api/chat_handler.go`)**:

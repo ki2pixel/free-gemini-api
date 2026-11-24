@@ -1,9 +1,9 @@
 # Remédiation agentique Gemini 4 — v3.5.7
 
-**Date :** 2026-11-24  
-**Contexte :** clôture du benchmark comportemental « en vol » v3.5.7 et livraison des trois vagues de remédiation arbitrées : P0 (fiabilité immédiate), P1 (mesure et routage) et P2 (cosmétique et durcissement).  
-**Document de référence :** [`docs/recherches/Arbitrage-benchmark-in-flight-v3.5.7-et-remediations.md`](recherches/Arbitrage-benchmark-in-flight-v3.5.7-et-remediations.md)  
-**Commits amont :** P0 `e5d3629`, P1 `4bf3f6f`. La vague P2 est livrée dans le présent commit.  
+**Date :** 2026-11-24
+**Contexte :** clôture du benchmark comportemental « en vol » v3.5.7 et livraison des trois vagues de remédiation arbitrées : P0 (fiabilité immédiate), P1 (mesure et routage) et P2 (cosmétique et durcissement).
+**Document de référence :** [`docs/recherches/Arbitrage-benchmark-in-flight-v3.5.7-et-remediations.md`](../recherches/Arbitrage-benchmark-in-flight-v3.5.7-et-remediations.md)
+**Commits amont :** P0 `e5d3629`, P1 `4bf3f6f`. La vague P2 est livrée dans le présent commit.
 **Périmètre :** serveur Go `free-gemini-api/`, tests de propriété et de fuzzing, documentation de release.
 
 ---

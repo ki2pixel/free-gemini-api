@@ -1,6 +1,6 @@
 # Remédiation agentique Gemini 4 — v3.5.0
 
-**Date :** 2026-11-23  
+**Date :** 2026-11-23
 **Contexte :** gel de 14 minutes de `gemini-4-hydrogen` au tour 21, faux refus de sécurité de `gemini-4-hydrogen-task`, et rapport de complétion prématuré de `gemini-4-neon`, observés pendant la campagne d'alignement documentaire v3.4.9.
 
 ---

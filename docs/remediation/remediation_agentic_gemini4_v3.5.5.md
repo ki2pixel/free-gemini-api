@@ -1,6 +1,6 @@
 # Remédiation agentique Gemini 4 — v3.5.5
 
-**Date :** 2026-11-23  
+**Date :** 2026-11-23
 **Contexte :** huitième passe de durcissement après le challenge d'alignement documentaire v3.5.4. Les transcripts des modèles `gemini-4-hydrogen`, `gemini-4-hydrogen-task` et `gemini-4-neon` sont archivés dans `debug/7_*.json`. Le commit de référence est `4fe0135` (v3.5.4).
 
 ---

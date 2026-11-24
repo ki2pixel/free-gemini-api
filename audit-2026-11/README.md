@@ -53,7 +53,8 @@ Le runner local autonome conteneurisé sous Docker permet de rejouer l'ensemble 
 ```
 
 Pour rejouer l'environnement d'audit initial et les PoC :
-./prepare_audit_env.sh /home/kidpixel/free-gemini-api-main
+```bash
+./audit-2026-11/poc/prepare_audit_env.sh /home/kidpixel/free-gemini-api-main
 # puis suivre CAHIER_POC.md
 ```
 
