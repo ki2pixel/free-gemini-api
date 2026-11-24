@@ -127,6 +127,49 @@ func TestCookieJarScopesByRequestHost(t *testing.T) {
 	}
 }
 
+func TestCookieJar_HostOnlyVsDomainAttribute(t *testing.T) {
+	client, err := NewClient(writeCookieFileForTest(t, []CookieObject{
+		{Domain: "gemini.google.com", HostOnly: true, Name: "__Secure-OSID", Value: "gemini-host-only", Path: "/", Secure: true},
+		{Domain: ".google.com", Name: "SID", Value: "google-domain", Path: "/", Secure: true},
+	}))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	jar := client.client.GetCookieJar()
+	requestCookies := func(rawURL string) map[string]string {
+		t.Helper()
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			t.Fatalf("parse %s: %v", rawURL, err)
+		}
+		values := make(map[string]string)
+		for _, c := range jar.Cookies(u) {
+			values[c.Name] = c.Value
+		}
+		return values
+	}
+
+	gemini := requestCookies("https://gemini.google.com/app")
+	if gemini["__Secure-OSID"] != "gemini-host-only" {
+		t.Errorf("gemini __Secure-OSID = %q, want gemini-host-only", gemini["__Secure-OSID"])
+	}
+	if gemini["SID"] != "google-domain" {
+		t.Errorf("gemini SID = %q, want google-domain", gemini["SID"])
+	}
+
+	for _, target := range []string{"https://mail.google.com/", "https://sub.gemini.google.com/"} {
+		got := requestCookies(target)
+		if value, ok := got["__Secure-OSID"]; ok {
+			t.Errorf("%s received host-only __Secure-OSID = %q", target, value)
+		}
+		if got["SID"] != "google-domain" {
+			t.Errorf("%s SID = %q, want google-domain", target, got["SID"])
+		}
+	}
+}
+
 func TestScopedCookieHonorsHostOnly(t *testing.T) {
 	origin, cookie, ok := scopedCookie(CookieObject{
 		Domain: "gemini.google.com", HostOnly: true, Name: "OSID", Value: "v", Secure: true,

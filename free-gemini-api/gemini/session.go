@@ -65,6 +65,7 @@ func (c *GeminiClient) loadCookies() error {
 		for _, ck := range cookieList {
 			origin, cookie, ok := scopedCookie(ck)
 			if !ok {
+				log.Printf("⚠️ [GeminiClient] Skipping invalid cookie %q (domain %q)", ck.Name, ck.Domain)
 				continue
 			}
 			jar.SetCookies(origin, []*http.Cookie{cookie})

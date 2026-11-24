@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Chrome exports carry the same cookie names on several Google hosts. `cookies/account_ga000FAlQD.json`, for example, holds `OSID` / `__Secure-OSID` for `gemini.google.com`, `myaccount.google.com` **and** `console.cloud.google.com`, plus a `COMPASS` for `gemini.google.com` and `console.cloud.google.com`.
   - `loadCookies` registered every entry twice: once against its own domain and once against `https://gemini.google.com`. Cookies from `console.cloud.google.com` and `myaccount.google.com` were therefore injected into the Gemini identity.
   - `tls_client.NewCookieJar()` compounded this: it buckets cookies by eTLD+1 (a single `google.com` bucket for every Google host) and de-duplicates by cookie **name** alone, ignoring domain and path. The last subdomain in the export silently replaced the Gemini value.
-  - `NewClient` now uses the RFC 6265 `cookiejar` with the public suffix list, and `loadCookies` registers each cookie against the single host that owns it. Host-only cookies are stored without a `Domain` attribute, so they never reach a sibling host. `rawCookies` is rendered from the jar for `gemini.google.com`, which keeps the observed `OSID` and `COMPASS` from the Gemini host.
+  - `NewClient` now uses the RFC 6265 `cookiejar` with the public suffix list, and `loadCookies` registers each cookie against the single host that owns it. Host-only cookies are stored without a `Domain` attribute, so they never reach a sibling host. `rawCookies` is rendered from the jar for `gemini.google.com`, which keeps the observed `OSID` and `COMPASS` from the Gemini host. Corrupted or invalid cookie entries are safely skipped with an explicit warning log.
   - Consequence: guest/free models (hydrogen) kept working because `.google.com` cookies alone authenticate them, while the subscription path (neon, neon-thinking-high) failed with 401 because it needs the Gemini-scoped `OSID` / `__Secure-OSID` / `COMPASS` set.
 - **Live `Cookie` header for HTTP/3 and media downloads (`gemini/transport.go`, `gemini/media.go`)**:
   - The QUIC paths set `Cookie` from the `rawCookies` snapshot taken at load time, so cookies rotated by an `/app` response (`__Secure-1PSIDTS`, `__Secure-3PSIDTS`) were never sent afterwards. They now read `cookieHeader()` from the jar.
@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `gemini/session_cookie_scope_test.go`:
   - `TestLoadCookiesKeepsSubdomainCookiesScoped` replays the real export: the Gemini `OSID` / `__Secure-OSID` / `COMPASS` values must win and no `myaccount` or `console` value may appear.
   - `TestCookieJarScopesByRequestHost` asserts the jar returns `gemini-osid` for the Gemini origin, `console-osid` for the console origin, and never leaks a host-only cookie.
+  - `TestCookieJar_HostOnlyVsDomainAttribute` verifies strict separation between host-only cookies (without domain attribute) and domain-scoped cookies across sibling hosts and parent domains.
   - `TestScopedCookieHonorsHostOnly` and `TestLegacyCookieStringStillLoads` cover host-only handling and the legacy string format.
 
 ---
