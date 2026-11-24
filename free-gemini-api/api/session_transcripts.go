@@ -454,7 +454,13 @@ type sessionLedger struct {
 	mu                 sync.Mutex
 	mutationsConfirmed map[string]struct{}
 	pendingMutations   map[string][]string
-	order              []string
+	// validationsConfirmed records successful shell commands that actually
+	// validated the workspace (tests, vet, formatting, build). A completion
+	// report claiming that tests/build passed must be backed by one of them.
+	validationsConfirmed map[string]struct{}
+	pendingValidations   map[string]string
+	mutationOrder        []string
+	validationOrder      []string
 }
 
 var (
@@ -478,8 +484,10 @@ func getOrCreateSessionLedger(sessionKey string) *sessionLedger {
 		}
 	}
 	ledger := &sessionLedger{
-		mutationsConfirmed: make(map[string]struct{}),
-		pendingMutations:   make(map[string][]string),
+		mutationsConfirmed:   make(map[string]struct{}),
+		pendingMutations:     make(map[string][]string),
+		validationsConfirmed: make(map[string]struct{}),
+		pendingValidations:   make(map[string]string),
 	}
 	sessionLedgers[sessionKey] = ledger
 	return ledger
@@ -492,7 +500,8 @@ func recordSessionToolCallPaths(sessionKey, callID, toolName, argsJSON string) {
 		return
 	}
 	paths := mutationPathsForToolCall(toolName, argsJSON)
-	if len(paths) == 0 {
+	validation := validationCommandForToolCall(toolName, argsJSON)
+	if len(paths) == 0 && validation == "" {
 		return
 	}
 	if len(paths) > maxSessionLedgerPaths {
@@ -504,13 +513,24 @@ func recordSessionToolCallPaths(sessionKey, callID, toolName, argsJSON string) {
 	}
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
-	if len(ledger.pendingMutations) >= maxSessionLedgerPaths {
-		for id := range ledger.pendingMutations {
-			delete(ledger.pendingMutations, id)
-			break
+	if len(paths) > 0 {
+		if len(ledger.pendingMutations) >= maxSessionLedgerPaths {
+			for id := range ledger.pendingMutations {
+				delete(ledger.pendingMutations, id)
+				break
+			}
 		}
+		ledger.pendingMutations[callID] = paths
 	}
-	ledger.pendingMutations[callID] = paths
+	if validation != "" {
+		if len(ledger.pendingValidations) >= maxSessionLedgerPaths {
+			for id := range ledger.pendingValidations {
+				delete(ledger.pendingValidations, id)
+				break
+			}
+		}
+		ledger.pendingValidations[callID] = validation
+	}
 }
 
 // recordSessionToolResultOutcome promotes the pending paths of a tool call to
@@ -528,11 +548,16 @@ func recordSessionToolResultOutcome(sessionKey, toolCallID, resultText string, i
 	defer ledger.mu.Unlock()
 	paths := ledger.pendingMutations[toolCallID]
 	delete(ledger.pendingMutations, toolCallID)
+	validation := ledger.pendingValidations[toolCallID]
+	delete(ledger.pendingValidations, toolCallID)
 	if isError || toolResultIndicatesError(resultText) {
 		return
 	}
 	for _, p := range paths {
 		ledger.addMutationLocked(p)
+	}
+	if validation != "" {
+		ledger.addValidationLocked(validation)
 	}
 }
 
@@ -545,9 +570,9 @@ func (l *sessionLedger) addMutationLocked(p string) {
 		return
 	}
 	if len(l.mutationsConfirmed) >= maxSessionLedgerPaths {
-		for len(l.order) > 0 {
-			oldest := l.order[0]
-			l.order = l.order[1:]
+		for len(l.mutationOrder) > 0 {
+			oldest := l.mutationOrder[0]
+			l.mutationOrder = l.mutationOrder[1:]
 			if _, ok := l.mutationsConfirmed[oldest]; ok {
 				delete(l.mutationsConfirmed, oldest)
 				break
@@ -555,7 +580,29 @@ func (l *sessionLedger) addMutationLocked(p string) {
 		}
 	}
 	l.mutationsConfirmed[p] = struct{}{}
-	l.order = append(l.order, p)
+	l.mutationOrder = append(l.mutationOrder, p)
+}
+
+func (l *sessionLedger) addValidationLocked(command string) {
+	command = normalizeValidationCommand(command)
+	if command == "" {
+		return
+	}
+	if _, ok := l.validationsConfirmed[command]; ok {
+		return
+	}
+	if len(l.validationsConfirmed) >= maxSessionLedgerPaths {
+		for len(l.validationOrder) > 0 {
+			oldest := l.validationOrder[0]
+			l.validationOrder = l.validationOrder[1:]
+			if _, ok := l.validationsConfirmed[oldest]; ok {
+				delete(l.validationsConfirmed, oldest)
+				break
+			}
+		}
+	}
+	l.validationsConfirmed[command] = struct{}{}
+	l.validationOrder = append(l.validationOrder, command)
 }
 
 // recordSessionLedgerFromMessages replays the request transcript into the
@@ -600,6 +647,72 @@ func toolResultIndicatesError(resultText string) bool {
 	return strings.HasPrefix(lower, "error:") ||
 		strings.HasPrefix(lower, "error ") ||
 		strings.HasPrefix(lower, "failed:")
+}
+
+// validationCommandForToolCall returns the successful validation command a
+// shell call represents, or "" when the call does not validate the workspace.
+// The command is recorded as pending until the matching tool result proves it
+// completed without an error.
+func validationCommandForToolCall(toolName, argsJSON string) string {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	switch name {
+	case "shell", "bash", "exec", "run", "terminal":
+	default:
+		return ""
+	}
+	var args map[string]any
+	if strings.TrimSpace(argsJSON) != "" {
+		_ = json.Unmarshal([]byte(argsJSON), &args)
+	}
+	for _, key := range []string{"command", "cmd"} {
+		command, ok := args[key].(string)
+		if !ok || !isValidationShellCommand(command) {
+			continue
+		}
+		return strings.TrimSpace(command)
+	}
+	return ""
+}
+
+// isValidationShellCommand reports whether a shell command actually validates
+// the repository. These are the deterministic evidence commands behind a
+// "tests passed" or "build succeeded" completion claim.
+func isValidationShellCommand(command string) bool {
+	lower := strings.ToLower(command)
+	for _, marker := range []string{
+		"go test",
+		"go vet",
+		"gofmt",
+		"go build",
+		"audit_check.sh",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeValidationCommand(command string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(command))), " ")
+}
+
+// sessionHasSuccessfulValidation reports whether the session ledger holds at
+// least one confirmed validation command. A failed or absent command can never
+// back a "tests passed" completion claim.
+func sessionHasSuccessfulValidation(sessionKey string) bool {
+	if sessionKey == "" {
+		return false
+	}
+	sessionLedgerMu.Lock()
+	ledger := sessionLedgers[sessionKey]
+	sessionLedgerMu.Unlock()
+	if ledger == nil {
+		return false
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	return len(ledger.validationsConfirmed) > 0
 }
 
 // mutationPathsForToolCall extracts the normalized paths a call can mutate.
@@ -721,6 +834,10 @@ func normalizeSessionPath(p string) string {
 	p = strings.Trim(p, "`'\"")
 	p = strings.TrimPrefix(p, "file://")
 	p = strings.ReplaceAll(p, "\\", "/")
+	// Claim reports frequently end a cited path with sentence punctuation
+	// ("`docs/README.md.`"). The file itself does not contain that punctuation,
+	// so strip it before comparing with the confirmed mutation set.
+	p = strings.TrimRight(p, ".,;:!?")
 	if p == "" || p == "." {
 		return ""
 	}
@@ -752,6 +869,19 @@ var completionClaimSnippets = []string{
 	"all files have been updated",
 	"the plan has been fully executed",
 	"everything is in place",
+	// Bilingual completion forms added with the Wave P2 lexicon extension.
+	"tous les objectifs ont été atteints",
+	"l'ensemble des étapes a été exécuté",
+	"l'ensemble des étapes a été exécutée",
+	"les vérifications ont confirmé",
+	"les modifications ci-dessus ont été appliquées",
+	"les fichiers ont été créés et organisés",
+	"l'opération est terminée avec succès",
+	"the implementation is complete",
+	"all planned steps have been executed",
+	"all files have been successfully created",
+	"the tasks have been completed as requested",
+	"here is the summary of the completed work",
 	// Earlier completion forms already covered by pseudoReportSnippets.
 	"a été réalisée et vérifiée",
 	"a été effectuée avec succès",
@@ -769,6 +899,42 @@ var completionClaimSnippets = []string{
 var completionClaimPairs = [][2]string{
 	{"tous les fichiers", "ont été"},
 	{"l'ensemble des", "a été"},
+}
+
+// validationClaimSnippets are completion claims about test, lint, build or
+// audit execution. They require a successful validation command in the session
+// ledger: a prose report alone is never evidence that a command ran.
+var validationClaimSnippets = []string{
+	"les tests sont passés",
+	"les tests ont réussi",
+	"tests unitaires validés",
+	"tests unitaires réussis",
+	"tests validés avec succès",
+	"tous les tests sont passés",
+	"tous les tests passent",
+	"la suite de tests a réussi",
+	"audit_check.sh a validé",
+	"audit_check.sh a réussi",
+	"l'audit a réussi",
+	"compilation réussie",
+	"la compilation a réussi",
+	"le build a réussi",
+	"build réussi",
+	"go test a réussi",
+	"go build a réussi",
+	"go vet a réussi",
+	"gofmt a validé",
+	"tests passed",
+	"all tests passed",
+	"all tests pass",
+	"tests are passing",
+	"build succeeded",
+	"the build succeeded",
+	"compilation succeeded",
+	"compilation is successful",
+	"the audit passed",
+	"validation passed",
+	"validations passed",
 }
 
 var (
@@ -800,6 +966,26 @@ func isCompletionClaim(text string) bool {
 	return false
 }
 
+// isValidationClaim reports whether text claims that tests, lint, build or the
+// project audit ran successfully. Such a claim is only acceptable when the
+// session ledger contains a matching successful shell command.
+func isValidationClaim(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasSuffix(trimmed, "?") || strings.HasSuffix(trimmed, "？") {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	for _, snippet := range validationClaimSnippets {
+		if strings.Contains(lower, snippet) {
+			return true
+		}
+	}
+	return false
+}
+
 // isUnbackedCompletion reports whether a tool-bearing turn claims completion
 // while citing a path that no successful tool result confirmed. A claim with
 // no cited path falls back to the observed completion lexicon. The classifier
@@ -814,7 +1000,18 @@ func isUnbackedCompletion(cleanText string, tools []map[string]any, sessionKey s
 		return false
 	}
 	text := arranged.CleanText
-	if !isCompletionClaim(text) {
+	claim := isCompletionClaim(text)
+	validationClaim := isValidationClaim(text)
+	if !claim && !validationClaim {
+		return false
+	}
+	// A test/build/audit success claim is only backed by a shell command that
+	// actually ran and returned without an error. A cited file mutation does
+	// not prove that the suite was executed.
+	if validationClaim && !sessionHasSuccessfulValidation(sessionKey) {
+		return true
+	}
+	if !claim {
 		return false
 	}
 	paths := extractClaimedPaths(text)
@@ -855,6 +1052,8 @@ func extractClaimedPaths(text string) []string {
 }
 
 func looksLikeClaimedPath(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimRight(raw, ".,;:!?")
 	if raw == "" || strings.ContainsAny(raw, " \t\r\n") || strings.Contains(raw, "://") {
 		return false
 	}
@@ -1152,6 +1351,19 @@ var pseudoReportSnippets = []string{
 	"all files have been updated",
 	"the plan has been fully executed",
 	"everything is in place",
+	// Wave P2 bilingual completion lexicon extension.
+	"tous les objectifs ont été atteints",
+	"l'ensemble des étapes a été exécuté",
+	"l'ensemble des étapes a été exécutée",
+	"les vérifications ont confirmé",
+	"les modifications ci-dessus ont été appliquées",
+	"les fichiers ont été créés et organisés",
+	"l'opération est terminée avec succès",
+	"the implementation is complete",
+	"all planned steps have been executed",
+	"all files have been successfully created",
+	"the tasks have been completed as requested",
+	"here is the summary of the completed work",
 }
 
 // isPseudoProgressReport reports whether a tool-bearing turn produced only a

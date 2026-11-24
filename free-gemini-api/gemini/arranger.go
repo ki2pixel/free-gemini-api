@@ -1905,12 +1905,120 @@ func sanitizeGeminiContent(text string) string {
 	// Clean upstream disclaimers / refusals
 	cleaned = upstreamDisclaimerRegex.ReplaceAllString(cleaned, "")
 	// A thought tag must never be visible to the host, even on an edge path
-	// where extraction did not see a matching opening tag.
-	cleaned = thoughtTagRegex.ReplaceAllString(cleaned, "")
+	// where extraction did not see a matching opening tag. Complete tag
+	// citations inside fenced code blocks are intentional documentation and
+	// are preserved by the sanitizer.
+	cleaned = sanitizeThoughtArtifacts(cleaned)
 	// Normalize excessive newlines
 	cleaned = multiNewlineRegex.ReplaceAllString(cleaned, "\n\n")
 	cleaned = strings.TrimSpace(cleaned)
 	return cleaned
+}
+
+// sanitizeThoughtArtifacts removes thought-tag residue from assistant-visible
+// text. The upstream stream occasionally emits an orphan "<thought" or
+// "<thinking" prefix without its closing '>' (the Argon v3.5.7 shape), or a
+// stray closing tag left behind after thought extraction. Those fragments are
+// never valid Markdown and must not reach the host.
+//
+// Intentional citations inside fenced code blocks are documentation and are
+// preserved verbatim. This function only ever runs on CleanText: the raw
+// ReasoningContent is an observability artefact and is never sanitized.
+func sanitizeThoughtArtifacts(text string) string {
+	if text == "" {
+		return text
+	}
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "<thought") && !strings.Contains(lower, "<thinking") &&
+		!strings.Contains(lower, "</thought") && !strings.Contains(lower, "</thinking") {
+		return text
+	}
+
+	var sb strings.Builder
+	sb.Grow(len(text))
+	inFence := false
+	for i := 0; i < len(text); {
+		// Markdown fences protect intentional tag citations. Toggle on the
+		// triple-backtick delimiter that opens or closes a fenced block.
+		if strings.HasPrefix(text[i:], "```") {
+			inFence = !inFence
+			sb.WriteString("```")
+			i += 3
+			continue
+		}
+		if inFence {
+			sb.WriteByte(text[i])
+			i++
+			continue
+		}
+
+		if strings.HasPrefix(lower[i:], "</thought") && thoughtTagBoundaryAt(lower, i+len("</thought")) {
+			if end, ok := thoughtTagEndAt(lower, i+len("</thought")); ok {
+				i = end
+			} else {
+				i += len("</thought")
+			}
+			continue
+		}
+		if strings.HasPrefix(lower[i:], "</thinking") && thoughtTagBoundaryAt(lower, i+len("</thinking")) {
+			if end, ok := thoughtTagEndAt(lower, i+len("</thinking")); ok {
+				i = end
+			} else {
+				i += len("</thinking")
+			}
+			continue
+		}
+		if strings.HasPrefix(lower[i:], "<thought") && thoughtTagBoundaryAt(lower, i+len("<thought")) {
+			if end, ok := thoughtTagEndAt(lower, i+len("<thought")); ok {
+				i = end
+			} else {
+				i += len("<thought")
+			}
+			continue
+		}
+		if strings.HasPrefix(lower[i:], "<thinking") && thoughtTagBoundaryAt(lower, i+len("<thinking")) {
+			if end, ok := thoughtTagEndAt(lower, i+len("<thinking")); ok {
+				i = end
+			} else {
+				i += len("<thinking")
+			}
+			continue
+		}
+
+		sb.WriteByte(text[i])
+		i++
+	}
+	return sb.String()
+}
+
+// thoughtTagBoundaryAt reports whether the position after a thought tag name
+// is a real tag boundary. A longer HTML-like word such as "<thoughtful>" must
+// never be mistaken for an orphan thought tag.
+func thoughtTagBoundaryAt(lower string, pos int) bool {
+	if pos >= len(lower) {
+		return true
+	}
+	c := lower[pos]
+	if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+		return false
+	}
+	return true
+}
+
+// thoughtTagEndAt returns the offset just past a complete opening/closing tag
+// (optionally with whitespace before its '>') starting after the tag name.
+// It returns ok=false for a malformed prefix that has no closing '>'.
+func thoughtTagEndAt(lower string, pos int) (int, bool) {
+	for pos < len(lower) && (lower[pos] == ' ' || lower[pos] == '\t' || lower[pos] == '\r' || lower[pos] == '\n') {
+		pos++
+	}
+	if pos < len(lower) && lower[pos] == '>' {
+		return pos + 1, true
+	}
+	if pos+1 < len(lower) && lower[pos] == '/' && lower[pos+1] == '>' {
+		return pos + 2, true
+	}
+	return 0, false
 }
 
 // earliestThoughtTag returns the index and value of the earliest tag from tags
@@ -1929,6 +2037,31 @@ func earliestThoughtTag(s string, tags []string) (int, string) {
 		}
 	}
 	return bestIdx, bestTag
+}
+
+// earliestThoughtTagOutsideFence is the entry-point scanner used before a
+// thought block is opened. A complete tag citation inside a Markdown code fence
+// is documentation, not a reasoning block, so it must not start extraction.
+// Once a thought is open, the regular tag scanner keeps its historical depth
+// semantics for nested tags.
+func earliestThoughtTagOutsideFence(s string, tags []string) (int, string) {
+	inFence := false
+	for i := 0; i < len(s); i++ {
+		if strings.HasPrefix(s[i:], "```") {
+			inFence = !inFence
+			i += 2
+			continue
+		}
+		if inFence {
+			continue
+		}
+		for _, tag := range tags {
+			if strings.HasPrefix(s[i:], tag) {
+				return i, tag
+			}
+		}
+	}
+	return -1, ""
 }
 
 // trimPartialThoughtClose removes a trailing partial closing tag (for example
@@ -1965,14 +2098,14 @@ func trimPartialThoughtClose(s string) string {
 // cleanedContent never contains a thought tag or text from an unclosed thought.
 func extractThoughtsAndContent(raw string) (cleanedContent string, reasoningContent string) {
 	if !strings.Contains(raw, "<thought>") && !strings.Contains(raw, "<thinking>") {
-		return thoughtTagRegex.ReplaceAllString(raw, ""), ""
+		return sanitizeThoughtArtifacts(raw), ""
 	}
 
 	var cleaned strings.Builder
 	var thoughts []string
 	remaining := raw
 	for {
-		start, openTag := earliestThoughtTag(remaining, thoughtOpenTags)
+		start, openTag := earliestThoughtTagOutsideFence(remaining, thoughtOpenTags)
 		if start == -1 {
 			cleaned.WriteString(remaining)
 			break
@@ -2040,8 +2173,9 @@ func extractThoughtsAndContent(raw string) (cleanedContent string, reasoningCont
 		remaining = remaining[pos:]
 	}
 
-	// Belt-and-braces: a stray tag must never reach the host as visible text.
-	cleanedContent = thoughtTagRegex.ReplaceAllString(cleaned.String(), "")
+	// Belt-and-braces: a stray tag must never reach the host as visible text,
+	// except for intentional citations inside fenced code blocks.
+	cleanedContent = sanitizeThoughtArtifacts(cleaned.String())
 	return cleanedContent, strings.Join(thoughts, "\n\n")
 }
 

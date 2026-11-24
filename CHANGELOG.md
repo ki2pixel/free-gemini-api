@@ -7,28 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [3.5.7] - 2026-11-24
+
+> Release de clôture du benchmark « en vol » v3.5.7. Les trois vagues P0, P1 et P2 sont intégrées dans cette version ; le rapport officiel est [`docs/remediation_agentic_gemini4_v3.5.7.md`](docs/remediation_agentic_gemini4_v3.5.7.md).
 
 ### Added
-- **Wave P1 observability (`api/metrics.go`, `api/chat_handler.go`)**:
-  - `gemini_turn_classification_total{class="tool_call|greeting|incomplete|refusal|pseudo_report|unbacked_completion|untagged_mutation|schema_invalid|ok"}` distinguishes why a tool-bearing turn was retried, blocked, or accepted.
+- **Wave P0 — In-flight reliability hardening (`api/session_transcripts.go`, `api/chat_handler.go`)**:
+  - Session continuity now requires the exact `lastWorkerID`, `lastConvID` and transcript prefix before a delta is sent. Any mismatch replays the full transcript on a fresh upstream conversation (`worker_mismatch`, `conv_mismatch`, `prefix_mismatch`, `identical`, `forced`).
+  - Tool-only deltas are prefixed with an ephemeral `[Continuation]` anchor that is never stored in `lastFlat`. It restates the current plan and forbids greetings, restarts and premature final summaries.
+  - `isConversationalReset` classifies tool-bearing greetings and generic help offers as unusable, forcing a retry instead of a false `stop`.
+  - Untagged tool JSON is quarantined: only a complete, schema-valid, read-only call may be promoted; mutating or truncated payloads are stripped from `CleanText`, flagged `UntaggedMutation` and retried.
+  - `isIncompleteFinalProse` intercepts short unpunctuated visible fragments left by an aborted upstream stream. After retries, the terminal chunk carries `finish_reason: "error"` via `newStreamErrorChunk`.
+  - The `sessionLedger` records confirmed mutations and failed results to detect unbacked S7 completion claims.
+- **Wave P1 — Measurement and routing**:
+  - `gemini_turn_classification_total{class="tool_call|greeting|incomplete|refusal|pseudo_report|unbacked_completion|untagged_mutation|schema_invalid|ok"}` distinguishes why a tool-bearing turn was retried, blocked or accepted.
   - `gemini_delta_replay_total{reason="new|conv_mismatch|worker_mismatch|prefix_mismatch|identical|forced"}` measures the cost of full replays.
   - `gemini_quarantine_total{kind="untagged_mutation|schema_invalid|truncated"}` and `gemini_upstream_suspected_stop_total{model=...}` expose quarantined payloads and interrupted-generation shapes.
-  - One content-free `📊 [TURN SUMMARY]` line per request now logs hashed session/conversation ids, prompt and delta lengths, replay reason, visible length, tool count, classification and finish reason. Prompt bodies and tool arguments are never logged.
+  - One content-free `📊 [TURN SUMMARY]` line per request logs hashed session/conversation ids, prompt and delta lengths, replay reason, visible length, tool count, classification and finish reason. Prompt bodies and tool arguments are never logged.
+- **Wave P2 — Thought sanitizer and bilingual S7 evidence**:
+  - `sanitizeThoughtArtifacts` removes orphan `<thought` / `<thinking` prefixes and stray closing tags from `CleanText` only, preserves complete tag citations inside fenced code blocks, and never alters `ReasoningContent`.
+  - `pseudoReportSnippets` and `completionClaimSnippets` now cover the bilingual forms `tous les objectifs ont été atteints`, `l'ensemble des étapes a été exécuté(e)`, `les vérifications ont confirmé`, `les modifications ci-dessus ont été appliquées`, `les fichiers ont été créés et organisés`, `l'opération est terminée avec succès`, `the implementation is complete`, `all planned steps have been executed`, `all files have been successfully created`, `the tasks have been completed as requested` and `here is the summary of the completed work`.
+  - The `sessionLedger` now records successful validation commands (`go test`, `go vet`, `go build`, `gofmt`, `audit_check.sh`). A test/build/audit success claim without such evidence is classified as `unbacked_completion`.
+  - Cited paths are normalized before ledger comparison, including sentence punctuation (`docs/README.md.` -> `docs/README.md`).
 - **Global LRU transcript budget (`api/session_transcripts.go`)**:
-  - `sessionTurnState` now tracks cumulative `lastFlat` bytes and evicts the least recently used session when the budget or the 256-session bound is reached.
+  - `sessionTurnState` tracks cumulative `lastFlat` bytes and evicts the least recently used session when the budget or the 256-session bound is reached.
   - `SESSION_MEMORY_BUDGET_MB` configures the budget (default 64 MiB). Eviction always degrades to a full replay, never to an orphan delta.
   - A transcript larger than the whole budget is not retained: the conversation pointer stays but the next turn replays in full.
 - **Benchmark matrix harness (`scripts/benchmark_matrix.sh`)**:
   - Replays the v3.5.7 plan for four models over `k` runs in fresh git worktrees snapshotted from the current working tree.
   - Detects tool calls, greetings, hallucinated quotas, S7 completion claims, short unpunctuated prose and terminal outcomes, then prints the pass^k table.
+- **Formal property and fuzzing suites**:
+  - `api/benchmark_v357_p2_test.go` formalizes the four invariants: mid-value mutation rejection, quarantine completeness, delta identity safety and monotonic retry termination.
+  - `gemini/fuzz_test.go` adds `FuzzQuarantineUntaggedToolJSON` and `FuzzSanitizeThoughtArtifacts` for adversarial JSON, nested/truncated payloads, 1 MiB contents, invalid UTF-8 and Markdown fences.
 
 ### Changed
 - **Task mode routing for tool-bearing requests (`api/chat_service.go`)**:
   - `*-task` aliases are requalified to the Chat model of the same family (`hydrogen-task` -> `hydrogen`, `neon-task` -> `neon`) whenever the request declares tools and no explicit opt-in is present. This preserves the external tool execution loop that the autonomous Task planner did not exercise in the v3.5.7 benchmark.
   - Opt-in is available per request with `X-Allow-Task-Mode-For-Tools: true` or server-wide with `ALLOW_TASK_MODE_FOR_TOOLS=true`. Tool-free requests keep their requested Task mode unchanged.
+- **Prompt hygiene (`gemini/arranger.go`)**:
+  - The `0 remaining`, `maximum number of tool` and `search calls` literals are removed from the system prompt and replay directives. They remain only in output classifiers and are never sent upstream.
+  - Rule 7 now states the positive contract: every tool in `[AVAILABLE TOOLS]` is active on every turn until all planned modifications and verifications are complete.
 
 ### Fixed
+- **Session continuity and premature stops (`api/session_transcripts.go`, `api/chat_handler.go`)**:
+  - A delta is never injected into a foreign conversation or after a worker change.
+  - A greeting, an empty/thought-only turn, a canned upstream error, a pseudo-report, an unbacked completion, a schema-invalid call or a mid-value truncated mutation is retried on a fresh conversation, then terminated with `finish_reason: "error"` instead of a successful `stop`.
 - **Per-subdomain cookie scoping (`gemini/session.go`, `gemini/client.go`)**:
   - Chrome exports carry the same cookie names on several Google hosts. `cookies/account_ga000FAlQD.json`, for example, holds `OSID` / `__Secure-OSID` for `gemini.google.com`, `myaccount.google.com` **and** `console.cloud.google.com`, plus a `COMPASS` for `gemini.google.com` and `console.cloud.google.com`.
   - `loadCookies` registered every entry twice: once against its own domain and once against `https://gemini.google.com`. Cookies from `console.cloud.google.com` and `myaccount.google.com` were therefore injected into the Gemini identity.
@@ -40,11 +63,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `DownloadFile` forwarded the whole account header to every hop. It now resolves cookies per hop from the jar, so a `.google.com` cookie is not sent to `googleusercontent.com` and a host-only cookie never leaves its host.
 
 ### Regression Tests
+- `api/benchmark_v357_p0_test.go`:
+  - Exact Hydrogen leak and final-report fixtures, identity-safe delta planning, Neon greeting, Argon incomplete prose and terminal `finish_reason: "error"`.
+- `api/benchmark_v357_p1_test.go`:
+  - Task-to-Chat routing and opt-ins, per-class metric exposition, replay reasons and global LRU transcript eviction.
+- `api/benchmark_v357_p2_test.go`:
+  - `TestProperty_MidValueMutationRejection`, `TestProperty_QuarantineCompleteness`, `TestProperty_DeltaIdentitySafety`, `TestProperty_MonotonicRetryTermination`, `TestArgonSanitizedThoughtArtifact`, `TestPseudoReportLexicon_P2CompletionForms`, `TestUnbackedCompletion_ValidationEvidence` and `TestUnbackedCompletion_PathPunctuationNormalization`.
+- `gemini/thought_sanitizer_test.go`:
+  - Exact sanitizer outputs, fence preservation, `<thoughtful>` non-match, case-insensitive artifacts and `ReasoningContent` preservation.
+- `gemini/fuzz_test.go`:
+  - `FuzzQuarantineUntaggedToolJSON` and `FuzzSanitizeThoughtArtifacts` run their seed corpora under `go test` and accept bounded active fuzzing in CI.
 - `gemini/session_cookie_scope_test.go`:
   - `TestLoadCookiesKeepsSubdomainCookiesScoped` replays the real export: the Gemini `OSID` / `__Secure-OSID` / `COMPASS` values must win and no `myaccount` or `console` value may appear.
   - `TestCookieJarScopesByRequestHost` asserts the jar returns `gemini-osid` for the Gemini origin, `console-osid` for the console origin, and never leaks a host-only cookie.
   - `TestCookieJar_HostOnlyVsDomainAttribute` verifies strict separation between host-only cookies (without domain attribute) and domain-scoped cookies across sibling hosts and parent domains.
   - `TestScopedCookieHonorsHostOnly` and `TestLegacyCookieStringStillLoads` cover host-only handling and the legacy string format.
+
+### Validation
+| Check | Command | Result |
+|---|---|---|
+| Go formatting | `test -z "$(gofmt -l .)"` | **OK** |
+| Targeted P2 tests | `go test -v ./api -run "TestProperty_\|TestArgonSanitized\|TestPseudoReportLexicon_P2\|TestUnbackedCompletion_"` | **OK** — 9 tests PASS |
+| Sanitizer tests | `go test -v ./gemini -run "TestSanitizeThought"` | **OK** |
+| Short tests | `go test -short ./...` | **OK** — `api 1.243s`, `db 0.036s`, `gemini 7.010s` |
+| Fuzz quarantine | `go test -short -fuzz=FuzzQuarantineUntaggedToolJSON -fuzztime=5s ./gemini` | **OK** — ~109 000 executions, no crash |
+| Fuzz sanitizer | `go test -short -fuzz=FuzzSanitizeThoughtArtifacts -fuzztime=5s ./gemini` | **OK** — ~68 000 executions, no crash |
+| Race tests | `go test -race -short ./...` | **OK** — `api 8.634s`, `db 1.122s`, `gemini 26.893s`, no race |
+| Full audit | `../scripts/audit_check.sh` | **OK** — gofmt, `go vet`, short tests via Docker `golang:1.26-alpine` |
 
 ---
 

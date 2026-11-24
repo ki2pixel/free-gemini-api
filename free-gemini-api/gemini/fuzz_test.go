@@ -78,3 +78,52 @@ func FuzzHasTruncatedMutationToolCall(f *testing.F) {
 		_ = HasTruncatedMutationToolCall(raw)
 	})
 }
+
+func FuzzQuarantineUntaggedToolJSON(f *testing.F) {
+	f.Add(`{"name":"write","arguments":{"path":"a.txt","content":"hello"}}`)
+	f.Add(`{"name":"read","arguments":{"path":"AGENTS.md"}}`)
+	f.Add(`{"name":"write","arguments":{"path":"a.txt","content":"unterminated`)
+	f.Add(`{"content":"large","name":"write"}`)
+	f.Add(`{"name":"unknown","arguments":{}}`)
+	f.Add(`not json {{ [[ "name": "read" `)
+	f.Add(strings.Repeat("x", 4096))
+
+	f.Fuzz(func(t *testing.T, raw string) {
+		if len(raw) > 1<<20 {
+			raw = raw[:1<<20]
+		}
+		tools := openCodeToolsFixture()
+		catalog, err := DefaultToolSchemaRegistry.CompileTools(tools)
+		if err != nil {
+			t.Fatalf("compile tool catalog: %v", err)
+		}
+		// The quarantine must terminate on arbitrary, nested, truncated and
+		// invalid-UTF-8 payloads without panicking.
+		_, _, _ = QuarantineUntaggedToolJSON(raw, catalog)
+		arranged := ArrangeGeminiOutputWithTools(raw, tools)
+		if arranged == nil {
+			t.Fatal("ArrangeGeminiOutputWithTools returned nil")
+		}
+	})
+}
+
+func FuzzSanitizeThoughtArtifacts(f *testing.F) {
+	f.Add("Le plan<thought d'action pour")
+	f.Add("<thought>reasoning</thought>Visible.")
+	f.Add("```markdown\n<thought>example</thought>\n```")
+	f.Add("</thought></thinking>")
+	f.Add("<THINKING\nnext step")
+	f.Add("<thoughtful>not a tag</thoughtful>")
+	f.Add("")
+
+	f.Fuzz(func(t *testing.T, raw string) {
+		if len(raw) > 1<<20 {
+			raw = raw[:1<<20]
+		}
+		out := sanitizeThoughtArtifacts(raw)
+		if len(out) > len(raw) {
+			t.Fatalf("sanitizer grew the text: %d > %d", len(out), len(raw))
+		}
+		_ = ArrangeGeminiOutput(raw)
+	})
+}

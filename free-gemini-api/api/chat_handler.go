@@ -75,9 +75,10 @@ func formatPseudoReportRetryDirective() string {
 }
 
 // formatUnbackedCompletionRetryDirective builds the corrective prompt used when
-// a completion claim cites a path that no successful tool result confirmed.
+// a completion claim cites a path that no successful tool result confirmed, or
+// claims that tests/builds passed without a confirmed validation command.
 func formatUnbackedCompletionRetryDirective() string {
-	return "[SYSTEM DIRECTIVE: The previous message claimed completion but cited files that have no confirmed mutation in this session. Do not claim that a file was updated unless its tool result confirms the write succeeded. Continue the plan with the next required <tool_call>; if a planned file is still pending, create or edit it now.]\n\n"
+	return "[SYSTEM DIRECTIVE: The previous message claimed completion without confirmed evidence in this session. Do not claim that a file was updated unless its tool result confirms the write succeeded, and do not claim that tests, builds or audits passed unless a shell result confirms the command actually ran successfully. Continue the plan with the next required <tool_call>; if a planned file or verification is still pending, execute it now.]\n\n"
 }
 
 // unlimitedToolExecutionDirective is prepended to every full replay after an
@@ -141,6 +142,14 @@ func maxChatAttempts(streaming, hasTools bool) int {
 		return maxPlainStreamAttempts
 	}
 	return maxPlainChatAttempts
+}
+
+// maxChatLoopIterations is the monotonic upper bound of the generation loop:
+// functional attempts plus the dedicated transport and empty-generation
+// retries. For a tool-bearing request it is guaranteed to stay at or below 8,
+// so a pathological upstream can never keep the handler spinning.
+func maxChatLoopIterations(streaming, hasTools bool) int {
+	return maxChatAttempts(streaming, hasTools) + maxTransportRetries + maxEmptyGenerationRetries
 }
 
 // isTransportIncident reports whether an upstream failure is a transport or
