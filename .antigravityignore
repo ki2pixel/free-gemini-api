@@ -147,3 +147,6 @@ logs/
 *~
 .DS_Store
 Thumbs.db
+
+# Ephemeral benchmark worktrees (scripts/benchmark_matrix.sh)
+.benchmark-worktrees/

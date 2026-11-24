@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Wave P1 observability (`api/metrics.go`, `api/chat_handler.go`)**:
+  - `gemini_turn_classification_total{class="tool_call|greeting|incomplete|refusal|pseudo_report|unbacked_completion|untagged_mutation|schema_invalid|ok"}` distinguishes why a tool-bearing turn was retried, blocked, or accepted.
+  - `gemini_delta_replay_total{reason="new|conv_mismatch|worker_mismatch|prefix_mismatch|identical|forced"}` measures the cost of full replays.
+  - `gemini_quarantine_total{kind="untagged_mutation|schema_invalid|truncated"}` and `gemini_upstream_suspected_stop_total{model=...}` expose quarantined payloads and interrupted-generation shapes.
+  - One content-free `📊 [TURN SUMMARY]` line per request now logs hashed session/conversation ids, prompt and delta lengths, replay reason, visible length, tool count, classification and finish reason. Prompt bodies and tool arguments are never logged.
+- **Global LRU transcript budget (`api/session_transcripts.go`)**:
+  - `sessionTurnState` now tracks cumulative `lastFlat` bytes and evicts the least recently used session when the budget or the 256-session bound is reached.
+  - `SESSION_MEMORY_BUDGET_MB` configures the budget (default 64 MiB). Eviction always degrades to a full replay, never to an orphan delta.
+  - A transcript larger than the whole budget is not retained: the conversation pointer stays but the next turn replays in full.
+- **Benchmark matrix harness (`scripts/benchmark_matrix.sh`)**:
+  - Replays the v3.5.7 plan for four models over `k` runs in fresh git worktrees snapshotted from the current working tree.
+  - Detects tool calls, greetings, hallucinated quotas, S7 completion claims, short unpunctuated prose and terminal outcomes, then prints the pass^k table.
+
+### Changed
+- **Task mode routing for tool-bearing requests (`api/chat_service.go`)**:
+  - `*-task` aliases are requalified to the Chat model of the same family (`hydrogen-task` -> `hydrogen`, `neon-task` -> `neon`) whenever the request declares tools and no explicit opt-in is present. This preserves the external tool execution loop that the autonomous Task planner did not exercise in the v3.5.7 benchmark.
+  - Opt-in is available per request with `X-Allow-Task-Mode-For-Tools: true` or server-wide with `ALLOW_TASK_MODE_FOR_TOOLS=true`. Tool-free requests keep their requested Task mode unchanged.
+
 ### Fixed
 - **Per-subdomain cookie scoping (`gemini/session.go`, `gemini/client.go`)**:
   - Chrome exports carry the same cookie names on several Google hosts. `cookies/account_ga000FAlQD.json`, for example, holds `OSID` / `__Secure-OSID` for `gemini.google.com`, `myaccount.google.com` **and** `console.cloud.google.com`, plus a `COMPASS` for `gemini.google.com` and `console.cloud.google.com`.

@@ -5,10 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"os"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"goapi/gemini"
@@ -40,16 +43,47 @@ type sessionTurnEntry struct {
 	lastWorkerID string // pool worker (account) that holds the client-side state
 	convValid    bool   // false after a failed/blocked turn: conversation must be reset
 	tracker      *DoomLoopTracker
+	lastAccess   time.Time // LRU timestamp, refreshed on every session access
 }
 
 var (
 	sessionTurnMu    sync.Mutex
 	sessionTurnState = map[string]*sessionTurnEntry{}
+	// totalFlatBytes tracks the sum of len(lastFlat) across all entries. It is
+	// protected by sessionTurnMu and never exceeds maxFlatMemorySize.
+	totalFlatBytes int64
+	// maxFlatMemorySize is the global transcript budget. It is a variable (not
+	// a constant) so tests can lower it without allocating 64 MiB.
+	maxFlatMemorySize int64 = defaultSessionMemoryBudgetMB * 1024 * 1024
 )
 
-// maxTrackedSessions bounds memory; eviction is a simple delete-one policy —
-// evicted sessions simply fall back to a full replay on their next turn.
-const maxTrackedSessions = 256
+const (
+	// maxTrackedSessions bounds the number of retained sessions.
+	maxTrackedSessions = 256
+	// defaultSessionMemoryBudgetMB bounds the cumulative lastFlat transcript
+	// memory. Eviction is always safe: an evicted session simply replays its
+	// full transcript on the next turn.
+	defaultSessionMemoryBudgetMB = 64
+)
+
+// ConfigureSessionMemoryBudget applies the optional SESSION_MEMORY_BUDGET_MB
+// override. It must run after the process environment (including .env) has
+// been loaded, which is why main calls it explicitly instead of using init().
+// Invalid or non-positive values keep the 64 MiB default.
+func ConfigureSessionMemoryBudget() {
+	raw := strings.TrimSpace(os.Getenv("SESSION_MEMORY_BUDGET_MB"))
+	if raw == "" {
+		return
+	}
+	mb, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || mb <= 0 {
+		log.Printf("⚠️ Ignoring invalid SESSION_MEMORY_BUDGET_MB=%q; keeping %d MiB", raw, defaultSessionMemoryBudgetMB)
+		return
+	}
+	sessionTurnMu.Lock()
+	maxFlatMemorySize = mb * 1024 * 1024
+	sessionTurnMu.Unlock()
+}
 
 // continuationAnchor frames a delta that carries only tool results. Such a
 // delta has no user instruction, so an upstream model that lost the thread can
@@ -70,37 +104,65 @@ const continuationAnchor = "[Continuation] Le dernier appel d'outil est terminé
 // means the transcript suffix is semantically orphaned, so a full replay on a
 // fresh conversation is mandatory.
 func planSessionTurn(sessionKey, curWorkerID, curConvID, flat string) (sendPrompt string, needReset bool) {
+	plan := planSessionTurnWithReason(sessionKey, curWorkerID, curConvID, flat)
+	return plan.prompt, plan.needReset
+}
+
+// sessionTurnPlan carries the decision plus the observability fields the
+// handler logs and exposes on /metrics.
+type sessionTurnPlan struct {
+	prompt     string
+	needReset  bool
+	reason     string // replay reason when needReset is true
+	deltaBytes int    // transcript suffix size when a delta is sent
+}
+
+// planSessionTurnWithReason is planSessionTurn with the replay reason and
+// delta length needed by the structured turn summary.
+func planSessionTurnWithReason(sessionKey, curWorkerID, curConvID, flat string) sessionTurnPlan {
 	sessionTurnMu.Lock()
 	defer sessionTurnMu.Unlock()
 
+	reset := func(reason string) sessionTurnPlan {
+		return sessionTurnPlan{prompt: flat, needReset: true, reason: reason}
+	}
+
 	e := sessionTurnState[sessionKey]
-	if e == nil || !e.convValid || e.lastFlat == "" {
-		return flat, true
+	if e == nil {
+		return reset("new")
+	}
+	e.lastAccess = time.Now()
+	if !e.convValid {
+		return reset("forced")
+	}
+	if e.lastFlat == "" {
+		return reset("new")
 	}
 	if e.lastWorkerID == "" || curWorkerID == "" || e.lastWorkerID != curWorkerID {
 		log.Printf("🔄 Session continuation reset for %q: worker_mismatch", sessionKey)
-		return flat, true
+		return reset("worker_mismatch")
 	}
 	if e.lastConvID == "" || curConvID == "" || e.lastConvID != curConvID {
 		log.Printf("🔄 Session continuation reset for %q: conv_mismatch", sessionKey)
-		return flat, true
+		return reset("conv_mismatch")
 	}
 	if flat == e.lastFlat {
 		// Identical transcript (e.g. client retry after a client-side error):
 		// replay in full on a reset conversation so the turn is not dropped.
-		return flat, true
+		return reset("identical")
 	}
 	if strings.HasPrefix(flat, e.lastFlat) {
 		delta := flat[len(e.lastFlat):]
 		if delta == "" {
-			return flat, true
+			return reset("identical")
 		}
+		deltaBytes := len(delta)
 		if !deltaContainsUserInstruction(delta) {
 			delta = continuationAnchor + delta
 		}
-		return delta, false
+		return sessionTurnPlan{prompt: delta, needReset: false, deltaBytes: deltaBytes}
 	}
-	return flat, true
+	return reset("prefix_mismatch")
 }
 
 // deltaContainsUserInstruction reports whether a transcript delta carries a
@@ -144,31 +206,78 @@ func commitSessionTurn(sessionKey, flat, convID, respID, choiceID, workerID stri
 	defer sessionTurnMu.Unlock()
 
 	entry := sessionTurnState[sessionKey]
-	if entry == nil {
-		if len(sessionTurnState) >= maxTrackedSessions {
-			evictOneSessionLocked()
+	newFlatBytes := int64(len(flat))
+	if entry != nil {
+		// Remove the entry from the accounting before eviction so the LRU scan
+		// cannot select the entry being updated and delete it from the map.
+		totalFlatBytes -= int64(len(entry.lastFlat))
+		if totalFlatBytes < 0 {
+			totalFlatBytes = 0
 		}
-		entry = &sessionTurnEntry{}
-		sessionTurnState[sessionKey] = entry
+		delete(sessionTurnState, sessionKey)
 	}
+	ensureSessionSlotLocked(newFlatBytes)
+	if entry == nil {
+		entry = &sessionTurnEntry{}
+	}
+	sessionTurnState[sessionKey] = entry
 	// Update the existing entry in place so the session's doom-loop tracker
 	// survives every successful turn.
-	entry.lastFlat = flat
+	if newFlatBytes > maxFlatMemorySize {
+		// A single transcript larger than the whole budget cannot be retained
+		// without violating the memory invariant. Keep the conversation
+		// pointer but drop the transcript: the next turn replays in full.
+		entry.lastFlat = ""
+	} else {
+		entry.lastFlat = flat
+		totalFlatBytes += newFlatBytes
+	}
 	entry.lastConvID = convID
 	entry.lastRespID = respID
 	entry.lastChoiceID = choiceID
 	entry.lastWorkerID = workerID
 	entry.convValid = true
+	entry.lastAccess = time.Now()
 	if entry.tracker == nil {
 		entry.tracker = NewDoomLoopTracker()
 	}
 }
 
-func evictOneSessionLocked() {
-	for key := range sessionTurnState {
-		delete(sessionTurnState, key)
-		break
+// ensureSessionSlotLocked enforces both bounds before inserting a new session:
+// the session count and the cumulative transcript byte budget.
+func ensureSessionSlotLocked(requiredBytes int64) {
+	for len(sessionTurnState) >= maxTrackedSessions && len(sessionTurnState) > 0 {
+		evictOldestSessionLocked()
 	}
+	evictLRULocked(requiredBytes)
+}
+
+// evictLRULocked removes least-recently-used sessions until requiredBytes can
+// be added without exceeding maxFlatMemorySize. It is always safe: an evicted
+// session falls back to a full replay on its next turn.
+func evictLRULocked(requiredBytes int64) {
+	for totalFlatBytes+requiredBytes > maxFlatMemorySize && len(sessionTurnState) > 0 {
+		evictOldestSessionLocked()
+	}
+}
+
+func evictOldestSessionLocked() {
+	oldestKey := ""
+	var oldest *sessionTurnEntry
+	for key, entry := range sessionTurnState {
+		if oldest == nil || entry.lastAccess.Before(oldest.lastAccess) {
+			oldestKey = key
+			oldest = entry
+		}
+	}
+	if oldest == nil {
+		return
+	}
+	totalFlatBytes -= int64(len(oldest.lastFlat))
+	if totalFlatBytes < 0 {
+		totalFlatBytes = 0
+	}
+	delete(sessionTurnState, oldestKey)
 }
 
 // getOrCreateSessionTracker returns the thread-safe doom-loop tracker bound to
@@ -179,15 +288,14 @@ func getOrCreateSessionTracker(sessionKey string) *DoomLoopTracker {
 	defer sessionTurnMu.Unlock()
 
 	if entry := sessionTurnState[sessionKey]; entry != nil {
+		entry.lastAccess = time.Now()
 		if entry.tracker == nil {
 			entry.tracker = NewDoomLoopTracker()
 		}
 		return entry.tracker
 	}
-	if len(sessionTurnState) >= maxTrackedSessions {
-		evictOneSessionLocked()
-	}
-	entry := &sessionTurnEntry{tracker: NewDoomLoopTracker()}
+	ensureSessionSlotLocked(0)
+	entry := &sessionTurnEntry{tracker: NewDoomLoopTracker(), lastAccess: time.Now()}
 	sessionTurnState[sessionKey] = entry
 	return entry.tracker
 }
@@ -216,6 +324,7 @@ func peekSessionTurnConv(sessionKey string) (convID, respID, choiceID, workerID 
 	sessionTurnMu.Lock()
 	defer sessionTurnMu.Unlock()
 	if e := sessionTurnState[sessionKey]; e != nil {
+		e.lastAccess = time.Now()
 		return e.lastConvID, e.lastRespID, e.lastChoiceID, e.lastWorkerID, e.convValid
 	}
 	return "", "", "", "", false
@@ -229,6 +338,7 @@ func invalidateSessionTurn(sessionKey string) {
 	defer sessionTurnMu.Unlock()
 	if e := sessionTurnState[sessionKey]; e != nil {
 		e.convValid = false
+		e.lastAccess = time.Now()
 	}
 }
 

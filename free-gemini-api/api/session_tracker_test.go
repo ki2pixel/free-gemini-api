@@ -11,6 +11,12 @@ func cleanupSessionTrackerTest(t *testing.T, sessionKey string) {
 	t.Helper()
 	t.Cleanup(func() {
 		sessionTurnMu.Lock()
+		if entry := sessionTurnState[sessionKey]; entry != nil {
+			totalFlatBytes -= int64(len(entry.lastFlat))
+			if totalFlatBytes < 0 {
+				totalFlatBytes = 0
+			}
+		}
 		delete(sessionTurnState, sessionKey)
 		sessionTurnMu.Unlock()
 	})

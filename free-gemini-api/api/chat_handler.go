@@ -3,6 +3,8 @@ package api
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -164,6 +166,91 @@ func recordArrangerRepairs(arranged *gemini.ArrangedOutput) {
 	for _, kind := range arranged.Repairs {
 		RecordArrangerRepair(kind)
 	}
+}
+
+// logFingerprint returns a short, stable, non-reversible identifier for logs.
+// Session keys and upstream conversation ids may carry client identifiers, so
+// the structured turn summary never prints them verbatim.
+func logFingerprint(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "none"
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:6])
+}
+
+// classifyTurnOutput maps an upstream generation to the bounded class set
+// exposed on /metrics. The order mirrors the handler's interception order so
+// the metric explains why a turn was retried or blocked.
+func classifyTurnOutput(raw string, arranged *gemini.ArrangedOutput, tools []map[string]any, sessionKey string) string {
+	lowerRaw := strings.ToLower(raw)
+	for _, phrase := range []string{
+		"hard time fulfilling your request",
+		"i seem to be encountering an error",
+	} {
+		if strings.Contains(lowerRaw, phrase) {
+			return "refusal"
+		}
+	}
+	if gemini.HasTruncatedMutationToolCall(raw) {
+		return "untagged_mutation"
+	}
+	if arranged != nil && arranged.UntaggedMutation {
+		return "untagged_mutation"
+	}
+	if len(tools) > 0 {
+		if invalid, _ := gemini.HasInvalidSchemaToolCall(raw, tools); invalid {
+			return "schema_invalid"
+		}
+	}
+	if arranged != nil && (arranged.IsToolCall || len(arranged.ToolCalls) > 0) {
+		return "tool_call"
+	}
+	clean := raw
+	if arranged != nil {
+		clean = arranged.CleanText
+	}
+	if strings.TrimSpace(clean) == "" {
+		return "incomplete"
+	}
+	if isConversationalReset(clean, tools) {
+		return "greeting"
+	}
+	if isIncompleteFinalProse(clean, tools) {
+		return "incomplete"
+	}
+	if len(tools) > 0 && isToolRefusalOutput(raw, tools) {
+		return "refusal"
+	}
+	if len(tools) > 0 && isPseudoProgressReport(raw, tools) {
+		return "pseudo_report"
+	}
+	if len(tools) > 0 && isUnbackedCompletion(raw, tools, sessionKey) {
+		return "unbacked_completion"
+	}
+	return "ok"
+}
+
+// recordTurnClass records the classification and, for shapes that indicate an
+// interrupted upstream generation, the suspected-stop counter.
+func recordTurnClass(class, model string) {
+	RecordTurnClassification(class)
+	if class == "greeting" || class == "incomplete" {
+		RecordUpstreamSuspectedStop(model)
+	}
+}
+
+// emitTurnSummary writes the structured, content-free turn line. Only lengths,
+// hashes and normalized labels are emitted: never the prompt body, tool
+// arguments, or raw conversation ids.
+func emitTurnSummary(sessionKey, model string, promptLen, deltaLen int, replayReason, convID string, visibleLen, toolCount int, class, finish string) {
+	if strings.TrimSpace(replayReason) == "" {
+		replayReason = "none"
+	}
+	log.Printf("📊 [TURN SUMMARY] session=%s model=%s prompt_len=%d delta_len=%d replay_reason=%s conv_id=%s visible_len=%d tools=%d class=%s finish=%s",
+		logFingerprint(sessionKey), model, promptLen, deltaLen, replayReason,
+		logFingerprint(convID), visibleLen, toolCount, class, finish)
 }
 
 // arrangerRejectionReason classifies a schema-validation detail into the
@@ -585,7 +672,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	if requestedModel != req.Model {
 		log.Printf("🧠 reasoning_effort=%q maps model %q -> %q", req.ReasoningEffort, req.Model, requestedModel)
 	}
-	_, model, requiredTier := GetChatService().ResolveModel(c, requestedModel)
+	_, model, requiredTier := GetChatService().ResolveModelForRequest(c, requestedModel, len(req.Tools) > 0)
 
 	var tiBlock string
 	if len(req.Tools) > 0 {
@@ -882,6 +969,11 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			var accumulatedOutput strings.Builder
 			var thoughtTracker streamBlockTracker
 			var contentTracker streamBlockTracker
+			var lastSendPromptLen, lastDeltaLen int
+			var replayReason string
+			emitSummary := func(class, finish string, visibleLen int, convID string) {
+				emitTurnSummary(sessionKey, model, lastSendPromptLen, lastDeltaLen, replayReason, convID, visibleLen, len(req.Tools), class, finish)
+			}
 
 			streamErr := pool.ExecuteQueuedStreamWithTier(streamCtx, sessionID, requiredTier, func(wWorker *AccountWorker) error {
 				usedWorker = wWorker
@@ -911,6 +1003,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						// Previous attempt hit a blocked/empty generation, a
 						// refusal, or an invalid tool call: replay everything
 						// fresh with a targeted override directive.
+						replayReason = "forced"
+						lastDeltaLen = 0
+						RecordDeltaReplay("forced")
 						wWorker.Client.ResetConversationStateSession(sessionKey, sendModel)
 						override := ""
 						if len(req.Tools) > 0 {
@@ -933,25 +1028,29 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						// conversation with just the new transcript delta, or reset and
 						// replay the full transcript when that is not safe.
 						curConv := wWorker.Client.CurrentConversationIDFor(sessionKey, sendModel)
-						prompt, needReset := planSessionTurn(sessionKey, wWorker.ID, curConv, msgFlat)
-						if needReset {
+						plan := planSessionTurnWithReason(sessionKey, wWorker.ID, curConv, msgFlat)
+						if plan.needReset {
 							// The worker may have been recreated by a cookie re-sync
 							// (pool reload), dropping client-side conversation state
 							// while the upstream conversation still exists. Restore
 							// the recorded pointer when this worker owns it.
 							if conv, respID, choiceID, lastWorker, valid := peekSessionTurnConv(sessionKey); valid && conv != "" && lastWorker == wWorker.ID && curConv == "" {
 								wWorker.Client.RestoreConversationStateSession(sessionKey, sendModel, conv, respID, choiceID)
-								prompt, needReset = planSessionTurn(sessionKey, wWorker.ID, conv, msgFlat)
+								plan = planSessionTurnWithReason(sessionKey, wWorker.ID, conv, msgFlat)
 							}
 						}
-						if needReset {
+						replayReason = plan.reason
+						lastDeltaLen = plan.deltaBytes
+						if plan.needReset {
+							RecordDeltaReplay(plan.reason)
 							// Full replay: message transcript, turn cue, tool schemas.
 							wWorker.Client.ResetConversationStateSession(sessionKey, sendModel)
 							sendPrompt = msgFlat + antiLoopDirective + effectiveTurnCue
 						} else {
-							sendPrompt = prompt + antiLoopDirective + effectiveTurnCue
+							sendPrompt = plan.prompt + antiLoopDirective + effectiveTurnCue
 						}
 					}
+					lastSendPromptLen = len(sendPrompt)
 
 					accumulatedOutput.Reset()
 					sr, err := wWorker.Client.AskStreamModelSession(sendPrompt, sendModel, func(chunk string) {
@@ -1054,6 +1153,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					// functional attempt meant for pseudo-reports, refusals,
 					// schema errors, or truncations.
 					if len(req.Tools) > 0 && isEmptyGenerationOutput(finalAttemptText, req.Tools) && emptyGenerationRetries < maxEmptyGenerationRetries {
+						recordTurnClass("incomplete", model)
 						emptyGenerationRetries++
 						// An identical empty turn replayed at the same depth
 						// tends to fail identically. Escalate to the next
@@ -1085,6 +1185,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							// upstream conversation and retry with a
 							// truncation-specific abstract directive.
 							RecordArrangerRejection("mid_value_truncation")
+							RecordQuarantine("truncated")
+							recordTurnClass("untagged_mutation", model)
 							log.Printf("⚠️ Truncated mutation tool call detected, retrying once with an abstract truncation directive")
 							truncationRetry = true
 							schemaRetryDetail = ""
@@ -1096,6 +1198,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						}
 						if invalid, detail := gemini.HasInvalidSchemaToolCall(finalAttemptText, req.Tools); invalid {
 							RecordArrangerRejection(arrangerRejectionReason(detail))
+							RecordQuarantine("schema_invalid")
+							recordTurnClass("schema_invalid", model)
 							log.Printf("⚠️ Invalid tool-call schema (%s), retrying with an abstract error directive", detail)
 							schemaRetryDetail = detail
 							truncationRetry = false
@@ -1107,6 +1211,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						}
 						if len(req.Tools) > 0 && gemini.ArrangeGeminiOutputWithTools(finalAttemptText, req.Tools).UntaggedMutation {
 							RecordArrangerRejection("untagged_mutation")
+							RecordQuarantine("untagged_mutation")
+							recordTurnClass("untagged_mutation", model)
 							log.Printf("⚠️ Untagged mutating tool JSON detected in prose, retrying with truncation directive")
 							truncationRetry = true
 							schemaRetryDetail = ""
@@ -1118,6 +1224,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						}
 						if len(req.Tools) > 0 && isUnbackedCompletion(finalAttemptText, req.Tools, sessionKey) {
 							RecordArrangerRejection("unbacked_completion")
+							recordTurnClass("unbacked_completion", model)
 							log.Printf("⚠️ Unbacked completion claim detected (S7), retrying with ground-truth directive")
 							pseudoReportRetry = false
 							truncationRetry = false
@@ -1128,6 +1235,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							continue
 						}
 						if isUnusableModelOutput(finalAttemptText, req.Tools) {
+							class := classifyTurnOutput(finalAttemptText, gemini.ArrangeGeminiOutputWithTools(finalAttemptText, req.Tools), req.Tools, sessionKey)
+							recordTurnClass(class, model)
 							if len(req.Tools) > 0 && isPseudoProgressReport(finalAttemptText, req.Tools) {
 								log.Printf("⚠️ Pseudo-report without a tool call (%d chars), retrying with an anti-summary directive", len(finalAttemptText))
 								pseudoReportRetry = true
@@ -1157,6 +1266,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			if streamErr != nil {
 				log.Printf("❌ Streaming error: %v", streamErr)
 				invalidateSessionTurn(sessionKey)
+				emitSummary("none", "error", 0, "")
 				errChunk := newStreamErrorChunk(chunkID, model, createdTime, fmt.Sprintf("\n\n[Error: %v]", streamErr))
 				if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 					writeChunk(errBytes)
@@ -1175,8 +1285,15 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			if len(req.Tools) > 0 {
 				if invalid, detail := gemini.HasInvalidSchemaToolCall(finalText, req.Tools); invalid {
 					RecordArrangerRejection(arrangerRejectionReason(detail))
+					RecordQuarantine("schema_invalid")
+					recordTurnClass("schema_invalid", model)
 					log.Printf("❌ Upstream tool call failed schema validation after retry: %s", detail)
 					invalidateSessionTurn(sessionKey)
+					convID := ""
+					if streamResp != nil {
+						convID = streamResp.ConversationID
+					}
+					emitSummary("schema_invalid", "error", len(finalText), convID)
 					errChunk := newStreamErrorChunk(chunkID, model, createdTime, fmt.Sprintf("\n\n[Error: upstream tool call failed schema validation: %s]", detail))
 					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 						writeChunk(errBytes)
@@ -1198,12 +1315,14 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			// If tools were provided, arrange and emit the structured result
 			finishReason := "stop"
 			var finalContentForLog string
+			var turnArranged *gemini.ArrangedOutput
 			if len(req.Tools) > 0 {
 				rawOutput := accumulatedOutput.String()
 				if streamResp != nil && streamResp.Text != "" && len(rawOutput) < len(streamResp.Text) {
 					rawOutput = streamResp.Text
 				}
 				arranged := gemini.ArrangeGeminiOutputWithTools(rawOutput, req.Tools)
+				turnArranged = arranged
 				recordArrangerRepairs(arranged)
 				if arranged.IsToolCall {
 					arranged.ToolCalls = gemini.ThrottleMutatingToolCalls(arranged.ToolCalls)
@@ -1217,6 +1336,13 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					// arranger deliberately rejected it; report an explicit
 					// error instead of silently returning a stop response.
 					RecordArrangerRejection("mid_value_truncation")
+					RecordQuarantine("truncated")
+					recordTurnClass("untagged_mutation", model)
+					convID := ""
+					if streamResp != nil {
+						convID = streamResp.ConversationID
+					}
+					emitSummary("untagged_mutation", "error", len(arranged.CleanText), convID)
 					errChunk := newStreamErrorChunk(chunkID, model, createdTime, "\n\n[Error: upstream tool call was truncated mid-value; no mutation was executed. Please retry.]")
 					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 						writeChunk(errBytes)
@@ -1236,7 +1362,17 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				if shouldBlockUnusableToolTurn(arranged, finalText, req.Tools) ||
 					isUnbackedCompletion(finalText, req.Tools, sessionKey) {
 					RecordArrangerRejection("unusable_action_with_tools")
+					class := classifyTurnOutput(finalText, arranged, req.Tools, sessionKey)
+					recordTurnClass(class, model)
+					if class == "untagged_mutation" {
+						RecordQuarantine("untagged_mutation")
+					}
 					invalidateSessionTurn(sessionKey)
+					convID := ""
+					if streamResp != nil {
+						convID = streamResp.ConversationID
+					}
+					emitSummary(class, "error", len(arranged.CleanText), convID)
 					errChunk := newStreamErrorChunk(chunkID, model, createdTime, "\n\n[Error: "+unusableActionErrorMessage+". Please retry.]")
 					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 						writeChunk(errBytes)
@@ -1374,6 +1510,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			if streamResp != nil {
 				convID = streamResp.ConversationID
 			}
+			class := classifyTurnOutput(finalText, turnArranged, req.Tools, sessionKey)
+			recordTurnClass(class, model)
+			emitSummary(class, finishReason, len(finalContentForLog), convID)
 			history := GetHistoryService()
 			history.LogTurn(convID, sessionID, prompt, finalContentForLog, model, pTokens, rTokens, tier, accID)
 			history.LogRequest("/v1/chat/completions", "POST", userIP, 200, float64(time.Now().Unix()-createdTime)*1000)
@@ -1381,6 +1520,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	}
 
 	var usedWorker *AccountWorker
+	var lastSendPromptLen, lastDeltaLen int
+	var replayReason string
 	resp, err := pool.ExecuteQueuedWithTier(ctx, sessionID, requiredTier, func(w *AccountWorker) (*gemini.GeminiResponse, error) {
 		usedWorker = w
 		// Nothing has been emitted yet, so a blocked/empty generation can be
@@ -1405,6 +1546,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				// Previous attempt hit a blocked/empty generation, a refusal,
 				// or an invalid tool call: replay everything fresh with a
 				// targeted override directive.
+				replayReason = "forced"
+				lastDeltaLen = 0
+				RecordDeltaReplay("forced")
 				w.Client.ResetConversationStateSession(sessionKey, sendModel)
 				override := ""
 				if len(req.Tools) > 0 {
@@ -1424,23 +1568,27 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				sendPrompt = override + msgFlat + antiLoopDirective + effectiveTurnCue
 			} else {
 				curConv := w.Client.CurrentConversationIDFor(sessionKey, sendModel)
-				prompt, needReset := planSessionTurn(sessionKey, w.ID, curConv, msgFlat)
-				if needReset {
+				plan := planSessionTurnWithReason(sessionKey, w.ID, curConv, msgFlat)
+				if plan.needReset {
 					// Restore the recorded upstream conversation pointer after a
 					// pool reload recreated this worker (see stream path).
 					if conv, respID, choiceID, lastWorker, valid := peekSessionTurnConv(sessionKey); valid && conv != "" && lastWorker == w.ID && curConv == "" {
 						w.Client.RestoreConversationStateSession(sessionKey, sendModel, conv, respID, choiceID)
-						prompt, needReset = planSessionTurn(sessionKey, w.ID, conv, msgFlat)
+						plan = planSessionTurnWithReason(sessionKey, w.ID, conv, msgFlat)
 					}
 				}
-				if needReset {
+				replayReason = plan.reason
+				lastDeltaLen = plan.deltaBytes
+				if plan.needReset {
+					RecordDeltaReplay(plan.reason)
 					// Full replay: message transcript, turn cue, tool schemas.
 					w.Client.ResetConversationStateSession(sessionKey, sendModel)
 					sendPrompt = msgFlat + antiLoopDirective + effectiveTurnCue
 				} else {
-					sendPrompt = prompt + antiLoopDirective + effectiveTurnCue
+					sendPrompt = plan.prompt + antiLoopDirective + effectiveTurnCue
 				}
 			}
+			lastSendPromptLen = len(sendPrompt)
 			r, err := w.Client.AskModelSession(sendPrompt, sendModel, sessionKey)
 			if err != nil {
 				if shouldRetryTransport(err, transportRetries) {
@@ -1469,6 +1617,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			// functional attempt meant for pseudo-reports, refusals, schema
 			// errors, or truncations.
 			if len(req.Tools) > 0 && isEmptyGenerationOutput(r.Text, req.Tools) && emptyGenerationRetries < maxEmptyGenerationRetries {
+				recordTurnClass("incomplete", model)
 				emptyGenerationRetries++
 				// Escalate the depth on the retry: an identical empty turn at
 				// the same level tends to fail identically.
@@ -1493,6 +1642,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			if attempt+1 < maxAttempts {
 				if gemini.HasTruncatedMutationToolCall(r.Text) {
 					RecordArrangerRejection("mid_value_truncation")
+					RecordQuarantine("truncated")
+					recordTurnClass("untagged_mutation", model)
 					log.Printf("⚠️ Truncated mutation tool call detected, retrying once with an abstract truncation directive")
 					truncationRetry = true
 					schemaRetryDetail = ""
@@ -1504,6 +1655,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				}
 				if invalid, detail := gemini.HasInvalidSchemaToolCall(r.Text, req.Tools); invalid {
 					RecordArrangerRejection(arrangerRejectionReason(detail))
+					RecordQuarantine("schema_invalid")
+					recordTurnClass("schema_invalid", model)
 					log.Printf("⚠️ Invalid tool-call schema (%s), retrying with an abstract error directive", detail)
 					schemaRetryDetail = detail
 					truncationRetry = false
@@ -1515,6 +1668,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				}
 				if len(req.Tools) > 0 && gemini.ArrangeGeminiOutputWithTools(r.Text, req.Tools).UntaggedMutation {
 					RecordArrangerRejection("untagged_mutation")
+					RecordQuarantine("untagged_mutation")
+					recordTurnClass("untagged_mutation", model)
 					log.Printf("⚠️ Untagged mutating tool JSON detected in prose, retrying with truncation directive")
 					truncationRetry = true
 					schemaRetryDetail = ""
@@ -1526,6 +1681,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				}
 				if len(req.Tools) > 0 && isUnbackedCompletion(r.Text, req.Tools, sessionKey) {
 					RecordArrangerRejection("unbacked_completion")
+					recordTurnClass("unbacked_completion", model)
 					log.Printf("⚠️ Unbacked completion claim detected (S7), retrying with ground-truth directive")
 					pseudoReportRetry = false
 					truncationRetry = false
@@ -1536,6 +1692,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					continue
 				}
 				if isUnusableModelOutput(r.Text, req.Tools) {
+					class := classifyTurnOutput(r.Text, gemini.ArrangeGeminiOutputWithTools(r.Text, req.Tools), req.Tools, sessionKey)
+					recordTurnClass(class, model)
 					if len(req.Tools) > 0 && isPseudoProgressReport(r.Text, req.Tools) {
 						log.Printf("⚠️ Pseudo-report without a tool call (%d chars), retrying with an anti-summary directive", len(r.Text))
 						pseudoReportRetry = true
@@ -1577,11 +1735,18 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 
+	emitSummary := func(class, finish string, visibleLen int) {
+		emitTurnSummary(sessionKey, model, lastSendPromptLen, lastDeltaLen, replayReason, resp.ConversationID, visibleLen, len(req.Tools), class, finish)
+	}
+
 	if len(req.Tools) > 0 {
 		if invalid, detail := gemini.HasInvalidSchemaToolCall(resp.Text, req.Tools); invalid {
 			RecordArrangerRejection(arrangerRejectionReason(detail))
+			RecordQuarantine("schema_invalid")
+			recordTurnClass("schema_invalid", model)
 			log.Printf("❌ Upstream tool call failed schema validation after retry: %s", detail)
 			invalidateSessionTurn(sessionKey)
+			emitSummary("schema_invalid", "error", len(resp.Text))
 			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 				"error": fmt.Sprintf("upstream tool call failed schema validation: %s", detail),
 			})
@@ -1612,6 +1777,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	}
 	if gemini.HasTruncatedMutationToolCall(resp.Text) {
 		RecordArrangerRejection("mid_value_truncation")
+		RecordQuarantine("truncated")
+		recordTurnClass("untagged_mutation", model)
+		emitSummary("untagged_mutation", "error", len(arranged.CleanText))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": "upstream tool call was truncated mid-value; no mutation was executed",
 		})
@@ -1624,7 +1792,13 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		(shouldBlockUnusableToolTurn(arranged, resp.Text, req.Tools) ||
 			isUnbackedCompletion(resp.Text, req.Tools, sessionKey)) {
 		RecordArrangerRejection("unusable_action_with_tools")
+		class := classifyTurnOutput(resp.Text, arranged, req.Tools, sessionKey)
+		recordTurnClass(class, model)
+		if class == "untagged_mutation" {
+			RecordQuarantine("untagged_mutation")
+		}
 		invalidateSessionTurn(sessionKey)
+		emitSummary(class, "error", len(arranged.CleanText))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": unusableActionErrorMessage,
 		})
@@ -1699,6 +1873,10 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	history := GetHistoryService()
 	history.LogTurn(resp.ConversationID, sessionID, prompt, arranged.CleanText, model, pTokens, cTokens, tier, accID)
 	history.LogRequest("/v1/chat/completions", "POST", userIP, 200, resp.Elapsed*1000)
+
+	class := classifyTurnOutput(resp.Text, arranged, req.Tools, sessionKey)
+	recordTurnClass(class, model)
+	emitSummary(class, arranged.FinishReason, len(arranged.CleanText))
 
 	return c.JSON(openAIResp)
 }

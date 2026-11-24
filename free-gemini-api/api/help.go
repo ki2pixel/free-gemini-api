@@ -39,6 +39,11 @@ CORE API ENDPOINTS:
 
 MULTI-AGENT & TASK MODE HEADERS:
   X-Gemini-Mode: task         Execute in Task Mode (sends [40] JSPB instead of [0])
+  X-Allow-Task-Mode-For-Tools: true
+                              Keep Task Mode [40] on tool-bearing requests. By
+                              default they are routed to the Chat alias so the
+                              external tool loop is preserved. The server-wide
+                              equivalent is ALLOW_TASK_MODE_FOR_TOOLS=true.
   X-Agent-ID: <id>            Sticky affinity binding (Keeps agent thread with same account)
   X-Session-ID: <id>          Custom session identifier
   X-Conversation-ID: <id>     Gemini server-side thread continuation

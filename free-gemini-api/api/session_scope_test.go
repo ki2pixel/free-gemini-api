@@ -413,11 +413,14 @@ func TestSessionTurnStateEviction(t *testing.T) {
 	// one bounded entry instead of growing the map without limit.
 	sessionTurnMu.Lock()
 	saved := sessionTurnState
+	savedBytes := totalFlatBytes
 	sessionTurnState = make(map[string]*sessionTurnEntry, maxTrackedSessions)
+	totalFlatBytes = 0
 	sessionTurnMu.Unlock()
 	t.Cleanup(func() {
 		sessionTurnMu.Lock()
 		sessionTurnState = saved
+		totalFlatBytes = savedBytes
 		sessionTurnMu.Unlock()
 	})
 

@@ -47,3 +47,6 @@ task-*.txt
 pr_body.md
 
 .commandcode/
+
+# Ephemeral benchmark worktrees (scripts/benchmark_matrix.sh)
+.benchmark-worktrees/

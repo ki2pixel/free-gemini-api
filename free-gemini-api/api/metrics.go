@@ -23,14 +23,18 @@ const (
 )
 
 var (
-	httpRequestCounters   sync.Map // status string -> *atomic.Uint64
-	tokenCounters         sync.Map // tier string -> *atomic.Uint64
-	doomLoopInterventions sync.Map // signal string -> *atomic.Uint64
-	arrangerRepairs       sync.Map // kind string -> *atomic.Uint64
-	arrangerRejections    sync.Map // reason string -> *atomic.Uint64
-	rateLimitDrops        atomic.Uint64
-	refusalRetries        atomic.Uint64
-	groundTruthDirectives atomic.Uint64
+	httpRequestCounters    sync.Map // status string -> *atomic.Uint64
+	tokenCounters          sync.Map // tier string -> *atomic.Uint64
+	doomLoopInterventions  sync.Map // signal string -> *atomic.Uint64
+	arrangerRepairs        sync.Map // kind string -> *atomic.Uint64
+	arrangerRejections     sync.Map // reason string -> *atomic.Uint64
+	turnClassifications    sync.Map // class string -> *atomic.Uint64
+	deltaReplays           sync.Map // reason string -> *atomic.Uint64
+	upstreamSuspectedStops sync.Map // model string -> *atomic.Uint64
+	quarantineKinds        sync.Map // kind string -> *atomic.Uint64
+	rateLimitDrops         atomic.Uint64
+	refusalRetries         atomic.Uint64
+	groundTruthDirectives  atomic.Uint64
 )
 
 // RecordHTTPRequest increments the HTTP status counter exposed on /metrics.
@@ -82,6 +86,35 @@ func RecordArrangerRejection(reason string) {
 // false tool refusal.
 func RecordRefusalRetry() {
 	refusalRetries.Add(1)
+}
+
+// RecordTurnClassification counts how a turn was classified by the
+// end-of-stream classifiers ("tool_call", "greeting", "incomplete",
+// "refusal", "pseudo_report", "unbacked_completion", "untagged_mutation",
+// "schema_invalid" or "ok").
+func RecordTurnClassification(class string) {
+	incrementCounter(&turnClassifications, normalizeMetricLabel(class), 1)
+}
+
+// RecordDeltaReplay counts a turn that had to be replayed in full instead of
+// continuing the live upstream conversation ("new", "conv_mismatch",
+// "worker_mismatch", "prefix_mismatch", "identical" or "forced").
+func RecordDeltaReplay(reason string) {
+	incrementCounter(&deltaReplays, normalizeMetricLabel(reason), 1)
+}
+
+// RecordUpstreamSuspectedStop counts a turn that ended on a greeting, a short
+// unpunctuated fragment, or another shape consistent with an interrupted
+// upstream generation. The model label is normalized.
+func RecordUpstreamSuspectedStop(model string) {
+	incrementCounter(&upstreamSuspectedStops, normalizeMetricLabel(model), 1)
+}
+
+// RecordQuarantine counts a tool payload removed from the visible text before
+// it could reach the host ("untagged_mutation", "schema_invalid" or
+// "truncated").
+func RecordQuarantine(kind string) {
+	incrementCounter(&quarantineKinds, normalizeMetricLabel(kind), 1)
 }
 
 func incrementCounter(store *sync.Map, key string, delta uint64) {
@@ -177,6 +210,7 @@ func renderMetricsWithStats(stats WorkerPoolStats) []byte {
 	fmt.Fprintf(&b, "gemini_rate_limit_drops_total %d\n", rateLimitDrops.Load())
 
 	writeAgenticMetrics(&b)
+	writeTurnMetrics(&b)
 	writeWorkerMetrics(&b, stats)
 	writeCookieHealthMetric(&b)
 
@@ -216,6 +250,48 @@ func writeAgenticMetrics(b *strings.Builder) {
 	b.WriteString("# HELP gemini_ground_truth_directives_total Recovery directives injected after a recent tool result reported an error.\n")
 	b.WriteString("# TYPE gemini_ground_truth_directives_total counter\n")
 	fmt.Fprintf(b, "gemini_ground_truth_directives_total %d\n", groundTruthDirectives.Load())
+}
+
+// writeTurnMetrics renders the per-turn observability counters introduced in
+// Wave P1. The known labels stay visible at zero so a dashboard can tell "no
+// greeting this window" apart from "the proxy was never rebuilt".
+func writeTurnMetrics(b *strings.Builder) {
+	writeLabeledCounter(
+		b,
+		"gemini_turn_classification_total",
+		"Turns by end-of-stream classification (tool-bearing classes are the actionable ones).",
+		"class",
+		&turnClassifications,
+		[]string{
+			"tool_call", "greeting", "incomplete", "refusal",
+			"pseudo_report", "unbacked_completion", "untagged_mutation",
+			"schema_invalid", "ok",
+		},
+	)
+	writeLabeledCounter(
+		b,
+		"gemini_delta_replay_total",
+		"Turns replayed in full instead of continuing the live upstream conversation.",
+		"reason",
+		&deltaReplays,
+		[]string{"new", "conv_mismatch", "worker_mismatch", "prefix_mismatch", "identical", "forced"},
+	)
+	writeLabeledCounter(
+		b,
+		"gemini_upstream_suspected_stop_total",
+		"Turns whose terminal shape is consistent with an interrupted upstream generation.",
+		"model",
+		&upstreamSuspectedStops,
+		nil,
+	)
+	writeLabeledCounter(
+		b,
+		"gemini_quarantine_total",
+		"Tool payloads removed from visible text before reaching the host.",
+		"kind",
+		&quarantineKinds,
+		[]string{"untagged_mutation", "schema_invalid", "truncated"},
+	)
 }
 
 // writeLabeledCounter renders a counter family, keeping the known label values

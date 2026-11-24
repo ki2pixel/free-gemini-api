@@ -29,6 +29,9 @@ func main() {
 	if err := godotenv.Load(".env", "config.env"); err != nil {
 		log.Println("⚠️  No .env file found, using system environment variables")
 	}
+	// Apply configuration that depends on the loaded environment (including
+	// .env) before any session can be committed.
+	api.ConfigureSessionMemoryBudget()
 
 	// Check if invoked with --help or help flag
 	if len(os.Args) > 1 && (os.Args[1] == "--help" || os.Args[1] == "-h" || os.Args[1] == "help") {
