@@ -13,10 +13,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bogdanfinn/fhttp/cookiejar"
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/net/publicsuffix"
 )
 
 // Upstream HTTP exchange budgets. The former 900-second timeout let a silent
@@ -137,7 +139,17 @@ func secureReqID() int {
 }
 
 func NewClient(cookiesFile string) (*GeminiClient, error) {
-	jar := tls_client.NewCookieJar()
+	// tls_client.NewCookieJar() is deliberately avoided: it buckets cookies by
+	// eTLD+1 ("google.com" for every Google host) and de-duplicates by cookie
+	// NAME alone. With a Chrome export that carries OSID/__Secure-OSID for
+	// gemini.google.com, myaccount.google.com and console.cloud.google.com, the
+	// last subdomain in the file silently replaced the Gemini value. The
+	// RFC 6265 jar below keeps every (domain, path, name) entry distinct and
+	// only sends a cookie to hosts that domain-match it.
+	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cookie jar: %w", err)
+	}
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(int(upstreamRequestTimeout / time.Second)),
 		tls_client.WithClientProfile(profiles.Chrome_152),

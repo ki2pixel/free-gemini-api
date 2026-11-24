@@ -283,23 +283,21 @@ func sameCookieDomain(from, to *url.URL) bool {
 func (c *GeminiClient) DownloadFile(urlStr, savePath string) error {
 	// Build a separate tls-client that does NOT follow redirects automatically.
 	// We follow redirects manually so we can inject Cookie header only on
-	// trusted hops.
-	jar := tls_client.NewCookieJar()
+	// trusted hops. No jar is attached: the Cookie header of each hop is
+	// computed from the account jar instead of letting this throwaway client
+	// accumulate Set-Cookie responses from the download hosts.
 	dlClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(),
 		tls_client.WithTimeoutSeconds(60),
 		tls_client.WithClientProfile(profiles.Chrome_152),
-		tls_client.WithCookieJar(jar),
 		tls_client.WithNotFollowRedirects(),
 	)
 	if err != nil {
 		return fmt.Errorf("download client init failed: %w", err)
 	}
 
-	// Use the cookies of the worker client that produced the URL. The previous
-	// implementation preferred a process-global cookie snapshot from the
-	// extension bridge, which could belong to a different Google account.
-	cookieStr := c.rawCookies()
-
+	// Cookies are resolved per hop from the RFC 6265 jar: a .google.com cookie
+	// is never forwarded to googleusercontent.com, and a host-only cookie is
+	// never forwarded to a sibling host.
 	currentURL := urlStr
 	var previous *url.URL
 	for hops := 0; hops < 10; hops++ {
@@ -326,10 +324,13 @@ func (c *GeminiClient) DownloadFile(urlStr, savePath string) error {
 		req.Header.Set("sec-ch-ua-platform", CurrentPlatform)
 		req.Header.Set("Referer", geminiWebBaseURL+"/")
 
-		// The first hop may receive the account cookie jar. Redirect hops only
-		// receive it when they remain on the same cookie domain.
-		if cookieStr != "" && (previous == nil || sameCookieDomain(previous, current)) {
-			req.Header.Set("Cookie", cookieStr)
+		// The jar decides per hop: only cookies whose domain and path match
+		// this URL are attached. sameCookieDomain still gates a redirect hop
+		// so unrelated Google hosts never receive the account jar.
+		if previous == nil || sameCookieDomain(previous, current) {
+			if cookieStr := c.cookieHeaderForURL(current); cookieStr != "" {
+				req.Header.Set("Cookie", cookieStr)
+			}
 		}
 
 		resp, err := dlClient.Do(req)

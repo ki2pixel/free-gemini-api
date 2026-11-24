@@ -61,23 +61,15 @@ func (c *GeminiClient) loadCookies() error {
 	var cookieList []CookieObject
 	if err := json.Unmarshal(data, &cookieList); err == nil && len(cookieList) > 0 {
 		log.Printf("Loading cookies in JSON array format (%d cookies)", len(cookieList))
-		uGemini, _ := url.Parse("https://gemini.google.com")
-		var rawParts []string
+		jar := c.client.GetCookieJar()
 		for _, ck := range cookieList {
-			domain := strings.TrimPrefix(ck.Domain, ".")
-			u, _ := url.Parse("https://" + domain)
-			cookieObj := &http.Cookie{
-				Name:   ck.Name,
-				Value:  ck.Value,
-				Domain: ck.Domain,
-				Path:   ck.Path,
-				Secure: ck.Secure,
+			origin, cookie, ok := scopedCookie(ck)
+			if !ok {
+				continue
 			}
-			c.client.GetCookieJar().SetCookies(u, []*http.Cookie{cookieObj})
-			c.client.GetCookieJar().SetCookies(uGemini, []*http.Cookie{cookieObj})
-			rawParts = append(rawParts, fmt.Sprintf("%s=%s", ck.Name, ck.Value))
+			jar.SetCookies(origin, []*http.Cookie{cookie})
 		}
-		c.setRawCookies(strings.Join(rawParts, "; "))
+		c.setRawCookies(cookieHeaderForHost(jar, geminiCookieHost))
 		return nil
 	}
 
@@ -89,14 +81,113 @@ func (c *GeminiClient) loadCookies() error {
 
 	if err := json.Unmarshal(data, &cookieData); err == nil && cookieData.Cookies != "" {
 		log.Printf("Loading cookies in legacy string format")
-		c.setRawCookies(cookieData.Cookies)
-		u, _ := url.Parse("https://gemini.google.com")
-		cookies := parseCookieString(cookieData.Cookies, ".google.com")
-		c.client.GetCookieJar().SetCookies(u, cookies)
+		u, err := url.Parse("https://" + geminiCookieHost)
+		if err != nil {
+			return fmt.Errorf("invalid Gemini cookie origin: %w", err)
+		}
+		jar := c.client.GetCookieJar()
+		jar.SetCookies(u, parseCookieString(cookieData.Cookies, ".google.com"))
+		c.setRawCookies(cookieHeaderForHost(jar, geminiCookieHost))
 		return nil
 	}
 
 	return fmt.Errorf("unsupported cookie format in %s", c.cookiesFile)
+}
+
+// geminiCookieHost is the origin the web client authenticates against. Every
+// Cookie header and jar query is scoped to it.
+const geminiCookieHost = "gemini.google.com"
+
+// scopedCookie maps a Chrome-exported cookie to the URL of the host that owns
+// it. The cookie is registered against that exact origin and its Domain
+// attribute is preserved only for domain cookies, so sibling Google
+// subdomains (console.cloud.google.com, myaccount.google.com, ...) can never
+// overwrite a gemini.google.com cookie of the same name.
+func scopedCookie(ck CookieObject) (*url.URL, *http.Cookie, bool) {
+	rawDomain := strings.TrimSpace(ck.Domain)
+	host := strings.ToLower(strings.TrimPrefix(rawDomain, "."))
+	if ck.Name == "" || strings.ContainsAny(host, "/?#@") {
+		return nil, nil, false
+	}
+	// A file without any Domain attribute predates the extension export. Such
+	// cookies used to be concatenated into the request header verbatim, so they
+	// keep the historical .google.com scope instead of being dropped.
+	domainCookie := rawDomain == "" || !ck.HostOnly || strings.HasPrefix(rawDomain, ".")
+	if host == "" {
+		host = "google.com"
+	}
+	origin, err := url.Parse("https://" + host)
+	if err != nil || origin.Host == "" {
+		return nil, nil, false
+	}
+
+	cookie := &http.Cookie{
+		Name:   ck.Name,
+		Value:  ck.Value,
+		Path:   ck.Path,
+		Secure: ck.Secure,
+	}
+	if cookie.Path == "" || !strings.HasPrefix(cookie.Path, "/") {
+		cookie.Path = "/"
+	}
+	// A host-only cookie must be stored without a Domain attribute so the RFC
+	// 6265 jar only sends it to that exact host.
+	if domainCookie {
+		cookie.Domain = host
+	}
+	if ck.ExpirationDate > 0 {
+		cookie.Expires = time.Unix(int64(ck.ExpirationDate), 0)
+	}
+	return origin, cookie, true
+}
+
+// cookieHeaderFromJar renders the Cookie header a browser would send to u,
+// using only the jar entries whose domain and path match it.
+func cookieHeaderFromJar(jar http.CookieJar, u *url.URL) string {
+	if jar == nil || u == nil {
+		return ""
+	}
+	var parts []string
+	for _, cookie := range jar.Cookies(u) {
+		if cookie.Name == "" {
+			continue
+		}
+		parts = append(parts, cookie.Name+"="+cookie.Value)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// cookieHeaderForHost is cookieHeaderFromJar for a bare host name.
+func cookieHeaderForHost(jar http.CookieJar, host string) string {
+	if host == "" {
+		return ""
+	}
+	u, err := url.Parse("https://" + host + "/")
+	if err != nil {
+		return ""
+	}
+	return cookieHeaderFromJar(jar, u)
+}
+
+// cookieHeaderForURL renders the Cookie header applicable to an arbitrary
+// request URL (used for media downloads that may leave the Gemini origin).
+func (c *GeminiClient) cookieHeaderForURL(u *url.URL) string {
+	if c == nil || c.client == nil {
+		return ""
+	}
+	return cookieHeaderFromJar(c.client.GetCookieJar(), u)
+}
+
+// cookieHeader returns the Cookie header for the Gemini web origin, resolved
+// live from the jar. Using the jar instead of the rawCookies snapshot means
+// cookies rotated by an /app response (__Secure-1PSIDTS, __Secure-3PSIDTS) are
+// sent on the very next request, and cookies belonging to other Google
+// subdomains are never included.
+func (c *GeminiClient) cookieHeader() string {
+	if c == nil || c.client == nil {
+		return ""
+	}
+	return cookieHeaderForHost(c.client.GetCookieJar(), geminiCookieHost)
 }
 
 func parseCookieString(raw, domain string) []*http.Cookie {
