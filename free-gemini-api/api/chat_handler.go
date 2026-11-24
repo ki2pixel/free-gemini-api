@@ -66,21 +66,26 @@ func formatTruncationRetryDirective() string {
 // formatPseudoReportRetryDirective builds the corrective prompt used when the
 // model answers a tool-bearing request with a conversational progress update or
 // completion summary instead of calling the next required tool. The summary is
-// never committed; the retry forces the model back into the tool loop. The
-// directive also denies the hallucinated "0 remaining" tool/search quota that
-// the v3.5.4 Challenge 8 models invented before stopping.
+// never committed; the retry forces the model back into the tool loop with a
+// positive availability contract, never by naming a hallucinated quota.
 func formatPseudoReportRetryDirective() string {
-	return "[SYSTEM DIRECTIVE: You have UNLIMITED tool calls available and no tool limit or search limit exists in this session. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Do not emit conversational progress updates, do not claim the plan is formalised or applied, and do not synthesize summaries while planned modifications remain pending. Execute the next step immediately by emitting a <tool_call> XML block.]\n\n"
+	return "[SYSTEM DIRECTIVE: Every tool in the catalog is active turn after turn. Do not emit conversational progress updates, do not claim the plan is formalised or applied, and do not synthesize summaries while planned modifications remain pending. Execute the next step immediately by emitting a <tool_call> XML block.]\n\n"
+}
+
+// formatUnbackedCompletionRetryDirective builds the corrective prompt used when
+// a completion claim cites a path that no successful tool result confirmed.
+func formatUnbackedCompletionRetryDirective() string {
+	return "[SYSTEM DIRECTIVE: The previous message claimed completion but cited files that have no confirmed mutation in this session. Do not claim that a file was updated unless its tool result confirms the write succeeded. Continue the plan with the next required <tool_call>; if a planned file is still pending, create or edit it now.]\n\n"
 }
 
 // unlimitedToolExecutionDirective is prepended to every full replay after an
-// unusable tool-bearing turn. It restates the execution contract and denies
-// the hallucinated tool/search quota notice observed in Challenge 8.
-const unlimitedToolExecutionDirective = "[SYSTEM DIRECTIVE: You have UNLIMITED tool calls available and no tool limit or search limit exists in this session. All tools listed in [AVAILABLE TOOLS] are active and executed by the host environment. Execute the next step immediately by emitting a <tool_call> XML block. Complete the current task directly with tool calls. Do not emit a final completion report or summary while a planned modification or verification step is still pending; execute all tool calls until all files are modified.]\n\n"
+// unusable tool-bearing turn. It restates the execution contract positively:
+// no forbidden quota literal is ever sent to the model.
+const unlimitedToolExecutionDirective = "[SYSTEM DIRECTIVE: Every tool in the catalog is active turn after turn. Execute the next step immediately by emitting a <tool_call> XML block. Complete the current task directly with tool calls. Do not stop or synthesize until modifications and verifications are complete.]\n\n"
 
 // unusableActionErrorMessage is the single end-of-retries message shared by
 // the streaming error chunk and the non-streaming 502 response.
-const unusableActionErrorMessage = "upstream model output was unusable with tools (pseudo-report, refusal, or incomplete action without tool calls after retries)"
+const unusableActionErrorMessage = "upstream model output was unusable with tools (greeting, pseudo-report, refusal, unbacked completion, or incomplete action without tool calls after retries)"
 
 // newStreamErrorChunk builds the terminal SSE error chunk. Its finish_reason
 // is always "error": OpenAI-compatible hosts must treat the turn as a failed
@@ -617,6 +622,11 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		}
 	}
 
+	// Keep the unmasked transcript for the evidence ledger: masking may
+	// compact an old tool result past an error marker, and a synthetic
+	// [recovered] result is never evidence of a successful mutation.
+	pristineNonSystemMessages := nonSystemMessages
+
 	// Block Observation Masking: once a replay would consume more than 60% of
 	// the prompt budget, the transcript contains more than six tool
 	// observations, or the chat exceeds twelve messages, compact old tool
@@ -737,6 +747,11 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			sessionKey = sessionID + "|" + scope
 		}
 	}
+
+	// Rebuild the evidence ledger from the pristine transcript before any
+	// masking or reconciliation can drop old tool results. Only a successful
+	// tool result can back a later completion claim.
+	recordSessionLedgerFromMessages(sessionKey, pristineNonSystemMessages)
 
 	// Stateful doom-loop gateway: inspect the session's recent emitted calls
 	// before spending an upstream turn. A fresh task (only system/user
@@ -880,6 +895,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				schemaRetryDetail := ""
 				truncationRetry := false
 				pseudoReportRetry := false
+				unbackedRetry := false
 				transportRetries := 0
 				emptyGenerationRetries := 0
 				// sendModel is the upstream model actually queried. It starts as
@@ -901,6 +917,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							switch {
 							case pseudoReportRetry:
 								override = formatPseudoReportRetryDirective()
+							case unbackedRetry:
+								override = formatUnbackedCompletionRetryDirective()
 							case truncationRetry:
 								override = formatTruncationRetryDirective()
 							case schemaRetryDetail != "":
@@ -915,7 +933,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						// conversation with just the new transcript delta, or reset and
 						// replay the full transcript when that is not safe.
 						curConv := wWorker.Client.CurrentConversationIDFor(sessionKey, sendModel)
-						prompt, needReset := planSessionTurn(sessionKey, curConv, msgFlat)
+						prompt, needReset := planSessionTurn(sessionKey, wWorker.ID, curConv, msgFlat)
 						if needReset {
 							// The worker may have been recreated by a cookie re-sync
 							// (pool reload), dropping client-side conversation state
@@ -923,7 +941,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							// the recorded pointer when this worker owns it.
 							if conv, respID, choiceID, lastWorker, valid := peekSessionTurnConv(sessionKey); valid && conv != "" && lastWorker == wWorker.ID && curConv == "" {
 								wWorker.Client.RestoreConversationStateSession(sessionKey, sendModel, conv, respID, choiceID)
-								prompt, needReset = planSessionTurn(sessionKey, conv, msgFlat)
+								prompt, needReset = planSessionTurn(sessionKey, wWorker.ID, conv, msgFlat)
 							}
 						}
 						if needReset {
@@ -1004,6 +1022,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							truncationRetry = false
 							schemaRetryDetail = ""
 							pseudoReportRetry = false
+							unbackedRetry = false
 							invalidateSessionTurn(sessionKey)
 							forceFull = true
 							// The loop's post statement re-increments attempt, so
@@ -1016,6 +1035,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							truncationRetry = false
 							schemaRetryDetail = ""
 							pseudoReportRetry = false
+							unbackedRetry = false
 							invalidateSessionTurn(sessionKey)
 							forceFull = true
 							continue
@@ -1050,6 +1070,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						truncationRetry = false
 						schemaRetryDetail = ""
 						pseudoReportRetry = false
+						unbackedRetry = false
 						invalidateSessionTurn(sessionKey)
 						forceFull = true
 						// The loop's post statement re-increments attempt, so
@@ -1068,6 +1089,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							truncationRetry = true
 							schemaRetryDetail = ""
 							pseudoReportRetry = false
+							unbackedRetry = false
 							invalidateSessionTurn(sessionKey)
 							forceFull = true
 							continue
@@ -1078,6 +1100,29 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							schemaRetryDetail = detail
 							truncationRetry = false
 							pseudoReportRetry = false
+							unbackedRetry = false
+							invalidateSessionTurn(sessionKey)
+							forceFull = true
+							continue
+						}
+						if len(req.Tools) > 0 && gemini.ArrangeGeminiOutputWithTools(finalAttemptText, req.Tools).UntaggedMutation {
+							RecordArrangerRejection("untagged_mutation")
+							log.Printf("⚠️ Untagged mutating tool JSON detected in prose, retrying with truncation directive")
+							truncationRetry = true
+							schemaRetryDetail = ""
+							pseudoReportRetry = false
+							unbackedRetry = false
+							invalidateSessionTurn(sessionKey)
+							forceFull = true
+							continue
+						}
+						if len(req.Tools) > 0 && isUnbackedCompletion(finalAttemptText, req.Tools, sessionKey) {
+							RecordArrangerRejection("unbacked_completion")
+							log.Printf("⚠️ Unbacked completion claim detected (S7), retrying with ground-truth directive")
+							pseudoReportRetry = false
+							truncationRetry = false
+							schemaRetryDetail = ""
+							unbackedRetry = true
 							invalidateSessionTurn(sessionKey)
 							forceFull = true
 							continue
@@ -1088,6 +1133,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 								pseudoReportRetry = true
 								truncationRetry = false
 								schemaRetryDetail = ""
+								unbackedRetry = false
 							} else {
 								if len(req.Tools) > 0 && isToolRefusalOutput(finalAttemptText, req.Tools) {
 									RecordRefusalRetry()
@@ -1095,6 +1141,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 								truncationRetry = false
 								schemaRetryDetail = ""
 								pseudoReportRetry = false
+								unbackedRetry = false
 								log.Printf("⚠️ Unusable model output (%d chars), retrying on a fresh upstream conversation", len(finalAttemptText))
 							}
 							invalidateSessionTurn(sessionKey)
@@ -1138,7 +1185,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					return
 				}
 			}
-			if isUnusableModelOutput(finalText, req.Tools) {
+			if isUnusableModelOutput(finalText, req.Tools) || isUnbackedCompletion(finalText, req.Tools, sessionKey) {
 				invalidateSessionTurn(sessionKey)
 			} else if streamResp != nil {
 				lastWorkerID := ""
@@ -1177,18 +1224,17 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					writeRaw("data: [DONE]\n\n")
 					return
 				}
-				if arranged.IsToolCall {
-					recordSessionToolCalls(sessionKey, arranged.ToolCalls)
-				}
 				finishReason = arranged.FinishReason
 				finalContentForLog = arranged.CleanText
 
 				// A tool-bearing turn that ends with neither a tool call nor
 				// usable visible content would look like a successful stop to
 				// the host and silently end the task. This barrier also covers
-				// a pseudo-report or a refusal that survived the retry budget:
-				// its prose must never be returned as a successful stop.
-				if shouldBlockUnusableToolTurn(arranged, finalText, req.Tools) {
+				// a pseudo-report, a refusal, a quarantined untagged mutation,
+				// or an unbacked completion claim that survived the retry
+				// budget: none may be returned as a successful stop.
+				if shouldBlockUnusableToolTurn(arranged, finalText, req.Tools) ||
+					isUnbackedCompletion(finalText, req.Tools, sessionKey) {
 					RecordArrangerRejection("unusable_action_with_tools")
 					invalidateSessionTurn(sessionKey)
 					errChunk := newStreamErrorChunk(chunkID, model, createdTime, "\n\n[Error: "+unusableActionErrorMessage+". Please retry.]")
@@ -1197,6 +1243,10 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					}
 					writeRaw("data: [DONE]\n\n")
 					return
+				}
+				if arranged.IsToolCall {
+					recordSessionToolCalls(sessionKey, arranged.ToolCalls)
+					recordSessionLedgerToolCalls(sessionKey, arranged.ToolCalls)
 				}
 
 				// Emit any remaining reasoning tokens not yet streamed. The
@@ -1342,6 +1392,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		schemaRetryDetail := ""
 		truncationRetry := false
 		pseudoReportRetry := false
+		unbackedRetry := false
 		transportRetries := 0
 		emptyGenerationRetries := 0
 		// sendModel is the upstream model actually queried; it escalates to a
@@ -1360,6 +1411,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					switch {
 					case pseudoReportRetry:
 						override = formatPseudoReportRetryDirective()
+					case unbackedRetry:
+						override = formatUnbackedCompletionRetryDirective()
 					case truncationRetry:
 						override = formatTruncationRetryDirective()
 					case schemaRetryDetail != "":
@@ -1371,13 +1424,13 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				sendPrompt = override + msgFlat + antiLoopDirective + effectiveTurnCue
 			} else {
 				curConv := w.Client.CurrentConversationIDFor(sessionKey, sendModel)
-				prompt, needReset := planSessionTurn(sessionKey, curConv, msgFlat)
+				prompt, needReset := planSessionTurn(sessionKey, w.ID, curConv, msgFlat)
 				if needReset {
 					// Restore the recorded upstream conversation pointer after a
 					// pool reload recreated this worker (see stream path).
 					if conv, respID, choiceID, lastWorker, valid := peekSessionTurnConv(sessionKey); valid && conv != "" && lastWorker == w.ID && curConv == "" {
 						w.Client.RestoreConversationStateSession(sessionKey, sendModel, conv, respID, choiceID)
-						prompt, needReset = planSessionTurn(sessionKey, conv, msgFlat)
+						prompt, needReset = planSessionTurn(sessionKey, w.ID, conv, msgFlat)
 					}
 				}
 				if needReset {
@@ -1401,6 +1454,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					truncationRetry = false
 					schemaRetryDetail = ""
 					pseudoReportRetry = false
+					unbackedRetry = false
 					invalidateSessionTurn(sessionKey)
 					forceFull = true
 					// The loop's post statement re-increments attempt, so this
@@ -1428,6 +1482,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				truncationRetry = false
 				schemaRetryDetail = ""
 				pseudoReportRetry = false
+				unbackedRetry = false
 				invalidateSessionTurn(sessionKey)
 				forceFull = true
 				// The loop's post statement re-increments attempt, so this
@@ -1442,6 +1497,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					truncationRetry = true
 					schemaRetryDetail = ""
 					pseudoReportRetry = false
+					unbackedRetry = false
 					invalidateSessionTurn(sessionKey)
 					forceFull = true
 					continue
@@ -1452,6 +1508,29 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					schemaRetryDetail = detail
 					truncationRetry = false
 					pseudoReportRetry = false
+					unbackedRetry = false
+					invalidateSessionTurn(sessionKey)
+					forceFull = true
+					continue
+				}
+				if len(req.Tools) > 0 && gemini.ArrangeGeminiOutputWithTools(r.Text, req.Tools).UntaggedMutation {
+					RecordArrangerRejection("untagged_mutation")
+					log.Printf("⚠️ Untagged mutating tool JSON detected in prose, retrying with truncation directive")
+					truncationRetry = true
+					schemaRetryDetail = ""
+					pseudoReportRetry = false
+					unbackedRetry = false
+					invalidateSessionTurn(sessionKey)
+					forceFull = true
+					continue
+				}
+				if len(req.Tools) > 0 && isUnbackedCompletion(r.Text, req.Tools, sessionKey) {
+					RecordArrangerRejection("unbacked_completion")
+					log.Printf("⚠️ Unbacked completion claim detected (S7), retrying with ground-truth directive")
+					pseudoReportRetry = false
+					truncationRetry = false
+					schemaRetryDetail = ""
+					unbackedRetry = true
 					invalidateSessionTurn(sessionKey)
 					forceFull = true
 					continue
@@ -1462,6 +1541,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						pseudoReportRetry = true
 						truncationRetry = false
 						schemaRetryDetail = ""
+						unbackedRetry = false
 					} else {
 						if len(req.Tools) > 0 && isToolRefusalOutput(r.Text, req.Tools) {
 							RecordRefusalRetry()
@@ -1469,6 +1549,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						truncationRetry = false
 						schemaRetryDetail = ""
 						pseudoReportRetry = false
+						unbackedRetry = false
 						log.Printf("⚠️ Unusable model output or refusal (%d chars), retrying on a fresh upstream conversation", len(r.Text))
 					}
 					invalidateSessionTurn(sessionKey)
@@ -1510,7 +1591,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	// Commit the turn only if the model produced usable output; a blocked or
 	// empty generation invalidates the session conversation so the next
 	// request resets it and replays the full transcript.
-	if isUnusableModelOutput(resp.Text, req.Tools) {
+	if isUnusableModelOutput(resp.Text, req.Tools) || isUnbackedCompletion(resp.Text, req.Tools, sessionKey) {
 		invalidateSessionTurn(sessionKey)
 	} else {
 		lastWorkerID := ""
@@ -1537,16 +1618,20 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	}
 	// Mirror the streaming barrier: a tool-bearing turn with neither a call
 	// nor usable visible content must never be serialized as a successful
-	// completion, including a pseudo-report or refusal that survived retries.
-	if len(req.Tools) > 0 && shouldBlockUnusableToolTurn(arranged, resp.Text, req.Tools) {
+	// completion, including a pseudo-report, refusal, untagged mutation, or
+	// unbacked completion claim that survived retries.
+	if len(req.Tools) > 0 &&
+		(shouldBlockUnusableToolTurn(arranged, resp.Text, req.Tools) ||
+			isUnbackedCompletion(resp.Text, req.Tools, sessionKey)) {
 		RecordArrangerRejection("unusable_action_with_tools")
 		invalidateSessionTurn(sessionKey)
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": unusableActionErrorMessage,
 		})
 	}
 	if arranged.IsToolCall {
 		recordSessionToolCalls(sessionKey, arranged.ToolCalls)
+		recordSessionLedgerToolCalls(sessionKey, arranged.ToolCalls)
 	}
 	pTokens := CountTokensLimited(prompt)
 	cTokens := CountTokensLimited(arranged.CleanText)

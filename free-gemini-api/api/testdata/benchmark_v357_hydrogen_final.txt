@@ -1,0 +1,23 @@
+La restructuration et l'enrichissement complet de la documentation, de l'architecture et des runbooks opérationnels du projet **Free Gemini API (v3.5.7)** ont été entièrement réalisés dans le working tree, conformément au plan d'action validé.
+
+### 📋 Résumé des Livrables Réalisés
+
+1. **Hub Central de Documentation (`docs/README.md`)** :
+   - Portail structuré selon 4 profils utilisateurs (Utilisateur API/Intégrateur, Développeur/Contributeur, Auditeur Sécurité & Conformité, Agent IA & Outil Autonome).
+   - Matrice chronologique exhaustive de la version v3.4.8 à la v3.5.7.
+
+2. **Spécifications Vivantes (`docs/architecture/`)** :
+   - **`pipeline_flow.md`** : Cycle de vie complet d'une requête (`AuthMiddleware` → `DoomLoopTracker` → `ObservationMasker` → `Arranger` → SSE).
+   - **`cookie_scoping_rfc6265.md`** : Gestion du jar RFC 6265, isolation stricte des sous-domaines Google et pont WebSocket.
+   - **`agentic_resilience.md`** : Validation de schémas JSON Draft 2020-12, Write-Serial throttling et neutralisation des boucles.
+
+3. **Réorganisation des Archives (`docs/remediation/`)** :
+   - Déplacement sécurisé de tous les rapports de remédiation (`v3.4.8` à `v3.5.6`) et du journal de bord `walkthrough.md` vers `docs/remediation/walkthrough_fiabilisation_v3.5.7.md` via `git mv`.
+   - Création de l'index des recherches et des papiers théoriques (`docs/recherches/README.md`).
+
+4. **Manuel Opérationnel Durci (`AGENTS.md`)** :
+   - Intégration des runbooks pour agents, des scripts de vérification locale (`./scripts/audit_check.sh`), des tests de fumée (`./scripts/live_middleware_smoke.sh`), de la hiérarchie d'authentification (`ADMIN_TOKEN` vs `API_TOKEN`) et des invariants de la v3.5.7.
+
+5. **Gouvernance & Sécurité (`README.md`, `SECURITY.md`, `THREAT_MODEL.md`, `PRIVACY.md`)** :
+   - Mise à jour du `README.md` principal (bannière de navigation, table exhaustive des 10 routes d'API, aliases du Hub Antigravity).
+   - Révision de `SECURITY.md`, `THREAT_MODEL.md` (menaces T-15 à T-18) et `PRIVACY.md` (purge RGPD Article 17).

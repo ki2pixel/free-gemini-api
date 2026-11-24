@@ -42,19 +42,23 @@ func TestSessionTranscriptPlanning(t *testing.T) {
 	}
 
 	// No live conversation -> full replay.
-	if prompt, reset := planSessionTurn(key, "", flat+"x"); !reset || prompt != flat+"x" {
+	if prompt, reset := planSessionTurn(key, "worker-1", "", flat+"x"); !reset || prompt != flat+"x" {
 		t.Fatalf("empty conversation should reset: %q %v", prompt, reset)
 	}
 	// Identical transcript -> full replay (retry).
-	if prompt, reset := planSessionTurn(key, "conv-1", flat); !reset || prompt != flat {
+	if prompt, reset := planSessionTurn(key, "worker-1", "conv-1", flat); !reset || prompt != flat {
 		t.Fatalf("identical transcript should reset: %q %v", prompt, reset)
 	}
-	// Strict extension -> delta.
-	if prompt, reset := planSessionTurn(key, "conv-1", flat+"Assistant: hi\n"); reset || prompt != "Assistant: hi\n" {
-		t.Fatalf("extension should produce a delta: %q %v", prompt, reset)
+	// Strict extension without a user instruction -> anchored delta.
+	if prompt, reset := planSessionTurn(key, "worker-1", "conv-1", flat+"Assistant: hi\n"); reset || prompt != continuationAnchor+"Assistant: hi\n" {
+		t.Fatalf("tool-only extension should produce an anchored delta: %q %v", prompt, reset)
+	}
+	// A real user turn is not anchored.
+	if prompt, reset := planSessionTurn(key, "worker-1", "conv-1", flat+"User: next step\n"); reset || prompt != "User: next step\n" {
+		t.Fatalf("user extension should produce a plain delta: %q %v", prompt, reset)
 	}
 	// Divergent transcript -> full replay.
-	if prompt, reset := planSessionTurn(key, "conv-1", "different"); !reset || prompt != "different" {
+	if prompt, reset := planSessionTurn(key, "worker-1", "conv-1", "different"); !reset || prompt != "different" {
 		t.Fatalf("divergence should reset: %q %v", prompt, reset)
 	}
 
@@ -62,11 +66,11 @@ func TestSessionTranscriptPlanning(t *testing.T) {
 	if _, _, _, _, valid := peekSessionTurnConv(key); valid {
 		t.Fatal("invalidated turn should report convValid=false")
 	}
-	if _, reset := planSessionTurn(key, "conv-1", flat+"more"); !reset {
+	if _, reset := planSessionTurn(key, "worker-1", "conv-1", flat+"more"); !reset {
 		t.Fatal("invalidated conversation should reset")
 	}
 
-	if _, reset := planSessionTurn("unknown-session", "conv", "flat"); !reset {
+	if _, reset := planSessionTurn("unknown-session", "worker-1", "conv", "flat"); !reset {
 		t.Fatal("unknown session should reset")
 	}
 }

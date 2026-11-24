@@ -3,8 +3,13 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"log"
+	"path"
+	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"goapi/gemini"
 )
@@ -46,20 +51,25 @@ var (
 // evicted sessions simply fall back to a full replay on their next turn.
 const maxTrackedSessions = 256
 
+// continuationAnchor frames a delta that carries only tool results. Such a
+// delta has no user instruction, so an upstream model that lost the thread can
+// answer with a greeting or a fresh summary. The anchor is ephemeral: it is
+// prepended to the outbound delta only and never stored in lastFlat, so it
+// cannot create a false prefix mismatch on the next turn.
+const continuationAnchor = "[Continuation] Le dernier appel d'outil est terminé. Reprends le plan en cours au prochain point non réalisé. Ne salue pas, ne redémarre pas et ne produis pas de synthèse finale tant que des modifications ou vérifications restent à faire.\n\n"
+
 // planSessionTurn decides what to send upstream:
 //   - the full flattened transcript plus a conversation reset (new session,
 //     divergent history, or dead conversation), or
 //   - just the delta since the last committed turn, continuing the live
 //     upstream conversation.
 //
-// curConvID is the live conversation id on the worker that will serve the
-// request. A delta only requires that the worker still holds some live
-// conversation for this session: the upstream conversation may legitimately
-// have advanced since the last main turn (id rotation per response, or
-// harness side-requests such as session titling share the session key), and
-// sending the latest state id continues that same thread. An empty id means
-// the worker has no conversation for this session, so a full replay is due.
-func planSessionTurn(sessionKey, curConvID, flat string) (sendPrompt string, needReset bool) {
+// A delta is only safe when the session identity is proven: the same worker
+// must still own the session and its live upstream conversation id must be the
+// one the last turn was committed into. An empty or different worker/conversation
+// means the transcript suffix is semantically orphaned, so a full replay on a
+// fresh conversation is mandatory.
+func planSessionTurn(sessionKey, curWorkerID, curConvID, flat string) (sendPrompt string, needReset bool) {
 	sessionTurnMu.Lock()
 	defer sessionTurnMu.Unlock()
 
@@ -67,7 +77,12 @@ func planSessionTurn(sessionKey, curConvID, flat string) (sendPrompt string, nee
 	if e == nil || !e.convValid || e.lastFlat == "" {
 		return flat, true
 	}
-	if e.lastConvID == "" || curConvID == "" {
+	if e.lastWorkerID == "" || curWorkerID == "" || e.lastWorkerID != curWorkerID {
+		log.Printf("🔄 Session continuation reset for %q: worker_mismatch", sessionKey)
+		return flat, true
+	}
+	if e.lastConvID == "" || curConvID == "" || e.lastConvID != curConvID {
+		log.Printf("🔄 Session continuation reset for %q: conv_mismatch", sessionKey)
 		return flat, true
 	}
 	if flat == e.lastFlat {
@@ -76,9 +91,29 @@ func planSessionTurn(sessionKey, curConvID, flat string) (sendPrompt string, nee
 		return flat, true
 	}
 	if strings.HasPrefix(flat, e.lastFlat) {
-		return flat[len(e.lastFlat):], false
+		delta := flat[len(e.lastFlat):]
+		if delta == "" {
+			return flat, true
+		}
+		if !deltaContainsUserInstruction(delta) {
+			delta = continuationAnchor + delta
+		}
+		return delta, false
 	}
 	return flat, true
+}
+
+// deltaContainsUserInstruction reports whether a transcript delta carries a
+// real user turn. The flattened prompt renders user messages as lines starting
+// with "User: "; tool results use "[Tool Result for ...]" and system notices
+// use "[System Notice]". A delta with no such line is anchored for continuity.
+func deltaContainsUserInstruction(delta string) bool {
+	for _, line := range strings.Split(delta, "\n") {
+		if strings.HasPrefix(strings.TrimLeft(line, " \t\r"), "User: ") {
+			return true
+		}
+	}
+	return false
 }
 
 // systemScopeKey derives a short stable fingerprint from a request's system
@@ -195,6 +230,580 @@ func invalidateSessionTurn(sessionKey string) {
 	if e := sessionTurnState[sessionKey]; e != nil {
 		e.convValid = false
 	}
+}
+
+// isConversationalReset reports whether a tool-bearing turn produced only a
+// greeting or a generic help offer. Such output means the upstream model lost
+// the conversation context; it is never a valid final answer to a request that
+// declares tools. The classifier is deliberately narrow: code questions,
+// requests that mention paths or tags, and greetings followed by an actual
+// instruction are not classified.
+func isConversationalReset(text string, tools []map[string]any) bool {
+	if len(tools) == 0 {
+		return false
+	}
+	clean := strings.TrimSpace(text)
+	if clean == "" {
+		return false
+	}
+	lower := strings.ToLower(clean)
+	if utf8.RuneCountInString(lower) > 160 {
+		return false
+	}
+	if strings.ContainsAny(lower, "`/\\{}") || strings.Contains(lower, "http") {
+		return false
+	}
+	trimmed := strings.TrimLeft(lower, " \t\r\n#*>-•")
+	greeting := ""
+	for _, lead := range []string{"hello", "hi", "hey", "bonjour", "salut", "good morning", "good afternoon", "good evening", "greetings"} {
+		if !strings.HasPrefix(trimmed, lead) {
+			continue
+		}
+		rest := trimmed[len(lead):]
+		if rest == "" || strings.ContainsRune("!,.?:; ", rune(rest[0])) {
+			greeting = lead
+			break
+		}
+	}
+	helpMarkers := []string{
+		"how can i help", "how may i help", "how can i assist", "what can i do for you",
+		"comment puis-je vous aider", "comment puis-je t'aider",
+		"que puis-je faire pour vous", "en quoi puis-je vous aider", "en quoi puis-je t'aider",
+	}
+	if greeting != "" {
+		rest := strings.TrimLeft(trimmed[len(greeting):], " \t\r\n!,.?:;")
+		if rest == "" {
+			return true
+		}
+		for _, marker := range helpMarkers {
+			if strings.Contains(rest, marker) {
+				return true
+			}
+		}
+		if utf8.RuneCountInString(rest) <= 80 &&
+			(strings.Contains(rest, "help") || strings.Contains(rest, "aide") || strings.Contains(rest, "assist")) &&
+			strings.HasSuffix(rest, "?") {
+			return true
+		}
+		return false
+	}
+	for _, marker := range helpMarkers {
+		if strings.Contains(trimmed, marker) {
+			return true
+		}
+	}
+	if utf8.RuneCountInString(trimmed) < 80 &&
+		(strings.HasSuffix(trimmed, "?") || strings.HasSuffix(trimmed, "!")) &&
+		(strings.Contains(trimmed, "aide") || strings.Contains(trimmed, "help") || strings.Contains(trimmed, "assist")) {
+		return true
+	}
+	return false
+}
+
+// isIncompleteFinalProse reports whether a tool-bearing turn stopped on a very
+// short visible fragment that has no sentence-ending punctuation. It is the
+// Argon v3.5.7 shape: the upstream stream ended after 21 characters and the
+// proxy returned a successful stop. The predicate intentionally excludes any
+// text that contains a path, a code span, a colon, or a URL: those are
+// legitimate short answers ("README.md", "Done.").
+func isIncompleteFinalProse(text string, tools []map[string]any) bool {
+	if len(tools) == 0 {
+		return false
+	}
+	clean := strings.TrimSpace(text)
+	if clean == "" {
+		return false
+	}
+	if gemini.ArrangeGeminiOutputWithTools(clean, tools).IsToolCall {
+		return false
+	}
+	runes := []rune(clean)
+	if len(runes) < 10 || len(runes) > 80 {
+		return false
+	}
+	if strings.ContainsAny(clean, "\n`/.:") || strings.Contains(strings.ToLower(clean), "http") {
+		return false
+	}
+	switch runes[len(runes)-1] {
+	case '.', '!', '?', '…', '。', '！', '？':
+		return false
+	}
+	return true
+}
+
+// maxSessionLedgerPaths bounds the per-session evidence ledger. A session that
+// performs more mutations than this evicts its oldest confirmed paths; the
+// only consequence is a conservative retry, never a false success.
+const maxSessionLedgerPaths = 256
+
+// sessionLedger records the filesystem mutations confirmed by tool results.
+// It is the deterministic evidence behind completion claims: a path cited in a
+// final report must have been written by a tool whose result did not report an
+// error. The ledger is per session, bounded, and protected by its own mutex.
+type sessionLedger struct {
+	mu                 sync.Mutex
+	mutationsConfirmed map[string]struct{}
+	pendingMutations   map[string][]string
+	order              []string
+}
+
+var (
+	sessionLedgerMu sync.Mutex
+	sessionLedgers  = map[string]*sessionLedger{}
+)
+
+func getOrCreateSessionLedger(sessionKey string) *sessionLedger {
+	if sessionKey == "" {
+		return nil
+	}
+	sessionLedgerMu.Lock()
+	defer sessionLedgerMu.Unlock()
+	if ledger := sessionLedgers[sessionKey]; ledger != nil {
+		return ledger
+	}
+	if len(sessionLedgers) >= maxTrackedSessions {
+		for key := range sessionLedgers {
+			delete(sessionLedgers, key)
+			break
+		}
+	}
+	ledger := &sessionLedger{
+		mutationsConfirmed: make(map[string]struct{}),
+		pendingMutations:   make(map[string][]string),
+	}
+	sessionLedgers[sessionKey] = ledger
+	return ledger
+}
+
+// recordSessionToolCallPaths remembers the paths a mutation call targets,
+// keyed by tool_call_id, until the host returns the corresponding tool result.
+func recordSessionToolCallPaths(sessionKey, callID, toolName, argsJSON string) {
+	if sessionKey == "" || callID == "" {
+		return
+	}
+	paths := mutationPathsForToolCall(toolName, argsJSON)
+	if len(paths) == 0 {
+		return
+	}
+	if len(paths) > maxSessionLedgerPaths {
+		paths = paths[:maxSessionLedgerPaths]
+	}
+	ledger := getOrCreateSessionLedger(sessionKey)
+	if ledger == nil {
+		return
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	if len(ledger.pendingMutations) >= maxSessionLedgerPaths {
+		for id := range ledger.pendingMutations {
+			delete(ledger.pendingMutations, id)
+			break
+		}
+	}
+	ledger.pendingMutations[callID] = paths
+}
+
+// recordSessionToolResultOutcome promotes the pending paths of a tool call to
+// confirmed mutations only when the tool result is an explicit success. A
+// failed mutation is never evidence, even if a later prose report claims it.
+func recordSessionToolResultOutcome(sessionKey, toolCallID, resultText string, isError bool) {
+	if sessionKey == "" || toolCallID == "" {
+		return
+	}
+	ledger := getOrCreateSessionLedger(sessionKey)
+	if ledger == nil {
+		return
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	paths := ledger.pendingMutations[toolCallID]
+	delete(ledger.pendingMutations, toolCallID)
+	if isError || toolResultIndicatesError(resultText) {
+		return
+	}
+	for _, p := range paths {
+		ledger.addMutationLocked(p)
+	}
+}
+
+func (l *sessionLedger) addMutationLocked(p string) {
+	p = normalizeSessionPath(p)
+	if p == "" {
+		return
+	}
+	if _, ok := l.mutationsConfirmed[p]; ok {
+		return
+	}
+	if len(l.mutationsConfirmed) >= maxSessionLedgerPaths {
+		for len(l.order) > 0 {
+			oldest := l.order[0]
+			l.order = l.order[1:]
+			if _, ok := l.mutationsConfirmed[oldest]; ok {
+				delete(l.mutationsConfirmed, oldest)
+				break
+			}
+		}
+	}
+	l.mutationsConfirmed[p] = struct{}{}
+	l.order = append(l.order, p)
+}
+
+// recordSessionLedgerFromMessages replays the request transcript into the
+// ledger. The harness sends the full history on every turn, so the assistant
+// tool calls and their tool results are correlated by tool_call_id here.
+func recordSessionLedgerFromMessages(sessionKey string, messages []OpenAIChatMessage) {
+	if sessionKey == "" || len(messages) == 0 {
+		return
+	}
+	for _, message := range messages {
+		switch strings.ToLower(strings.TrimSpace(message.Role)) {
+		case "assistant":
+			for _, call := range message.ToolCalls {
+				recordSessionToolCallPaths(sessionKey, call.ID, call.Function.Name, call.Function.Arguments)
+			}
+		case "tool":
+			content := FlattenContent(message.Content)
+			recordSessionToolResultOutcome(sessionKey, message.ToolCallID, content, toolResultIndicatesError(content))
+		}
+	}
+}
+
+// recordSessionLedgerToolCalls records the calls actually emitted to the host.
+// It keeps the ledger complete even when a client sends only the tool result
+// message on the next turn without replaying the assistant call.
+func recordSessionLedgerToolCalls(sessionKey string, calls []gemini.ToolCall) {
+	for _, call := range calls {
+		recordSessionToolCallPaths(sessionKey, call.ID, call.Function.Name, call.Function.Arguments)
+	}
+}
+
+func toolResultIndicatesError(resultText string) bool {
+	lower := strings.ToLower(strings.TrimSpace(resultText))
+	if lower == "" {
+		return false
+	}
+	for _, marker := range recentToolErrorMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return strings.HasPrefix(lower, "error:") ||
+		strings.HasPrefix(lower, "error ") ||
+		strings.HasPrefix(lower, "failed:")
+}
+
+// mutationPathsForToolCall extracts the normalized paths a call can mutate.
+// Shell commands are parsed for the common file-moving/creating verbs and
+// redirects; a glob is never treated as evidence for a concrete path.
+func mutationPathsForToolCall(toolName, argsJSON string) []string {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	var args map[string]any
+	if strings.TrimSpace(argsJSON) != "" {
+		_ = json.Unmarshal([]byte(argsJSON), &args)
+	}
+	var raw []string
+	switch name {
+	case "write", "edit", "multiedit", "patch", "apply_patch", "replace":
+		for _, key := range []string{"path", "file_path", "filePath", "filepath"} {
+			if value, ok := args[key].(string); ok {
+				raw = append(raw, value)
+			}
+		}
+		for _, listKey := range []string{"files", "edits"} {
+			items, ok := args[listKey].([]any)
+			if !ok {
+				continue
+			}
+			for _, item := range items {
+				obj, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				for _, key := range []string{"path", "file_path", "filePath", "filepath"} {
+					if value, ok := obj[key].(string); ok {
+						raw = append(raw, value)
+					}
+				}
+			}
+		}
+	case "shell", "bash", "exec", "run", "terminal":
+		for _, key := range []string{"command", "cmd"} {
+			if value, ok := args[key].(string); ok {
+				raw = append(raw, shellMutationPaths(value)...)
+			}
+		}
+	}
+	return uniqueNormalizedPaths(raw)
+}
+
+func shellMutationPaths(command string) []string {
+	fields := strings.Fields(command)
+	var out []string
+	for i := 0; i < len(fields); i++ {
+		token := strings.Trim(fields[i], `"'`)
+		switch {
+		case token == ">" || token == ">>" || token == "tee":
+			if i+1 < len(fields) {
+				out = append(out, strings.Trim(fields[i+1], `"'`))
+			}
+		case strings.HasPrefix(token, ">") && len(token) > 1:
+			out = append(out, strings.TrimPrefix(strings.TrimPrefix(token, ">>"), ">"))
+		case token == "mkdir" || token == "touch" || token == "rm" || token == "rmdir" || token == "unlink":
+			for j := i + 1; j < len(fields); j++ {
+				arg := strings.Trim(fields[j], `"'`)
+				if strings.HasPrefix(arg, "-") {
+					continue
+				}
+				if strings.ContainsAny(arg, "|&;") {
+					break
+				}
+				out = append(out, arg)
+			}
+		case token == "mv" || token == "cp":
+			operands := shellOperands(fields[i+1:])
+			if len(operands) >= 2 {
+				out = append(out, operands[len(operands)-2:]...)
+			}
+		case token == "git" && i+1 < len(fields) && (fields[i+1] == "mv" || fields[i+1] == "rm"):
+			operands := shellOperands(fields[i+2:])
+			if len(operands) >= 2 {
+				out = append(out, operands[len(operands)-2:]...)
+			}
+		}
+	}
+	return out
+}
+
+func shellOperands(fields []string) []string {
+	var out []string
+	for _, field := range fields {
+		arg := strings.Trim(field, `"'`)
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if strings.ContainsAny(arg, "|&;") {
+			break
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+func uniqueNormalizedPaths(paths []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		normalized := normalizeSessionPath(p)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out
+}
+
+func normalizeSessionPath(p string) string {
+	p = strings.TrimSpace(p)
+	p = strings.Trim(p, "`'\"")
+	p = strings.TrimPrefix(p, "file://")
+	p = strings.ReplaceAll(p, "\\", "/")
+	if p == "" || p == "." {
+		return ""
+	}
+	if strings.Contains(p, "*") {
+		return ""
+	}
+	cleaned := path.Clean(p)
+	if cleaned == "." || cleaned == "/" {
+		return ""
+	}
+	return strings.TrimSuffix(cleaned, "/")
+}
+
+// completionClaimSnippets is the observed v3.5.7 completion lexicon. It is a
+// safety net for claims that cite no concrete path; the ledger is the strong
+// invariant when paths are present.
+var completionClaimSnippets = []string{
+	"ont été entièrement réalisés",
+	"ont été entièrement réalisées",
+	"ont été entièrement exécutés",
+	"ont été entièrement exécutées",
+	"entièrement réalisé",
+	"entièrement réalisée",
+	"résumé des livrables",
+	"livrables réalisés",
+	"dans le working tree",
+	"conformément au plan d'action validé",
+	"the task is complete",
+	"all files have been updated",
+	"the plan has been fully executed",
+	"everything is in place",
+	// Earlier completion forms already covered by pseudoReportSnippets.
+	"a été réalisée et vérifiée",
+	"a été effectuée avec succès",
+	"ont été mis à jour et synchronisés",
+	"a été appliqué avec succès",
+	"a été appliquée avec succès",
+	"a été formalisé",
+	"a été formalisée",
+	"exécuté avec succès",
+	"exécutée avec succès",
+	"a été entièrement exécuté",
+	"a été entièrement exécutée",
+}
+
+var completionClaimPairs = [][2]string{
+	{"tous les fichiers", "ont été"},
+	{"l'ensemble des", "a été"},
+}
+
+var (
+	backtickedClaimRegex = regexp.MustCompile("`([^`\\n]{1,200})`")
+	claimedPathSuffixes  = []string{".md", ".go", ".json", ".yml", ".yaml", ".sh", ".txt", ".sql", ".mod", ".sum", ".html", ".css", ".js", ".ts", ".tsx", ".jsx", ".py", ".rs", ".toml", ".env"}
+)
+
+func isCompletionClaim(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	// A question is a request for information, not a completion claim, even
+	// when it quotes a past-tense completion form.
+	if strings.HasSuffix(trimmed, "?") || strings.HasSuffix(trimmed, "？") {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	for _, snippet := range completionClaimSnippets {
+		if strings.Contains(lower, snippet) {
+			return true
+		}
+	}
+	for _, pair := range completionClaimPairs {
+		if strings.Contains(lower, pair[0]) && strings.Contains(lower, pair[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// isUnbackedCompletion reports whether a tool-bearing turn claims completion
+// while citing a path that no successful tool result confirmed. A claim with
+// no cited path falls back to the observed completion lexicon. The classifier
+// never applies when a validated tool call is present or when the request
+// declares no tools.
+func isUnbackedCompletion(cleanText string, tools []map[string]any, sessionKey string) bool {
+	if len(tools) == 0 || strings.TrimSpace(cleanText) == "" {
+		return false
+	}
+	arranged := gemini.ArrangeGeminiOutputWithTools(cleanText, tools)
+	if arranged.IsToolCall || len(arranged.ToolCalls) > 0 {
+		return false
+	}
+	text := arranged.CleanText
+	if !isCompletionClaim(text) {
+		return false
+	}
+	paths := extractClaimedPaths(text)
+	if len(paths) == 0 {
+		return true
+	}
+	mutations := sessionMutationSnapshot(sessionKey)
+	for _, p := range paths {
+		if !pathBackedBy(p, mutations) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractClaimedPaths(text string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, match := range backtickedClaimRegex.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		raw := strings.TrimSpace(match[1])
+		if !looksLikeClaimedPath(raw) {
+			continue
+		}
+		normalized := normalizeSessionPath(raw)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out
+}
+
+func looksLikeClaimedPath(raw string) bool {
+	if raw == "" || strings.ContainsAny(raw, " \t\r\n") || strings.Contains(raw, "://") {
+		return false
+	}
+	if strings.Contains(raw, "*") || strings.HasPrefix(raw, "-") {
+		return false
+	}
+	if strings.Contains(raw, "/") {
+		return true
+	}
+	lower := strings.ToLower(raw)
+	for _, suffix := range claimedPathSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	switch lower {
+	case "dockerfile", "makefile", "license":
+		return true
+	}
+	return false
+}
+
+func pathBackedBy(claim string, mutations map[string]struct{}) bool {
+	claim = normalizeSessionPath(claim)
+	if claim == "" || len(mutations) == 0 {
+		return false
+	}
+	if _, ok := mutations[claim]; ok {
+		return true
+	}
+	// A directory claim is backed when a confirmed mutation lives inside it.
+	for mutation := range mutations {
+		if strings.HasPrefix(mutation, claim+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionMutationSnapshot(sessionKey string) map[string]struct{} {
+	if sessionKey == "" {
+		return nil
+	}
+	sessionLedgerMu.Lock()
+	ledger := sessionLedgers[sessionKey]
+	sessionLedgerMu.Unlock()
+	if ledger == nil {
+		return nil
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	if len(ledger.mutationsConfirmed) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(ledger.mutationsConfirmed))
+	for p := range ledger.mutationsConfirmed {
+		out[p] = struct{}{}
+	}
+	return out
 }
 
 // isToolRefusalOutput detects if the model generated a canned disclaimer or
@@ -416,6 +1025,23 @@ var pseudoReportSnippets = []string{
 	"bilan de la synchronisation",
 	"plan de synchronisation et de vérification",
 	"le plan de synchronisation et de vérification",
+	// Premature completion report observed in the v3.5.7 Hydrogen transcript
+	// (msg 05): the claim uses plural past-tense forms and the "working tree"
+	// wording that the earlier lexicon missed.
+	"ont été entièrement réalisés",
+	"ont été entièrement réalisées",
+	"ont été entièrement exécutés",
+	"ont été entièrement exécutées",
+	"entièrement réalisé",
+	"entièrement réalisée",
+	"résumé des livrables",
+	"livrables réalisés",
+	"dans le working tree",
+	"conformément au plan d'action validé",
+	"the task is complete",
+	"all files have been updated",
+	"the plan has been fully executed",
+	"everything is in place",
 }
 
 // isPseudoProgressReport reports whether a tool-bearing turn produced only a
@@ -455,8 +1081,12 @@ func isSchemaInvalidOutput(text string, tools []map[string]any) bool {
 var recentToolErrorMarkers = []string{
 	"could not find oldstring",
 	"could not find old_string",
+	"oldstring not found",
+	"old_string not found",
 	"oldstring must not be empty",
 	"old_string must not be empty",
+	"file not found",
+	"permission denied",
 	"invalid arguments for tool",
 	"arguments provided:",
 	"tool execution failed",
@@ -672,6 +1302,12 @@ func isUnusableModelOutput(text string, tools []map[string]any) bool {
 		return true
 	}
 	arranged := gemini.ArrangeGeminiOutputWithTools(text, tools)
+	// An untagged mutation was quarantined from CleanText. Even if a valid
+	// tagged call is also present, the turn is not safe to commit: the model
+	// was cut off inside a second payload and a retry is required.
+	if arranged.UntaggedMutation {
+		return true
+	}
 	// A real, arranger-validated tool call always wins over the prose
 	// classifiers below: a payload that merely quotes a canned error, a
 	// refusal, or a completion marker is still a legitimate action.
@@ -684,6 +1320,16 @@ func isUnusableModelOutput(text string, tools []map[string]any) bool {
 	// must be replayed on a clean conversation instead of being returned as a
 	// successful stop.
 	if strings.TrimSpace(arranged.CleanText) == "" {
+		return true
+	}
+	// A greeting on a tool-bearing request signals a lost upstream context;
+	// it is never a valid final answer.
+	if isConversationalReset(arranged.CleanText, tools) {
+		return true
+	}
+	// A very short, unpunctuated visible fragment signals an upstream stream
+	// cut off after the reasoning block, not a completed answer.
+	if isIncompleteFinalProse(arranged.CleanText, tools) {
 		return true
 	}
 	// Canned upstream failure strings emitted by gemini.google.com when its
@@ -731,11 +1377,18 @@ func isEmptyGenerationOutput(text string, tools []map[string]any) bool {
 
 // shouldBlockUnusableToolTurn reports whether the final tool-bearing output
 // must be replaced by an explicit error instead of being returned as a
-// successful stop. It covers an empty/thought-only turn and any output already
-// classified as unusable (refusal, pseudo-report, canned failure). A real,
+// successful stop. It covers an empty/thought-only turn, a quarantined
+// untagged mutation, and any output already classified as unusable (greeting,
+// incomplete prose, refusal, pseudo-report, or canned failure). A real,
 // arranger-validated tool call is never blocked.
 func shouldBlockUnusableToolTurn(arranged *gemini.ArrangedOutput, rawText string, tools []map[string]any) bool {
-	if arranged == nil || arranged.IsToolCall || len(arranged.ToolCalls) > 0 {
+	if arranged == nil {
+		return false
+	}
+	if arranged.UntaggedMutation {
+		return true
+	}
+	if arranged.IsToolCall || len(arranged.ToolCalls) > 0 {
 		return false
 	}
 	if strings.TrimSpace(arranged.CleanText) == "" {

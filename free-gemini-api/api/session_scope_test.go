@@ -246,14 +246,18 @@ func TestIsPseudoProgressReport_HydrogenAndTaskTranscripts(t *testing.T) {
 		directive := formatPseudoReportRetryDirective()
 		for _, want := range []string{
 			"[SYSTEM DIRECTIVE:",
-			"You have UNLIMITED tool calls available",
-			"no tool limit or search limit exists",
+			"Every tool in the catalog is active turn after turn",
 			"Do not emit conversational progress updates",
 			"do not claim the plan is formalised or applied",
 			"emitting a <tool_call> XML block",
 		} {
 			if !strings.Contains(directive, want) {
 				t.Errorf("pseudo-report directive for %s does not contain %q", model, want)
+			}
+		}
+		for _, forbidden := range []string{"0 remaining", "maximum number of tool", "search calls"} {
+			if strings.Contains(directive, forbidden) {
+				t.Errorf("pseudo-report directive for %s must not contain %q", model, forbidden)
 			}
 		}
 	}
@@ -263,8 +267,7 @@ func TestFormatPseudoReportRetryDirective(t *testing.T) {
 	directive := formatPseudoReportRetryDirective()
 	for _, want := range []string{
 		"[SYSTEM DIRECTIVE:",
-		"You have UNLIMITED tool calls available",
-		"no tool limit or search limit exists",
+		"Every tool in the catalog is active turn after turn",
 		"Do not emit conversational progress updates",
 		"do not claim the plan is formalised or applied",
 		"do not synthesize summaries while planned modifications remain pending",
@@ -274,18 +277,27 @@ func TestFormatPseudoReportRetryDirective(t *testing.T) {
 			t.Errorf("pseudo-report directive %q does not contain %q", directive, want)
 		}
 	}
+	for _, forbidden := range []string{"0 remaining", "maximum number of tool", "search calls"} {
+		if strings.Contains(directive, forbidden) {
+			t.Errorf("pseudo-report directive must not contain %q: %q", forbidden, directive)
+		}
+	}
 }
 
 func TestUnlimitedToolExecutionDirective(t *testing.T) {
 	for _, want := range []string{
 		"[SYSTEM DIRECTIVE:",
-		"You have UNLIMITED tool calls available",
-		"no tool limit or search limit exists",
+		"Every tool in the catalog is active turn after turn",
 		"emitting a <tool_call> XML block",
-		"planned modification or verification step is still pending",
+		"Do not stop or synthesize until modifications and verifications are complete",
 	} {
 		if !strings.Contains(unlimitedToolExecutionDirective, want) {
 			t.Errorf("full replay directive %q does not contain %q", unlimitedToolExecutionDirective, want)
+		}
+	}
+	for _, forbidden := range []string{"0 remaining", "maximum number of tool", "search calls"} {
+		if strings.Contains(unlimitedToolExecutionDirective, forbidden) {
+			t.Errorf("full replay directive must not contain %q: %q", forbidden, unlimitedToolExecutionDirective)
 		}
 	}
 }

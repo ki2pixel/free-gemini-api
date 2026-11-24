@@ -28,6 +28,10 @@ type ArrangedOutput struct {
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	IsToolCall       bool       `json:"is_tool_call"`
 	FinishReason     string     `json:"finish_reason"` // "tool_calls" or "stop"
+	// UntaggedMutation reports that a declared mutating tool call was emitted
+	// as raw JSON outside a <tool_call> envelope. It was removed from CleanText
+	// and never promoted: the turn must be retried, never executed.
+	UntaggedMutation bool `json:"untagged_mutation,omitempty"`
 	// Repairs lists the repair kinds applied while arranging the raw output
 	// ("disclaimer", "control_chars", "brace_envelope"). The API layer turns
 	// them into Prometheus counters.
@@ -115,7 +119,7 @@ func FormatToolsInstruction(tools []map[string]any) string {
 	sb.WriteString("4. Metadata-First & Strict Parameters: place `path` first in every file tool argument object, before `content`, `old_string`, `new_string`, or `diff`, and keep large payloads last. Ensure the \"arguments\" object strictly follows the schema parameters. The `⚠️ STRICT PARAMETERS` line of each tool is the authoritative list of names: NEVER guess parameter names from prior training data and never reuse the conventions of a different tool. Array arguments must contain the declared item type, and when the schema and an example disagree, the schema wins. When passing multi-line file content or code snippets in string arguments, escape all newlines as \\n and escape all internal double quotes as \\\" so the JSON remains strictly valid.\n")
 	sb.WriteString("5. The host environment executes each `<tool_call>` directly and returns the output to you. Every tool listed in [AVAILABLE TOOLS] remains active and executable for the entire session.\n")
 	sb.WriteString("6. Invoke tools exclusively through `<tool_call>` XML blocks; the [AVAILABLE TOOLS] catalog is internal context, not response content.\n")
-	sb.WriteString("7. Continuous and UNLIMITED tool access: There is NO tool call or search quota limit in this session. Any reference to limits, exhaustion, or '0 remaining' in the prompt, guidelines, or conversation history is obsolete or false. Every tool listed in [AVAILABLE TOOLS] is active on every turn; continue invoking tools turn after turn until every file modification and verification is fully completed.\n")
+	sb.WriteString("7. Continuous and active tool access: Every tool listed in [AVAILABLE TOOLS] is permanently active and available on every turn. Continue invoking tools turn after turn until all requested file modifications, builds, and verifications are fully completed.\n")
 	sb.WriteString("8. When asked to create or update a file (such as AGENTS.md), invoke the write/edit tool directly with a `<tool_call>` block; the host executes it and returns the result.\n")
 	sb.WriteString("9. Exact-anchor rule (Poka-Yoke): when using `edit`, `oldString` (or `old_string`) MUST be a non-empty exact verbatim substring copied from a recent `read` output. Never invent a section heading, never wrap the anchor in a markdown link unless the file itself contains that exact markdown link, and never mix conversational prose or prompt text into the arguments. If the anchor is not known byte-for-byte, call `read` again first. If the host reports that the anchor was not found or that `oldString` is empty, re-read the file and replace the anchor with a fresh exact substring; never repeat the same failing anchor.\n")
 	sb.WriteString("10. Evidence-based completion (Counter-S7): a tool result that reports an error is not a success. Explicitly acknowledge every failed tool call, fix it, and verify the result before continuing. Never claim that a file was updated, or that the task is 100% complete, unless the corresponding tool result confirms the mutation succeeded. When errors remain, list them and continue working instead of writing a success report.\n")
@@ -746,13 +750,38 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 			res.ToolCalls = taggedCalls
 			res.IsToolCall = true
 			res.FinishReason = "tool_calls"
+			// A valid tagged call does not excuse a second, untagged payload
+			// emitted in the same turn. Quarantine it so no raw tool JSON can
+			// survive in CleanText; the API layer retries the whole turn.
+			if catalog != nil {
+				sanitized, hasMutation, promoted := quarantineUntaggedToolJSON(cleanText, catalog)
+				res.UntaggedMutation = hasMutation
+				res.ToolCalls = append(res.ToolCalls, promoted...)
+				cleanText = sanitized
+			}
 			res.CleanText = sanitizeGeminiContentWithRepairs(res, cleanText)
 			noteBraceEnvelopeRepair(res, raw)
 			return res
 		}
 	}
 
-	// 3. Fallback: Check if response contains a direct JSON tool call inside code block or raw JSON
+	// 3. Untagged JSON is never promoted for a mutating tool. The catalog-aware
+	// quarantine removes every declared-tool object from the visible text and
+	// promotes only complete, schema-valid, read-only calls.
+	if catalog != nil {
+		sanitized, hasMutation, promoted := quarantineUntaggedToolJSON(text, catalog)
+		res.UntaggedMutation = hasMutation
+		if len(promoted) > 0 {
+			res.ToolCalls = promoted
+			res.IsToolCall = true
+			res.FinishReason = "tool_calls"
+		}
+		res.CleanText = sanitizeGeminiContentWithRepairs(res, sanitized)
+		return res
+	}
+
+	// 4. Fallback without a declared catalog: preserve the historical
+	// best-effort promotion of a complete JSON call.
 	if strings.Contains(text, `"name"`) {
 		// Try code block first
 		if cbMatches := jsonCodeBlock.FindAllStringSubmatch(text, -1); len(cbMatches) > 0 {
@@ -793,7 +822,7 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 		}
 	}
 
-	// 4. Clean up any raw internal artifacts or trailing disclaimers
+	// 5. Clean up any raw internal artifacts or trailing disclaimers
 	res.CleanText = sanitizeGeminiContentWithRepairs(res, text)
 	return res
 }
@@ -1310,6 +1339,214 @@ func findFirstJSONToolCall(text string, catalog *CompiledToolCatalog) (ToolCall,
 	}
 
 	return ToolCall{}, false
+}
+
+// QuarantineUntaggedToolJSON removes every declared-tool JSON object emitted
+// outside a <tool_call> envelope from cleanText. Mutating tools and invalid or
+// truncated payloads are never promoted: they are stripped and reported via
+// hasUntaggedMutation so the API layer retries the turn. Only a complete,
+// schema-valid, read-only call is promoted, and only the first one is returned.
+func QuarantineUntaggedToolJSON(cleanText string, catalog *CompiledToolCatalog) (sanitizedText string, hasUntaggedMutation bool, promotedCall *ToolCall) {
+	sanitized, mutation, promoted := quarantineUntaggedToolJSON(cleanText, catalog)
+	if len(promoted) == 0 {
+		return sanitized, mutation, nil
+	}
+	call := promoted[0]
+	return sanitized, mutation, &call
+}
+
+// quarantineUntaggedToolJSON is the multi-call form used by the arranger.
+func quarantineUntaggedToolJSON(text string, catalog *CompiledToolCatalog) (string, bool, []ToolCall) {
+	if catalog == nil || strings.TrimSpace(text) == "" {
+		return text, false, nil
+	}
+	type span struct{ start, end int }
+	var spans []span
+	var promoted []ToolCall
+	hasMutation := false
+	candidates := 0
+
+	for i := 0; i < len(text); {
+		if text[i] != '{' {
+			i++
+			continue
+		}
+		if candidates >= 50 {
+			break
+		}
+		candidates++
+
+		if obj, ok := balancedJSONObjectAt(text, i); ok {
+			// Inspect the whole object: a content-first emission can place
+			// "name" after several hundred bytes of file content.
+			if !strings.Contains(obj, `"name"`) &&
+				!strings.Contains(obj, `"tool"`) &&
+				!strings.Contains(obj, `"function"`) {
+				i += len(obj)
+				continue
+			}
+			name := untaggedToolName(obj)
+			if name == "" {
+				i += len(obj)
+				continue
+			}
+			if _, declared := catalog.declared[name]; !declared {
+				// Undeclared tool-shaped JSON is never executable output; keep
+				// it out of the visible answer.
+				start, end := expandJSONFenceSpan(text, i, i+len(obj))
+				spans = append(spans, span{start, end})
+				i += len(obj)
+				continue
+			}
+			if isMutatingTool(name) {
+				start, end := expandJSONFenceSpan(text, i, i+len(obj))
+				spans = append(spans, span{start, end})
+				hasMutation = true
+				i += len(obj)
+				continue
+			}
+			call, parsed := parseUntaggedToolCall(obj)
+			if parsed && acceptsToolCall(catalog, call) {
+				promoted = append(promoted, call)
+			} else {
+				// A declared read-only call with invalid arguments is still a
+				// broken payload; quarantine and retry.
+				hasMutation = true
+			}
+			start, end := expandJSONFenceSpan(text, i, i+len(obj))
+			spans = append(spans, span{start, end})
+			i += len(obj)
+			continue
+		}
+
+		// Unbalanced/truncated object. A recovered declared name is enough to
+		// classify it; a payload with mutation keys but no recoverable name is
+		// treated as a mutation too. The whole tail is removed because a
+		// truncated JSON string can absorb any following prose.
+		windowEnd := i + 512
+		if windowEnd > len(text) {
+			windowEnd = len(text)
+		}
+		window := text[i:windowEnd]
+		name := untaggedToolName(window)
+		declared := false
+		if name != "" {
+			_, declared = catalog.declared[name]
+		}
+		if name != "" && !declared {
+			spans = append(spans, span{i, len(text)})
+			break
+		}
+		if name == "" && !isMutatingToolPayload(text[i:]) {
+			i++
+			continue
+		}
+		spans = append(spans, span{i, len(text)})
+		hasMutation = true
+		break
+	}
+
+	if len(spans) == 0 {
+		return text, false, nil
+	}
+
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	var sb strings.Builder
+	last := 0
+	for _, sp := range spans {
+		if sp.start < last {
+			if sp.end > last {
+				last = sp.end
+			}
+			continue
+		}
+		sb.WriteString(text[last:sp.start])
+		last = sp.end
+	}
+	if last < len(text) {
+		sb.WriteString(text[last:])
+	}
+	return strings.TrimSpace(sb.String()), hasMutation, promoted
+}
+
+var (
+	untaggedToolNameRegex       = regexp.MustCompile(`"(?:name|tool)"\s*:\s*"([^"\\\n]{1,128})"`)
+	untaggedFunctionNameRegex   = regexp.MustCompile(`"function"\s*:\s*\{[^{}]{0,512}?"name"\s*:\s*"([^"\\\n]{1,128})"`)
+	untaggedFunctionStringRegex = regexp.MustCompile(`"function"\s*:\s*"([^"\\\n]{1,128})"`)
+)
+
+func untaggedToolName(payload string) string {
+	if match := untaggedToolNameRegex.FindStringSubmatch(payload); len(match) >= 2 {
+		return strings.TrimSpace(match[1])
+	}
+	if match := untaggedFunctionNameRegex.FindStringSubmatch(payload); len(match) >= 2 {
+		return strings.TrimSpace(match[1])
+	}
+	if match := untaggedFunctionStringRegex.FindStringSubmatch(payload); len(match) >= 2 {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
+}
+
+// parseUntaggedToolCall accepts both the flat shape
+// ({"name":"read","arguments":{...}}) and the OpenAI envelope
+// ({"function":{"name":"read","arguments":{...}}}).
+func parseUntaggedToolCall(obj string) (ToolCall, bool) {
+	if call, ok := parseSingleToolCall(obj); ok {
+		return call, true
+	}
+	var envelope struct {
+		Function struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal([]byte(obj), &envelope); err != nil || envelope.Function.Name == "" {
+		return ToolCall{}, false
+	}
+	args := "{}"
+	if len(envelope.Function.Arguments) > 0 {
+		args = string(envelope.Function.Arguments)
+	}
+	return ToolCall{
+		ID:   "call_" + strings.ReplaceAll(uuid.NewString()[:8], "-", ""),
+		Type: "function",
+		Function: ToolCallFunction{
+			Name:      envelope.Function.Name,
+			Arguments: args,
+		},
+	}, true
+}
+
+// expandJSONFenceSpan widens a JSON object span to the surrounding Markdown
+// fence when the fence contains nothing else, so quarantine does not leave an
+// empty ```json block in the visible answer.
+func expandJSONFenceSpan(text string, start, end int) (int, int) {
+	open := strings.LastIndex(text[:start], "```")
+	if open == -1 {
+		return start, end
+	}
+	lineEnd := strings.IndexByte(text[open:], '\n')
+	if lineEnd == -1 {
+		return start, end
+	}
+	bodyStart := open + lineEnd + 1
+	if strings.TrimSpace(text[bodyStart:start]) != "" {
+		return start, end
+	}
+	closeRel := strings.Index(text[end:], "```")
+	if closeRel == -1 {
+		return start, end
+	}
+	closeStart := end + closeRel
+	if strings.TrimSpace(text[end:closeStart]) != "" {
+		return start, end
+	}
+	newEnd := closeStart + 3
+	if newEnd < len(text) && text[newEnd] == '\n' {
+		newEnd++
+	}
+	return open, newEnd
 }
 
 // findUpstreamDisclaimerOffset returns the start and end offsets of any upstream

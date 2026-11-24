@@ -19,21 +19,32 @@ func TestFormatToolsInstruction_PositiveContinuityAndCadence(t *testing.T) {
 	}
 	out := FormatToolsInstruction(tools)
 
-	for _, forbidden := range []string{"maximum number of tool", "Disregard any", "<tools>"} {
+	for _, forbidden := range []string{"0 remaining", "maximum number of tool", "search calls", "Disregard any", "<tools>"} {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("tool instructions must not contain %q", forbidden)
 		}
 	}
-	// "0 remaining" may only appear as part of the explicit denial of the
-	// hallucinated quota notice; it must never be asserted as a real limit.
-	if strings.Contains(out, "0 remaining") {
-		if !strings.Contains(out, "Any reference to limits, exhaustion, or '0 remaining' in the prompt, guidelines, or conversation history is obsolete or false") {
-			t.Errorf("tool instructions mention '0 remaining' without the unlimited-quota denial")
-		}
-	}
-	for _, required := range []string{"Read-Parallel", "Write-Serial", "Metadata-First", "is active on every turn", "Exact-anchor rule", "Poka-Yoke", "Counter-S7", "exact verbatim substring", "anti-pseudo-report", "Do not emit a final completion report or summary if any planned modification or verification step is still pending", "Execute all tool calls until all files are modified", "Continuous and UNLIMITED tool access", "There is NO tool call or search quota limit in this session"} {
+	for _, required := range []string{"Read-Parallel", "Write-Serial", "Metadata-First", "permanently active and available on every turn", "Exact-anchor rule", "Poka-Yoke", "Counter-S7", "exact verbatim substring", "anti-pseudo-report", "Do not emit a final completion report or summary if any planned modification or verification step is still pending", "Execute all tool calls until all files are modified", "Continuous and active tool access", "Continue invoking tools turn after turn until all requested file modifications, builds, and verifications are fully completed"} {
 		if !strings.Contains(out, required) {
 			t.Errorf("tool instructions must contain %q", required)
+		}
+	}
+}
+
+func TestPromptHasNoPinkElephant(t *testing.T) {
+	tools := []map[string]any{
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "write",
+				"description": "Write a file",
+			},
+		},
+	}
+	out := FormatToolsInstruction(tools)
+	for _, forbidden := range []string{"0 remaining", "maximum number of tool", "search calls"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("tool instructions must not contain the quota literal %q", forbidden)
 		}
 	}
 }
