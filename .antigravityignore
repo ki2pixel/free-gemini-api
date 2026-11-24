@@ -1,0 +1,149 @@
+# Antigravity Context & Indexing Ignore File
+# Définit les fichiers et répertoires ignorés par les agents Antigravity
+# Objectifs :
+#  1. Préservation du contexte : éviter de saturer la fenêtre de contexte avec des dumps volumineux ou des binaires
+#  2. Sécurité & Confidentialité : empêcher l'ingestion accidentelle de secrets, tokens et cookies de session
+#  3. Qualité des recherches : éliminer le bruit (faux-positifs) lors des explorations et recherches de code
+
+# ==============================================================================
+# 1. Gestion de versions & Métadonnées internes
+# ==============================================================================
+.git/
+.svn/
+.hg/
+
+# ==============================================================================
+# 2. Sécurité, Clés privées, Cookies de session & Variables d'environnement
+# ==============================================================================
+# Cookies de session utilisateur Gemini (critique P0 - fuite d'identité/auth)
+**/cookies/*.json
+!**/cookies/.gitkeep
+
+# Fichiers d'environnement et secrets
+.env
+.env.*
+!.env.example
+config.env
+**/.env
+*.secret
+
+# Clés cryptographiques privées et certificats
+*.pem
+*.key
+*.crt
+*.p12
+*.p8
+*.cert
+*_rsa
+*_dsa
+*_ed25519
+*_ecdsa
+
+# ==============================================================================
+# 3. Bases de données SQLite & Données locales de runtime
+# ==============================================================================
+# Bases SQLite, journaux WAL et Shared Memory
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite3-*
+free-gemini-api/data/
+**/data/*.db*
+**/data/*.txt
+
+# ==============================================================================
+# 4. Dumps de débogage, Traces LLM & Plans temporaires
+# ==============================================================================
+debug/
+**/debug/
+**/debug_*.txt
+task-*.txt
+pr_body.md
+results.sarif
+*.cact
+find_model_context.py
+**/models.json
+
+# ==============================================================================
+# 5. Données de métriques générées, Exports lourds & Médias
+# ==============================================================================
+**/output/
+**/output/*
+*.xlsx
+*.parquet
+
+# ==============================================================================
+# 6. Binaires compilés, Bibliothèques partagées & Exécutables Go
+# ==============================================================================
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+__debug_bin*
+goapi
+gemini-mcp
+gemini-api
+gemini-core
+main
+free-gemini-api/main
+free-gemini-api/goapi
+free-gemini-api/gemini-api
+free-gemini-api/gemini-core
+free-gemini-api/gemini-mcp
+
+# ==============================================================================
+# 7. Caches de test, Couverture & Écosystème Python (PoC & scripts)
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Environnements virtuels
+venv/
+.venv/
+env/
+ENV/
+
+# ==============================================================================
+# 8. Dépendances Web, CDP & Builds
+# ==============================================================================
+node_modules/
+dist/
+build/
+*.egg-info/
+browser-cdp/
+**/engines/
+
+# ==============================================================================
+# 9. Logs d'exécution, PIDs & Fichiers temporaires de sockets
+# ==============================================================================
+*.log
+logs/
+*.pid
+.server.port
+*.part
+*.tmp
+
+# ==============================================================================
+# 10. Outils d'agents AI & Métadonnées IDE / Système hôte
+# ==============================================================================
+.commandcode/
+.zenflow/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
