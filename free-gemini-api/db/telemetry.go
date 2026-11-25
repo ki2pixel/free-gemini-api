@@ -435,6 +435,7 @@ type SessionCorrelation struct {
 	StreamStalled    bool
 	TransportRetries int
 	ThoughtUnclosed  bool
+	VisibleLen       int
 }
 
 // BenchmarkTrialTelemetry is one row of v_benchmark_trial_telemetry.
@@ -560,7 +561,7 @@ func resolveSessionForTrial(trialID string) (SessionCorrelation, error) {
 	var stalled, unclosed int
 	err = DB.QueryRow(`
 		SELECT turn_class, finish_reason, doom_loop_action,
-		       stream_stalled, transport_retries, thought_unclosed
+		       stream_stalled, transport_retries, thought_unclosed, visible_len
 		FROM agent_turns
 		WHERE trial_id = ? AND session_id = ?
 		ORDER BY
@@ -575,7 +576,7 @@ func resolveSessionForTrial(trialID string) (SessionCorrelation, error) {
 			END,
 			completed_ms DESC
 		LIMIT 1`, trialID, corr.SessionID,
-	).Scan(&corr.TurnClass, &corr.FinishReason, &corr.DoomLoopAction, &stalled, &corr.TransportRetries, &unclosed)
+	).Scan(&corr.TurnClass, &corr.FinishReason, &corr.DoomLoopAction, &stalled, &corr.TransportRetries, &unclosed, &corr.VisibleLen)
 	if err == sql.ErrNoRows {
 		return corr, nil
 	}
@@ -611,6 +612,8 @@ func failureCodeFromCorrelation(corr SessionCorrelation) string {
 		return "E_UNBACKED_COMPLETION"
 	case corr.TurnClass == "greeting":
 		return "E_GREETING_LOOP"
+	case corr.TurnClass == "incomplete" && corr.VisibleLen > 0:
+		return "E_INCOMPLETE_PROSE"
 	case corr.ThoughtUnclosed:
 		return "E_UNCLOSED_THOUGHT"
 	}

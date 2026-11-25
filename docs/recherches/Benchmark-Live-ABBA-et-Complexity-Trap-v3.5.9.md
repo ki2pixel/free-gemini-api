@@ -185,11 +185,23 @@ Cible unique : **`s2_long_horizon_chain`** (lecture de 10 nœuds documentés `> 
 - **Disparition de trois classes historiques de pannes** : sur les **78 essais valides**, aucune boucle de salutation (`E_GREETING_LOOP`) ni aucun faux quota (`E_FALSE_QUOTA`) n'a provoqué d'échec final, et les `11 + 13` troncatures/schémas invalides ou écritures non taggées détectées en phase 3 et phase 4 ont toutes été filtrées avant exécution hôte.
 - **Corrélation SQLite de bout en bout** : la jointure `benchmark_trials ↔ agent_turns ↔ tool_call_spans ↔ turn_anomalies` explique chaque échec (retries transport, refus amont, pensée non fermée, arrêt à `0` outil) sans conserver le texte des prompts ni les arguments complets d'outils.
 
-### 4.2 Angle mort d'observabilité détecté (action future ciblée)
+### 4.2 Angle mort d'observabilité détecté et correctif post-campagne (`E_INCOMPLETE_PROSE`)
 
-Dans [`failureCodeFromCorrelation`](../../free-gemini-api/db/telemetry.go#L598-L618), le cas `corr.TurnClass == "incomplete"` n'est pas encore mappé vers `E_INCOMPLETE_PROSE`. Conséquence observée sur `ctrap-argon-keep8` run 2 : un tour 0 terminé en `incomplete`/`error` après 3 `refusal_retries`, suivi d'un tour 1 de 8 caractères, conserve le code générique `E_ORACLE_ASSERTION_FAIL` en base au lieu d'être reclassé en couche A (`E_INCOMPLETE_PROSE` / `E_UPSTREAM_REFUSAL`). Ajouter `case corr.TurnClass == "incomplete": return "E_INCOMPLETE_PROSE"` lors d'une prochaine passe rendra ce raffinement complet.
+Lors des campagnes `v3.5.9`, [`failureCodeFromCorrelation`](../../free-gemini-api/db/telemetry.go#L599-L621) ne traitait pas `corr.TurnClass == "incomplete"`. Conséquence observée sur `ctrap-argon-keep8` run 2 : un tour 0 terminé en `incomplete`/`error` (`visible_len = 28`) après `3` `refusal_retries`, suivi d'un tour 1 de `8` caractères (`0` outil, `transport_retries = 0`, `thought_unclosed = 0`), a conservé le code générique `E_ORACLE_ASSERTION_FAIL` dans `gemini.db`.
+
+Un mapping inconditionnel `TurnClass == "incomplete" → E_INCOMPLETE_PROSE` aurait toutefois été trop large, car [`classifyTurnOutput`](../../free-gemini-api/api/chat_handler.go#L195-L242) émet `"incomplete"` pour deux situations distinctes :
+- une **génération vide** (`strings.TrimSpace(clean) == ""`, `visible_len = 0`) ;
+- un **fragment de prose court sans ponctuation finale** (`isIncompleteFinalProse`, `visible_len > 0`).
+
+Le correctif appliqué post-campagne (dans [`free-gemini-api/db/telemetry.go`](../../free-gemini-api/db/telemetry.go#L426-L621) et [`free-gemini-api/db/benchmark_test.go`](../../free-gemini-api/db/benchmark_test.go#L309-L418), présent dans le working tree pour relecture) ajoute `VisibleLen` à `SessionCorrelation` et ne raffine vers `E_INCOMPLETE_PROSE` que lorsque `corr.TurnClass == "incomplete" && corr.VisibleLen > 0` (et uniquement sur un essai en échec `oracle_passed = false`), tout en conservant :
+- la priorité de `E_STALL_OR_TIMEOUT` si `transport_retries > 0` ou `stream_stalled = true` ;
+- le code oracle générique lorsque `turn_class = "incomplete"` et `visible_len = 0` (ou `E_UNCLOSED_THOUGHT` si `thought_unclosed = true`).
+
+> [!NOTE]
+> Les lignes historiques déjà enregistrées dans `gemini.db` (dont `ctrap-argon-keep8` run 2) restent volontairement inchangées en `E_ORACLE_ASSERTION_FAIL` : le correctif s'applique à toute future insertion/upsert d'essai.
 
 ### 4.3 Limites et protocole recommandé pour une confirmation statistique
 
 - Les comparaisons *Complexity Trap* portent sur **`n = 3` essais séquentiels** par modèle et par bras : elles établissent un signal encourageant en CoP et en fiabilité d'Hydrogen, pas une preuve statistique universelle multi-familles.
-- Pour trancher statistiquement *Complexity Trap*, relancer uniquement `^s2_long_horizon_chain$` avec **`n >= 5`** en alternant les bras (`keep=4` / `keep=8` paire par paire) et en analysant à part les abandons précoces à `0` outil émis (qui relèvent de la couche amont plutôt que du masquage d'observations).
+- Le harnais [`scripts/benchmark_matrix.sh`](../../scripts/benchmark_matrix.sh) ne sait pas alterner `keep=4` et `keep=8` au sein d'une même exécution, car `OBSERVATION_MASK_THINKING_KEEP_RECENT` est lu au démarrage du conteneur proxy.
+- Pour trancher statistiquement *Complexity Trap*, relancer uniquement `^s2_long_horizon_chain$` avec **`n >= 5`** via un orchestrateur externe redémarrant le conteneur entre chaque essai (`keep=4` / `keep=8` alternés avec un `BENCHMARK_SUITE_ID` distinct, soit env. `10` essais / `30–60 min` pour `Argon-high` seul ou `30` essais / `2–4 h` pour les 3 familles) et en analysant à part les abandons précoces à `0` outil émis.

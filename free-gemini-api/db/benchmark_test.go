@@ -309,6 +309,10 @@ func TestFailureCodeFromCorrelation(t *testing.T) {
 		{"untagged", SessionCorrelation{TurnClass: "untagged_mutation"}, "E_UNTAGGED_MUTATION"},
 		{"unbacked", SessionCorrelation{TurnClass: "unbacked_completion"}, "E_UNBACKED_COMPLETION"},
 		{"greeting", SessionCorrelation{TurnClass: "greeting"}, "E_GREETING_LOOP"},
+		{"incomplete prose", SessionCorrelation{TurnClass: "incomplete", VisibleLen: 28}, "E_INCOMPLETE_PROSE"},
+		{"empty generation stays generic", SessionCorrelation{TurnClass: "incomplete", VisibleLen: 0}, "none"},
+		{"empty generation keeps unclosed thought", SessionCorrelation{TurnClass: "incomplete", VisibleLen: 0, ThoughtUnclosed: true}, "E_UNCLOSED_THOUGHT"},
+		{"transport wins over incomplete", SessionCorrelation{TurnClass: "incomplete", VisibleLen: 28, TransportRetries: 1}, "E_STALL_OR_TIMEOUT"},
 		{"unclosed", SessionCorrelation{ThoughtUnclosed: true}, "E_UNCLOSED_THOUGHT"},
 		{"doom halt", SessionCorrelation{DoomLoopAction: "halt", TurnClass: "refusal"}, "E_DOOM_LOOP_HALT"},
 		{"clean", SessionCorrelation{TurnClass: "ok"}, "none"},
@@ -365,6 +369,30 @@ func TestBenchmarkFailureCodeRefinement(t *testing.T) {
 		t.Fatalf("coarse E_ORACLE_ASSERTION_FAIL refined to %q, want E_UPSTREAM_REFUSAL", got)
 	}
 
+	incomplete := baseAgentRecord("refine-session-incomplete")
+	incomplete.TrialID = "refine-incomplete"
+	incomplete.TurnClass = "incomplete"
+	incomplete.FinishReason = "error"
+	incomplete.VisibleLen = 28
+	if err := LogAgentTurn(incomplete); err != nil {
+		t.Fatalf("incomplete turn: %v", err)
+	}
+	if got := upsert("refine-incomplete", "E_ORACLE_ASSERTION_FAIL", false).PrimaryFailureCode; got != "E_INCOMPLETE_PROSE" {
+		t.Fatalf("incomplete prose refined to %q, want E_INCOMPLETE_PROSE", got)
+	}
+
+	empty := baseAgentRecord("refine-session-empty")
+	empty.TrialID = "refine-empty"
+	empty.TurnClass = "incomplete"
+	empty.FinishReason = "error"
+	empty.VisibleLen = 0
+	if err := LogAgentTurn(empty); err != nil {
+		t.Fatalf("empty turn: %v", err)
+	}
+	if got := upsert("refine-empty", "E_ORACLE_ASSERTION_FAIL", false).PrimaryFailureCode; got != "E_ORACLE_ASSERTION_FAIL" {
+		t.Fatalf("empty generation code = %q, want E_ORACLE_ASSERTION_FAIL", got)
+	}
+
 	// A transcript-proven failure must not be overwritten by a less precise
 	// proxy signal.
 	if got := upsert("refine-refusal", "E_FALSE_QUOTA", false).PrimaryFailureCode; got != "E_FALSE_QUOTA" {
@@ -384,5 +412,8 @@ func TestBenchmarkFailureCodeRefinement(t *testing.T) {
 	// A passing trial keeps its 'none'.
 	if got := upsert("refine-stall", "none", true).PrimaryFailureCode; got != "none" {
 		t.Fatalf("passing trial code = %q, want none", got)
+	}
+	if got := upsert("refine-incomplete", "none", true).PrimaryFailureCode; got != "none" {
+		t.Fatalf("passing incomplete trial code = %q, want none", got)
 	}
 }
