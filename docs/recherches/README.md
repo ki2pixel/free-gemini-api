@@ -7,7 +7,7 @@ choix ont été retenus et ce qui a été écarté.
 
 ---
 
-## 📄 Les six documents
+## 📄 Les sept documents
 
 ### 1. Arbitrage du benchmark en vol v3.5.7
 
@@ -145,6 +145,24 @@ au code Go réel du proxy et aux tables SQLite :
 
 ---
 
+### 7. Campagnes live v3.5.9 — `AB/BA` (`Chat` vs `Task`) et *Complexity Trap*
+
+[**Benchmark-Live-ABBA-et-Complexity-Trap-v3.5.9.md**](Benchmark-Live-ABBA-et-Complexity-Trap-v3.5.9.md)
+— 25 novembre 2026.
+
+Consignation complète des tirs expérimentaux live (78 essais valides corrélés
+dans `gemini.db`) sur les familles **Hydrogen**, **Neon** et **Argon** :
+- **Phase 3 (`S1`–`S3`, 60 essais valides)** : comparaison appariée `AB/BA`
+  Chat `[0]` vs Task `[40]` sur Hydrogen et Neon (Δ moyen `+0.250`, SE `0.090`,
+  IC 95 % `[0.073 ; 0.427]`) et référence Chat `[0]` pour `gemini-4-argon`
+  (`8/12`, zéro `E_FALSE_QUOTA` et zéro `E_GREETING_LOOP`).
+- **Phase 4 (*Complexity Trap*, `s2_long_horizon_chain`, 18 essais `high`)** :
+  comparaison `keep=4` (`4/9`, CoP `364 108.5` tok/pass, `411 256` o masqués)
+  vs `keep=8` (`6/9`, CoP `171 949.2` tok/pass, `142 171` o masqués), avec
+  diagnostic tour par tour des échecs précoces et limites de taille d'échantillon.
+
+---
+
 ## 🧭 Par où commencer
 
 | Votre intention | Document |
@@ -154,6 +172,7 @@ au code Go réel du proxy et aux tables SQLite :
 | Savoir ce qui a été transposé depuis un plugin JS | n° 2 — audit comparatif |
 | Reproduire la méthode d'audit | n° 3 — brief |
 | Approfondir l'observabilité, CoT faithfulness et pass^k | n° 5 & 6 — état de l'art & audit |
+| Consulter les résultats empiriques live `AB/BA` et *Complexity Trap* v3.5.9 | n° 7 — campagnes live v3.5.9 |
 
 ## 🔗 Voir aussi
 

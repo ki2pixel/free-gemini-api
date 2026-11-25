@@ -59,7 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | Full audit script | `./scripts/audit_check.sh` | **OK** — exit 0, api 66.6 %, db 80.3 %, gemini 74.8 % |
 | Benchmark harness suite | `./scripts/test_benchmark_matrix.sh` | **OK** — 163/163 tests PASS |
 
-> Les Phases 3 et 4 (tirs live `AB/BA` et protocole *Complexity Trap*) consomment du quota réel et ne sont pas revendiquées dans cette entrée : leurs résultats seront consignés dans `benchmark_trials` et le rapport lecture seule.
+### Live Benchmarks
+- **Campagnes expérimentales Phase 3 & Phase 4 consignées dans [`docs/recherches/Benchmark-Live-ABBA-et-Complexity-Trap-v3.5.9.md`](docs/recherches/Benchmark-Live-ABBA-et-Complexity-Trap-v3.5.9.md)** :
+  - **Phase 3 (suite 6 tâches `S1`–`S3`, 60 essais valides corrélés)** : sur les **24 paires `AB/BA` complètes** (**Hydrogen** + **Neon** avec opt-in `X-Allow-Task-Mode-For-Tools: true`), le mode **Task `[40]`** atteint **23/24 (0.958)** contre **17/24 (0.708)** en **Chat `[0]`** (Δ moyen `+0.250`, SE `0.090`, IC 95 % `[0.073 ; 0.427]` ; `pass^2` Hydrogen `0.424 → 1.000`, Neon `0.545 → 0.833`). En mode `sequential` Chat `[0]`, `gemini-4-argon` obtient **8/12 (0.667)** (`8/9 = 0.889` hors couche A). Zéro `E_FALSE_QUOTA` et zéro `E_GREETING_LOOP` sur l'ensemble des **78 essais valides**.
+  - **Phase 4 (*The Complexity Trap* sur `s2_long_horizon_chain`, 18 essais `high`)** : contrôle confirmé (`thinking_tier = 'high'` sur 18/18 essais ; masquage actif : `411 256` octets économisés en `keep=4` contre `142 171` octets en `keep=8`). En combiné sur `Hydrogen-high`, `Neon-high` et `Argon-high`, `keep=8` passe de **4/9 (`0.444`, CoP `364 108.5` tok/pass)** à **6/9 (`0.667`, CoP `171 949.2` tok/pass)**, porté par `Hydrogen-high` (`0/3 → 3/3`), avec `Neon-high` stable (`2/3 → 2/3`) et `Argon-high` (`2/3 → 1/3`, dont 2 arrêts précoces à `0` outil avant tout masquage). À `n = 3` séquentiels, le signal reste favorable en CoP mais dépendant de la famille et statistiquement non conclusif.
 
 ---
 
