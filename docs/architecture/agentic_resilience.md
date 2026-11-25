@@ -453,7 +453,109 @@ boucle d'outils externe ; il la remplace par une narration.
 
 ---
 
-## 13. Limites honnêtes
+## 13. Observabilité granulaire et auto-régulation
+
+### 13.1 `tool_call_spans` — l'échec absorbé reste visible
+
+Un retry réussi effaçait la trace de la tentative rejetée : la classe finale du
+tour (`tool_call`) ne disait rien du `schema_invalid` intermédiaire. Chaque
+candidat d'appel produit désormais une ligne, y compris rejeté ou mis en
+quarantaine :
+
+| `disposition` | Producteur |
+|---|---|
+| `emitted` | appel accepté, transmis au client |
+| `throttled_write_serial` | accepté puis écarté par le Write-Serial |
+| `rejected_schema_invalid` | `ValidateCall` faux, outil déclaré |
+| `rejected_undeclared_tool` | outil absent du catalogue |
+| `rejected_mid_value_truncation` | JSON coupé en pleine valeur |
+| `quarantined_untagged_mutation` | mutation émise hors enveloppe |
+
+Les boucles de retry appellent `recordRejectedAttempt` avant chaque `continue`,
+et les deux sorties terminales `schema_invalid` l'appellent aussi : l'échec
+absorbé par un retry réussi reste donc visible, avec `attempt_index` sur
+l'anomalie correspondante.
+
+Le tour `N+1` referme les spans du tour `N` via `role: "tool"` et
+`tool_call_id`, avec `result_is_error` (`toolResultIndicatesError`) et
+`roundtrip_ms` (colonne générée). Un span jamais refermé reste visible avec
+`result_received = 0` : c'est un signal, pas une donnée manquante.
+
+Contenu : `args_fingerprint` (SHA-256), `args_bytes`, `target_hint` limité à deux
+segments de chemin, et `validation_error` réduit par
+`StructuralValidationDetail`. Aucun argument brut n'atteint SQLite.
+
+### 13.2 `turn_anomalies` — journal catégoriel
+
+Neuf catégories (`arranger_repair`, `arranger_rejection`, `quarantine`,
+`doom_loop`, `stream_stall`, `ground_truth_directive`, `refusal_retry`,
+`unbacked_completion`, `context_reset`) et dix-huit codes bornés par `CHECK`.
+`attempt_index` conserve la tentative concernée, donc une anomalie absorbée par
+un retry reste comptée.
+
+### 13.3 *LoopRoute*
+
+`DoomLoopTracker` reçoit le résultat de l'appel précédent. La traîne
+`failedRepeatCountLocked()` compte les entrées consécutives de même empreinte
+marquées en échec :
+
+```text
+répétitions identiques, aucun échec connu   → warn 3, halt 5
+répétitions identiques, échecs consécutifs  → warn 2, halt 4
+```
+
+Un appel dont l'identifiant est inconnu de l'historique borné (32) ne crée
+aucune preuve, et `Reset()` efface les deux compteurs.
+
+### 13.4 Masquage thinking/error-aware
+
+`MaskOldToolObservationsForTier` élargit la fenêtre à 8 pour `medium`/`high` et
+préserve les deux erreurs d'outils les plus récentes hors fenêtre, sous réserve
+du budget `maxPromptBytes`. Les trois fonctions historiques restent inchangées,
+ce qui permet de comparer les deux régimes en A/B sans recompiler.
+`OBSERVATION_MASK_THINKING_KEEP_RECENT` force une valeur explicite pour tous les
+paliers ; c'est le levier du bras `keep=4` du protocole *Complexity Trap*.
+
+### 13.5 Banc corrélé et protocole de validité
+
+Chaque essai de `benchmark_trials` porte un `trial_id` que l'en-tête
+`X-Benchmark-Trial-ID` propage aux tours. La jointure `v_benchmark_trial_telemetry`
+expose les agrégats du tour, et `v_benchmark_cost_of_pass` calcule les tokens par
+essai réussi. Un verdict d'oracle est enregistré via
+`POST /v1/benchmark/trials` après un drain borné de la file de télémétrie, pour
+que le POST ne devance pas l'écriture asynchrone des tours.
+
+Le banc `scripts/benchmark_matrix.sh` combine trois signaux :
+
+1. **Oracle déterministe** : chaque tâche peut fournir un `verify.sh` ; le mode
+   `hybrid` (défaut) exige à la fois un transcript propre et un oracle vert.
+2. **Appariement `AB/BA`** : Chat `[0]` et Task `[40]` partagent un `pair_id` et
+   alternent l'ordre à chaque essai, ce qui neutralise la dérive temporelle.
+3. **Suite stratifiée** : six tâches (`2 S1`, `2 S2`, `2 S3`).
+   `S2_long_horizon_chain` lit dix nœuds de plus de 250 octets, puis corrige
+   deux nœuds non contigus : c'est la tâche cible du masquage.
+
+`BENCHMARK_TASK_FILTER` isole une tâche par expression `grep -E` (sur le
+`TASK_ID` déclaré ou le nom du dossier) et échoue avant tout tir si le motif est
+invalide ou sans correspondance. `scripts/benchmark_report.py` reste en lecture
+seule (SQLite `mode=ro`) et rapporte le taux brut, le taux conditionnel hors
+couche A, le delta apparié Task − Chat avec erreur-type par grappe, le
+Cost-of-Pass, le `roundtrip_ms` médian/moyen, les anomalies et
+`SUM(masked_obs_bytes_saved)`.
+
+Avant de conclure sur un écart *Complexity Trap*, trois conditions doivent être
+vérifiées :
+
+- le palier de réflexion est lu dans `agent_sessions.thinking_tier` (la table
+  `agent_turns` ne porte pas cette colonne) et vaut `medium` ou `high` ;
+- `SUM(masked_obs_bytes_saved) > 0` sur le bras `keep=4` : sinon le masquage ne
+  s'est pas activé et l'écart ne mesure rien ;
+- la tâche a bien produit au moins dix observations d'outils verboses, ce que
+  `S2_long_horizon_chain` garantit par construction.
+
+---
+
+## 14. Limites honnêtes
 
 1. **Le benchmark reste un `n = 1` par modèle.** Les propriétés prouvent les
    invariants du proxy, pas la distribution comportementale des modèles. Le
@@ -471,7 +573,7 @@ boucle d'outils externe ; il la remplace par une narration.
 
 ---
 
-## 14. Voir aussi
+## 15. Voir aussi
 
 - [pipeline_flow.md](pipeline_flow.md) — position de chaque mécanisme dans le cycle de requête
 - [cookie_scoping_rfc6265.md](cookie_scoping_rfc6265.md) — isolation des cookies

@@ -56,7 +56,11 @@ supprime :
 - les sessions de télémétrie (`agent_sessions`) dont la dernière activité dépasse
   `RETENTION_DAYS` jours, avec suppression en cascade de leurs tours
   (`agent_turns`) ; les tours d'une session encore active sont purgés
-  individuellement selon leur propre date.
+  individuellement selon leur propre date ;
+- les essais de benchmark (`benchmark_trials`) de plus de `RETENTION_DAYS` jours.
+  Leur `session_id` est mis à `NULL` par `ON DELETE SET NULL` dès que la session
+  correspondante est purgée : les métriques agrégées survivent sans conserver de
+  lien vers une session pseudonymisée.
 
 Les fichiers médias présents dans `output/` ne sont pas supprimés
 automatiquement par ce travailleur ; l'exploitant doit appliquer sa propre
@@ -85,6 +89,31 @@ La même règle s'applique aux tables de télémétrie persistées
   réversible, et par des compteurs de tokens.
 
 Ces tables ne permettent donc pas de reconstituer le contenu d'une conversation.
+
+Les essais de benchmark (`benchmark_trials`) suivent la même règle : `trial_id`
+est validé par liste blanche (`^[A-Za-z0-9_.:-]{1,128}$`), les dimensions
+stockées sont des noms de suite, de tâche, de modèle et de palier, et le verdict
+se limite à un booléen d'oracle, un code de sortie et des compteurs agrégés.
+Aucun prompt, aucune sortie de modèle et aucune adresse IP n'y sont écrits.
+
+Les diagnostics granulaires (`tool_call_spans`, `turn_anomalies`) appliquent les
+mêmes garanties :
+
+- `tool_call_spans.args_fingerprint` est un SHA-256 non réversible des arguments ;
+  `args_bytes` n'en donne que la taille ;
+- `tool_call_spans.target_hint` ne conserve que les **deux derniers segments** du
+  chemin visé (jamais de préfixe absolu, donc jamais de nom d'utilisateur ni de
+  répertoire personnel), et reste vide quand aucun chemin n'est identifiable ;
+- `tool_call_spans.validation_error` provient de `StructuralValidationDetail`,
+  qui ne retient que des faits structurels (nom de propriété manquante, type
+  attendu) et remplace tout message non reconnu par `schema validation failed` :
+  la valeur rejetée n'est jamais conservée ;
+- `turn_anomalies.detail` est catégoriel par construction (`attempt=2`) : aucun
+  extrait de réponse, de raisonnement ou d'argument.
+
+Supprimer une session efface en cascade ses spans et ses anomalies ; les lignes
+isolées sont également purgées sur leur propre date par le travailleur de
+rétention.
 
 Les journaux de requêtes (endpoint, méthode, IP, statut, latence) restent
 soumis à `RETENTION_DAYS` et ne sont jamais exportés dans les rapports

@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.9] - 2026-11-25
+
+> Figeage des Étapes 4 et 5 du chantier observabilité et benchmarking : corrélation déterministe des essais `benchmark_trials` avec la télémétrie, oracle `verify.sh`, appariement `AB/BA`, journal granulaire des appels d'outils et auto-régulation *LoopRoute*/masquage thinking-aware. Le banc embarqué passe de 3 à 6 tâches stratifiées et gagne un filtre de sélection ainsi qu'un rapport lecture seule.
+
+### Added
+- **Corrélation banc ↔ télémétrie (`db/db.go`, `db/telemetry.go`, `api/benchmark_trials.go`, `api/telemetry_routes.go`, `api/routes.go`)**:
+  - Table `benchmark_trials` (`STRICT`) indexée par suite/tâche/paradigme/palier et par `pair_id`, avec `session_id` en `ON DELETE SET NULL` : les métriques agrégées survivent à la purge RGPD de la session.
+  - Vues `v_benchmark_trial_telemetry` (agrégats de tours corrélés) et `v_benchmark_cost_of_pass` (tokens par essai réussi, jamais de division par zéro).
+  - Migration idempotente `ensureColumn` pour `agent_turns.trial_id` et index partiel associé sur une base existante.
+  - En-tête `X-Benchmark-Trial-ID` validé par liste blanche (`^[A-Za-z0-9_.:-]{1,128}$`) et autorisé en CORS ; il corrèle les tours d'une exécution avec le verdict d'oracle.
+  - Endpoints `POST /v1/benchmark/trials` (verdict), `GET /v1/benchmark/trials` (`?suite_id=&task_id=&limit=`, Cost-of-Pass) et `GET /v1/telemetry/sessions` (`?session_id=&trial_id=&limit=`).
+  - Drain borné `WaitTelemetryDrain` avant d'enregistrer un verdict, pour que le POST ne précède pas l'écriture asynchrone des tours.
+- **Observabilité granulaire et auto-régulation (`api/telemetry.go`, `api/chat_handler.go`, `api/doom_loop.go`, `api/observation_masker.go`)**:
+  - Table `tool_call_spans` : une ligne par tentative, y compris rejetée (`rejected_schema_invalid`, `rejected_undeclared_tool`, `rejected_mid_value_truncation`, `quarantined_untagged_mutation`, `throttled_write_serial`). Le tour `N+1` la referme via `tool_call_id`, avec `result_is_error` et `roundtrip_ms` (colonne générée, clamp temporel).
+  - Table `turn_anomalies` : neuf catégories et dix-huit codes bornés par `CHECK`, `attempt_index` conservé pour qu'une anomalie absorbée par un retry reste visible.
+  - Confidentialité à la source : `args_fingerprint` SHA-256, `args_bytes`, `target_hint` limité aux deux derniers segments, `validation_error` réduit par `StructuralValidationDetail`; `ToolCallDiagnostic.Arguments` reste `json:"-"`.
+  - `recordRejectedAttempt` et `transferPreTelemetry` couvrent les chemins streaming et non-streaming, y compris les sorties terminales `schema_invalid`.
+  - *LoopRoute* : `RecordToolOutcome` alimente un scan à rebours borné ; un appel identique déjà en échec avertit à **2** répétitions et coupe à **4** échecs consécutifs, tandis que les seuils historiques **3 / 5** restent inchangés sans preuve d'échec.
+  - `MaskOldToolObservationsForTier` porte la fenêtre à **8** pour `medium`/`high` et préserve les **2** erreurs d'outils les plus récentes hors fenêtre ; `OBSERVATION_MASK_THINKING_KEEP_RECENT` permet de forcer une valeur pour le protocole *Complexity Trap*.
+  - Vue `v_session_telemetry_summary` recréée par `DROP` + `CREATE` à chaque démarrage, donc les nouvelles colonnes apparaissent sur une base antérieure.
+- **Oracle déterministe et banc étendu (`scripts/benchmark_matrix.sh`, `scripts/benchmark_tasks/`, `scripts/benchmark_report.py`)**:
+  - Oracle `verify.sh` par tâche, modes `hybrid` (défaut), `verify_only` et `transcript_only`, avec `BENCHMARK_VERIFY_CMD` en repli.
+  - Appariement `AB/BA` : Chat `[0]` et Task `[40]` partagent un `pair_id` et alternent l'ordre à chaque essai.
+  - Suite portée de 3 à 6 tâches stratifiées (`2 S1`, `2 S2`, `2 S3`), dont `S2_long_horizon_chain` : dix nœuds documentés de plus de 250 octets, lus un par un avant correction de deux nœuds non contigus, afin de déclencher réellement le masquage.
+  - `BENCHMARK_TASK_FILTER` sélectionne une ou plusieurs tâches par expression `grep -E` sur `TASK_ID` ou nom de dossier ; une expression invalide ou sans correspondance échoue avant tout tir.
+  - `scripts/benchmark_report.py` (lecture seule, SQLite ouvert en `mode=ro`) : taux brut et conditionnel hors couche A (`E_STALL_OR_TIMEOUT`, `E_UPSTREAM_REFUSAL`, `E_INCOMPLETE_PROSE`), différence appariée Task − Chat par `pair_id` avec erreur-type par grappe, et agrégats `(suite, task, paradigm, thinking_tier)` : Cost-of-Pass, `roundtrip_ms` médian/moyen, anomalies par catégorie et `SUM(masked_obs_bytes_saved)`. Une campagne *Complexity Trap* sans octets masqués ou hors palier `medium`/`high` est signalée explicitement.
+
+### Changed
+- **Documentation et configuration (`AGENTS.md`, `free-gemini-api/.env.example`, `free-gemini-api/PRIVACY.md`, `docs/architecture/agentic_resilience.md`)**:
+  - `AGENTS.md` cible `v3.5.9`, documente `BENCHMARK_TASK_FILTER`, les 6 tâches et le rapport.
+  - `.env.example` documente `OBSERVATION_MASK_THINKING_KEEP_RECENT`.
+  - `PRIVACY.md` précise la rétention de `benchmark_trials` et les garanties de `tool_call_spans` / `turn_anomalies`.
+  - `agentic_resilience.md` ajoute la section 13 « Observabilité granulaire et auto-régulation » et le protocole de validité du banc.
+
+### Regression Tests
+- `free-gemini-api/db/benchmark_test.go` & `db/spans_test.go` : schéma `STRICT`, `ON DELETE SET NULL`/`CASCADE`, vues, migration `trial_id`, spans et anomalies.
+- `free-gemini-api/api/benchmark_trials_test.go` : validité du `trial_id`, CORS, drain borné, corrélation verdict ↔ tours.
+- `free-gemini-api/api/telemetry_routes_test.go` : filtres `session_id`/`trial_id`, liste vide sur identifiant inconnu.
+- `free-gemini-api/api/loop_route_test.go` & `retry_evidence_test.go` : seuils 2/4, transfert des preuves pré-télémétrie, spans rejetés.
+- `free-gemini-api/api/observation_masker_tier_test.go` : fenêtre 8 pour `medium`/`high`, override, préservation des deux erreurs.
+- `free-gemini-api/gemini/diagnostics_test.go` : réduction structurelle et non-fuite des arguments.
+- `scripts/test_benchmark_matrix.sh` : filtre, cycle échec → succès → altération rejetée sur les trois nouvelles tâches, et `benchmark_report.py` sur TSV synthétique + SQLite temporaire.
+
+### Validation
+| Check | Command | Result |
+|---|---|---|
+| Go formatting | `test -z "$(gofmt -l .)"` | **OK** |
+| Static analysis | `go vet ./...` (Docker `golang:1.26-alpine`) | **OK** |
+| Short unit tests + race | `go test -race -short ./...` | **OK** — api 8.843 s, db, gemini 12.977 s |
+| Full audit script | `./scripts/audit_check.sh` | **OK** — exit 0, api 66.6 %, db 80.3 %, gemini 74.8 % |
+| Benchmark harness suite | `./scripts/test_benchmark_matrix.sh` | **OK** — 163/163 tests PASS |
+
+> Les Phases 3 et 4 (tirs live `AB/BA` et protocole *Complexity Trap*) consomment du quota réel et ne sont pas revendiquées dans cette entrée : leurs résultats seront consignés dans `benchmark_trials` et le rapport lecture seule.
+
+---
+
 ## [3.5.8] - 2026-11-25
 
 > Chantier observabilité, métriques agentiques fines, persistance SQLite native et fiabilisation du benchmarking combinatoire pass^k. Fondé sur les recherches et l'audit de confrontation [`docs/recherches/Traces-Observabilite-Et-Benchmarking-Agentique.md`](docs/recherches/Traces-Observabilite-Et-Benchmarking-Agentique.md) et [`docs/recherches/audit-confrontation-traces-observabilite.html`](docs/recherches/audit-confrontation-traces-observabilite.html).

@@ -2,7 +2,7 @@
 
 High-signal instructions and operational context for AI agents working in this repository.
 
-**Target version: v3.5.8** — observabilité agentique, télémétrie SQLite native, estimateurs Yao et durcissement benchmark. Sécurité : voir
+**Target version: v3.5.9** — corrélation benchmark ↔ télémétrie, observabilité granulaire, *LoopRoute*, masquage thinking-aware et suite de tâches étendue. Sécurité : voir
 [`free-gemini-api/SECURITY.md`](free-gemini-api/SECURITY.md). Hub documentaire :
 [`docs/README.md`](docs/README.md).
 
@@ -16,7 +16,7 @@ Open-source, drop-in OpenAI-compatible proxy engine in pure Go unlocking Google'
 - **`free-gemini-api/`**: Main Go server root (all build/test commands run here).
   - `api/`: REST & SSE streaming handlers, OpenAI schema conversions, auth middleware, rate-limiting, SQLite metrics/analytics, MCP and queue. Contient l'état de session (`session_transcripts.go`), le coupe-circuit (`doom_loop.go`), le masquage d'observations (`observation_masker.go`) et les métriques Prometheus (`metrics.go`).
   - `gemini/`: Gemini web/client driver, cookies/session managers, output arranger (tool calls, thinking extraction, JSON repair), model registry, `schema_validator.go`, `stream_guard.go`, `thinking.go`, `crypto.go`.
-  - `db/`: SQLite access layer (`sqlite` WAL, `_pragma=foreign_keys(1)` sur chaque connexion du pool), retention worker, exports. Contient `telemetry.go` : `agent_sessions` (clé = SHA-256 de la session), `agent_turns` (métriques de tour sans contenu, colonnes générées, `ON DELETE CASCADE`) et la vue `v_session_telemetry_summary`.
+  - `db/`: SQLite access layer (`sqlite` WAL, `_pragma=foreign_keys(1)` sur chaque connexion du pool), retention worker, exports. Contient `telemetry.go` : `agent_sessions` (clé = SHA-256 de la session), `agent_turns` (métriques de tour sans contenu, colonnes générées, `ON DELETE CASCADE`), `tool_call_spans` (tentatives d'appel, `roundtrip_ms` généré), `turn_anomalies` (journal catégoriel d'incidents), `benchmark_trials` (`ON DELETE SET NULL`), et les vues `v_session_telemetry_summary` (recréée par `DROP`+`CREATE` à chaque démarrage), `v_benchmark_trial_telemetry`, `v_benchmark_cost_of_pass`.
   - `data/`: Local SQLite database (`gemini.db` + WAL/SHM). Runtime only, never commit.
   - `cookies/`: Cookie jars (`account_*.json`, `session_*.json`), `0700`/`0600`. Never commit.
   - `output/`: Generated media served by `GET /output/*`. Never commit.
@@ -94,13 +94,21 @@ BENCHMARK_RUNS=5 BENCHMARK_K=3 ./scripts/benchmark_matrix.sh
 BENCHMARK_STRICT=1 ./scripts/benchmark_matrix.sh   # exit non-zéro si un modèle échoue
 ./scripts/test_benchmark_matrix.sh                 # suite hors-ligne, sans quota
 ```
-Rejoue le plan v3.5.7 via OpenCode pour quatre modèles, `k` fois, dans des
-git worktrees isolés créés depuis un instantané du working tree courant. Détecte
-les tool calls, greetings, faux quotas (`0 remaining`), claims S7, prose courte
-inachevée et `finish_reason`. Écrit `results.tsv`, `summary.txt` et les
-transcripts dans `debug/benchmark_matrix_<ts>/`. Le working tree principal n'est
-**jamais** réinitialisé ni nettoyé. Prérequis : `opencode`, `python3`, `jq`
-(facultatif), proxy démarré et authentifié.
+Rejoue le plan v3.5.7 ou une suite de tâches via OpenCode pour chaque modèle,
+`k` fois, dans des git worktrees isolés créés depuis un instantané du working
+tree courant. Détecte les tool calls, greetings, faux quotas (`0 remaining`),
+claims S7, prose courte inachevée et `finish_reason`. Écrit `results.tsv`,
+`summary.txt` et les transcripts dans `debug/benchmark_matrix_<ts>/`. Le working
+tree principal n'est **jamais** réinitialisé ni nettoyé. Prérequis : `opencode`,
+`python3`, `jq` (facultatif), proxy démarré et authentifié.
+
+La suite embarquée `scripts/benchmark_tasks/` contient six tâches stratifiées
+(`2 S1`, `2 S2`, `2 S3`). `S2_long_horizon_chain` force la lecture de dix nœuds
+verbeux avant la correction de deux nœuds non contigus, ce qui déclenche
+réellement `MaskOldToolObservationsForTier`. `scripts/benchmark_report.py`
+(`--tsv`, `--db`, `--suite`) produit un rapport lecture seule : taux brut vs
+conditionnel hors couche A, différence appariée `AB/BA` par `pair_id` avec
+erreur-type par grappe, Cost-of-Pass, `roundtrip_ms` et `SUM(masked_obs_bytes_saved)`.
 
 Le résumé rapporte les estimateurs combinatoires sans biais de Yao et al. —
 `pass^1 = c/n`, `pass^k = C(c,k)/C(n,k)`, `pass@k = 1 - C(n-c,k)/C(n,k)` — et non
@@ -113,6 +121,16 @@ la formule naïve `(c/n)^k`, fortement biaisée à petit `n`. Réglages :
 | `BENCHMARK_ALLOW_TASK_MODE_FOR_TOOLS` | `auto` | Envoie `X-Allow-Task-Mode-For-Tools: true` pour tout modèle dont le nom canonique finit par `-task`. Sans cet en-tête, le proxy requalifie la requête porteuse d'outils de `[40]` vers `[0]` et le bras Task mesure en réalité le modèle Chat (`api/chat_service.go`). |
 | `BENCHMARK_STANDALONE` | `auto` | Ajoute `--standalone` exactement quand un overlay est injecté : `OPENCODE_CONFIG_CONTENT` n'atteint que le serveur propriétaire de la config. |
 | `BENCHMARK_PROVIDER_ID` | `free-gemini` | Clé provider ciblée quand la référence modèle n'a pas de préfixe `provider/`. |
+| `BENCHMARK_SUITE_ID` | `legacy-v357` | Nom de suite enregistré dans `benchmark_trials` (ou nom du dossier `BENCHMARK_TASKS_DIR`). |
+| `BENCHMARK_TASKS_DIR` | vide | Répertoire de tâches `<task>/prompt.md` (+ `meta.env`, `setup.sh`, `verify.sh`). Vide = mode mono-plan historique. |
+| `BENCHMARK_TASK_FILTER` | vide | Expression `grep -E` appliquée au `TASK_ID` déclaré ou au nom du dossier sous `BENCHMARK_TASKS_DIR`. Exige `BENCHMARK_TASKS_DIR` ; sans correspondance ou expression invalide, le harness échoue avant le premier tir. |
+| `BENCHMARK_VERIFY_CMD` | vide | Oracle déterministe exécuté dans le worktree quand la tâche n'a pas de `verify.sh`. |
+| `BENCHMARK_ORACLE_MODE` | `auto` | `auto|hybrid|verify_only|transcript_only`. `auto` = hybride dès qu'un oracle existe. |
+| `BENCHMARK_PAIRING` | `sequential` | `abba` apparie Chat et Task sur la même tâche, en alternant l'ordre par essai. |
+| `BENCHMARK_PAIR_COOLDOWN_SEC` | `10` | Attente entre les deux bras d'une paire. |
+| `BENCHMARK_EMIT_TRIAL_ID` | `true` | Envoie `X-Benchmark-Trial-ID`. L'overlay devenant non vide, `BENCHMARK_STANDALONE=auto` ajoute alors `--standalone` à chaque run (nécessaire pour que l'en-tête atteigne le proxy). |
+| `BENCHMARK_RECORD_TRIALS_URL` | `<proxy>/v1/benchmark/trials` | Endpoint de verdict ; `none` désactive. |
+| `API_TOKEN` | — | Jeton Bearer pour le verdict et `/reset`. |
 
 ### Docker Deployment
 ```bash
@@ -247,6 +265,20 @@ maxTransportRetries       = 2
 maxChatLoopIterations     = 8
 ```
 
+**LoopRoute (coupe-circuit sur erreur d'outil).** `DoomLoopTracker` reçoit le
+résultat de l'appel précédent (`RecordToolOutcome(callID, isError)`, scan à
+rebours de l'historique borné). Un appel identique dont les occurrences ont
+échoué avertit dès **2** répétitions et coupe à **4** échecs identiques
+consécutifs ; sans résultat connu, les seuils historiques **3 / 5** restent
+inchangés. Un nouveau tour utilisateur (`Reset`) efface cette preuve.
+
+**Masquage thinking/error-aware.** `MaskOldToolObservationsForTier` porte la
+fenêtre à **8** pour les paliers `medium`/`high` (4 sinon, ou
+`OBSERVATION_MASK_THINKING_KEEP_RECENT`) et préserve les **2** erreurs d'outils
+les plus récentes hors fenêtre, tant que le prompt projeté reste sous
+`maxPromptBytes`. Les trois entrées historiques (`MaskOldToolObservations`,
+`...WithOverhead`, `...WithStats`) gardent leur comportement exact.
+
 **Métriques Prometheus.** `gemini_turn_classification_total{class}`,
 `gemini_delta_replay_total{reason}`, `gemini_quarantine_total{kind}`,
 `gemini_upstream_suspected_stop_total{model}`, plus
@@ -311,6 +343,9 @@ oubliées dans la documentation :
 | `GET` | `/media` | API |
 | `GET` | `/export/json` | API — 5 req/min |
 | `POST` | `/chat`, `/music` | API |
+| `POST` | `/v1/benchmark/trials` | API — verdict d'oracle, corrèle `trial_id` avec `agent_turns` |
+| `GET` | `/v1/benchmark/trials` | API — `?suite_id=&task_id=&limit=`, renvoie les essais et le Cost-of-Pass |
+| `GET` | `/v1/telemetry/sessions` | API — `?session_id=&trial_id=&limit=` ; un `trial_id` inconnu renvoie une liste vide, jamais toutes les sessions |
 | `GET` | `/output/*` | API — confinement `safeOutputPath` |
 
 ---
