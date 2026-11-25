@@ -32,6 +32,39 @@ func dbFilePath() string {
 	return DBFileName
 }
 
+// ensureColumn adds a column when it is missing. It is idempotent, so every
+// startup converges to the same schema without a version table.
+func ensureColumn(database *sql.DB, table, column, definition string) error {
+	rows, err := database.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notNull   int
+			dfltValue any
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = database.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition)
+	return err
+}
+
 // InitDB initializes SQLite database connection and auto-migrates all tables
 func InitDB() (*sql.DB, error) {
 	var initErr error
@@ -141,6 +174,7 @@ func InitDB() (*sql.DB, error) {
 			turn_index INTEGER NOT NULL CHECK (turn_index >= 0),
 			upstream_conv_id TEXT NOT NULL DEFAULT '',
 			send_model TEXT NOT NULL DEFAULT '',
+			trial_id TEXT NOT NULL DEFAULT '',
 			is_delta INTEGER NOT NULL DEFAULT 0 CHECK (is_delta IN (0, 1)),
 			replay_reason TEXT NOT NULL DEFAULT 'none' CHECK (replay_reason IN ('none', 'delta', 'new', 'forced', 'worker_mismatch', 'conv_mismatch', 'identical', 'prefix_mismatch')),
 			flat_prompt_bytes INTEGER NOT NULL DEFAULT 0 CHECK (flat_prompt_bytes >= 0),
@@ -201,9 +235,81 @@ func InitDB() (*sql.DB, error) {
 		CREATE INDEX IF NOT EXISTS idx_turns_conv ON agent_turns(upstream_conv_id);
 		CREATE INDEX IF NOT EXISTS idx_turns_created ON agent_turns(created_at);
 
+		-- One row per tool-call attempt. Rejected attempts leave a row too:
+		-- that is exactly the evidence a successful retry would otherwise
+		-- erase. Arguments are reduced to a digest and a two-segment hint.
+		CREATE TABLE IF NOT EXISTS tool_call_spans (
+			span_id TEXT PRIMARY KEY,
+			turn_id TEXT NOT NULL REFERENCES agent_turns(turn_id) ON DELETE CASCADE,
+			session_id TEXT NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+			call_index INTEGER NOT NULL CHECK (call_index >= 0),
+			tool_call_id TEXT NOT NULL DEFAULT '',
+			tool_name TEXT NOT NULL,
+			is_mutating INTEGER NOT NULL DEFAULT 0 CHECK (is_mutating IN (0, 1)),
+			extraction_channel TEXT NOT NULL CHECK (extraction_channel IN
+				('tagged_xml', 'untagged_readonly_promoted', 'untagged_quarantined', 'heuristic_fallback')),
+			disposition TEXT NOT NULL CHECK (disposition IN
+				('emitted', 'throttled_write_serial', 'rejected_schema_invalid',
+				 'rejected_mid_value_truncation', 'rejected_undeclared_tool',
+				 'quarantined_untagged_mutation')),
+			args_fingerprint TEXT NOT NULL DEFAULT '',
+			args_bytes INTEGER NOT NULL DEFAULT 0 CHECK (args_bytes >= 0),
+			target_hint TEXT NOT NULL DEFAULT '',
+			validation_error TEXT NOT NULL DEFAULT '',
+			result_received INTEGER NOT NULL DEFAULT 0 CHECK (result_received IN (0, 1)),
+			result_is_error INTEGER NOT NULL DEFAULT 0 CHECK (result_is_error IN (0, 1)),
+			result_bytes INTEGER NOT NULL DEFAULT 0 CHECK (result_bytes >= 0),
+			emitted_at_ms INTEGER NOT NULL CHECK (emitted_at_ms >= 1),
+			result_received_ms INTEGER,
+			roundtrip_ms INTEGER GENERATED ALWAYS AS (
+				CASE WHEN result_received_ms IS NOT NULL AND result_received_ms >= emitted_at_ms
+					THEN result_received_ms - emitted_at_ms END) VIRTUAL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			CHECK (result_received_ms IS NULL OR result_received_ms >= emitted_at_ms),
+			UNIQUE (turn_id, call_index)
+		) STRICT;
+
+		CREATE INDEX IF NOT EXISTS idx_tool_spans_turn ON tool_call_spans(turn_id, call_index);
+		CREATE INDEX IF NOT EXISTS idx_tool_spans_open_call ON tool_call_spans(session_id, tool_call_id)
+			WHERE disposition = 'emitted' AND result_received = 0;
+		CREATE INDEX IF NOT EXISTS idx_tool_spans_disp ON tool_call_spans(disposition, tool_name)
+			WHERE disposition != 'emitted';
+		CREATE INDEX IF NOT EXISTS idx_tool_spans_created ON tool_call_spans(created_at);
+
+		-- Content-free incident journal. detail is categorical by construction:
+		-- attempt numbers, repair kinds and counts, never model text.
+		CREATE TABLE IF NOT EXISTS turn_anomalies (
+			anomaly_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			turn_id TEXT NOT NULL REFERENCES agent_turns(turn_id) ON DELETE CASCADE,
+			session_id TEXT NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+			tool_span_id TEXT REFERENCES tool_call_spans(span_id) ON DELETE SET NULL,
+			attempt_index INTEGER NOT NULL DEFAULT 1 CHECK (attempt_index >= 0),
+			category TEXT NOT NULL CHECK (category IN
+				('arranger_repair', 'arranger_rejection', 'quarantine', 'doom_loop',
+				 'stream_stall', 'ground_truth_directive', 'refusal_retry',
+				 'unbacked_completion', 'context_reset')),
+			code TEXT NOT NULL CHECK (code IN
+				('disclaimer', 'control_chars', 'brace_envelope', 'orphan_tags',
+				 'schema_invalid', 'undeclared_tool', 'mid_value_truncation',
+				 'untagged_mutation', 'repeat', 'cycle', 'passive_read', 'stall_45s',
+				 'refusal', 'unbacked_completion', 'greeting', 'pseudo_report',
+				 'forced_replay', 'recent_tool_error')),
+			severity TEXT NOT NULL CHECK (severity IN ('info', 'warn', 'error', 'halt')),
+			detail TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		) STRICT;
+
+		CREATE INDEX IF NOT EXISTS idx_anomalies_turn ON turn_anomalies(turn_id);
+		CREATE INDEX IF NOT EXISTS idx_anomalies_cat_code ON turn_anomalies(category, code, severity);
+		CREATE INDEX IF NOT EXISTS idx_anomalies_created ON turn_anomalies(created_at);
+
 		-- One row per session with at least one turn. AVG ignores the NULL
 		-- milestones of non-streaming turns, so a mixed session still reports
 		-- the mean of the turns that actually observed each phase.
+		--
+		-- CREATE VIEW IF NOT EXISTS would leave an existing view untouched, so
+		-- the DROP is what makes the added columns appear on an older database.
+		DROP VIEW IF EXISTS v_session_telemetry_summary;
 		CREATE VIEW IF NOT EXISTS v_session_telemetry_summary AS
 		SELECT
 			s.session_id,
@@ -228,14 +334,138 @@ func InitDB() (*sql.DB, error) {
 			SUM(CASE WHEN t.doom_loop_action != 'none' THEN 1 ELSE 0 END) AS doom_loop_events,
 			SUM(CASE WHEN t.stream_stalled = 1 THEN 1 ELSE 0 END) AS stream_stalls,
 			COALESCE(SUM(t.refusal_retries), 0) AS refusal_retries,
+			(SELECT COUNT(*) FROM tool_call_spans sp
+			 WHERE sp.session_id = s.session_id AND sp.disposition = 'emitted') AS tools_emitted,
+			(SELECT COUNT(*) FROM tool_call_spans sp
+			 WHERE sp.session_id = s.session_id AND sp.disposition != 'emitted') AS tools_blocked_or_throttled,
+			(SELECT COUNT(*) FROM tool_call_spans sp
+			 WHERE sp.session_id = s.session_id AND sp.result_received = 1 AND sp.result_is_error = 1) AS tool_errors,
+			(SELECT COUNT(*) FROM turn_anomalies a
+			 WHERE a.session_id = s.session_id AND a.category = 'arranger_repair') AS arranger_repairs,
+			(SELECT COUNT(*) FROM turn_anomalies a
+			 WHERE a.session_id = s.session_id) AS total_anomalies,
 			MAX(t.created_at) AS last_turn_at
 		FROM agent_sessions s
 		JOIN agent_turns t ON t.session_id = s.session_id
 		GROUP BY s.session_id;
 
+		-- Benchmark correlation. A trial row survives the purge of its session
+		-- (ON DELETE SET NULL): the personal data goes, the aggregate metrics
+		-- stay. trial_id is whitelisted by the API before it reaches this table.
+		CREATE TABLE IF NOT EXISTS benchmark_trials (
+			trial_id TEXT PRIMARY KEY,
+			suite_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			stratum TEXT NOT NULL DEFAULT '' CHECK (stratum IN ('', 'S1', 'S2', 'S3')),
+			requested_model TEXT NOT NULL,
+			effective_model TEXT NOT NULL DEFAULT '',
+			paradigm TEXT NOT NULL CHECK (paradigm IN ('chat', 'task')),
+			thinking_tier TEXT NOT NULL DEFAULT 'none' CHECK (thinking_tier IN ('none', 'low', 'medium', 'high')),
+			trial_index INTEGER NOT NULL CHECK (trial_index >= 1),
+			pair_id TEXT NOT NULL DEFAULT '',
+			arm_order TEXT NOT NULL DEFAULT 'single' CHECK (arm_order IN ('single', 'AB_first', 'AB_second', 'BA_first', 'BA_second')),
+			session_id TEXT REFERENCES agent_sessions(session_id) ON DELETE SET NULL,
+			worker_id TEXT NOT NULL DEFAULT '',
+			account_tier TEXT NOT NULL DEFAULT 'free' CHECK (account_tier IN ('free', 'subscription', 'ultra')),
+			oracle_passed INTEGER NOT NULL CHECK (oracle_passed IN (0, 1)),
+			oracle_mode TEXT NOT NULL DEFAULT 'transcript' CHECK (oracle_mode IN ('transcript', 'verify_sh', 'hybrid')),
+			oracle_exit_code INTEGER NOT NULL DEFAULT 0,
+			worktree_diff_files INTEGER NOT NULL DEFAULT 0 CHECK (worktree_diff_files >= 0),
+			transcript_clean INTEGER NOT NULL DEFAULT 1 CHECK (transcript_clean IN (0, 1)),
+			wall_time_ms INTEGER NOT NULL DEFAULT 0 CHECK (wall_time_ms >= 0),
+			primary_failure_code TEXT NOT NULL DEFAULT 'none' CHECK (primary_failure_code IN (
+				'none',
+				'E_GREETING_LOOP', 'E_FALSE_QUOTA', 'E_UNBACKED_COMPLETION',
+				'E_INCOMPLETE_PROSE', 'E_ERROR_FINISH', 'E_NO_TOOL_CALL',
+				'E_ORACLE_ASSERTION_FAIL', 'E_STALL_OR_TIMEOUT', 'E_UPSTREAM_REFUSAL',
+				'E_SCHEMA_INVALID', 'E_UNTAGGED_MUTATION', 'E_UNCLOSED_THOUGHT',
+				'E_DOOM_LOOP_HALT')),
+			notes TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		) STRICT;
+
+		CREATE INDEX IF NOT EXISTS idx_bench_suite_task ON benchmark_trials(suite_id, task_id, paradigm, thinking_tier);
+		CREATE INDEX IF NOT EXISTS idx_bench_pair ON benchmark_trials(pair_id) WHERE pair_id != '';
+		CREATE INDEX IF NOT EXISTS idx_bench_session ON benchmark_trials(session_id) WHERE session_id IS NOT NULL;
+
+		-- A trial with no observed turn still appears, with zeroed aggregates:
+		-- reporting it as absent would hide the failure that produced it.
+		CREATE VIEW IF NOT EXISTS v_benchmark_trial_telemetry AS
+		SELECT
+			b.trial_id,
+			b.suite_id,
+			b.task_id,
+			b.stratum,
+			b.requested_model,
+			b.effective_model,
+			b.paradigm,
+			b.thinking_tier,
+			b.trial_index,
+			b.pair_id,
+			b.arm_order,
+			b.session_id,
+			COALESCE(NULLIF(s.worker_id, ''), b.worker_id) AS worker_id,
+			COALESCE(NULLIF(s.account_tier, ''), b.account_tier) AS account_tier,
+			b.oracle_passed,
+			b.oracle_mode,
+			b.oracle_exit_code,
+			b.worktree_diff_files,
+			b.transcript_clean,
+			b.wall_time_ms,
+			b.primary_failure_code,
+			b.created_at,
+			COUNT(t.turn_id) AS observed_turns,
+			COALESCE(SUM(CASE WHEN t.is_delta = 0 THEN 1 ELSE 0 END), 0) AS full_replays,
+			COALESCE(SUM(t.input_tokens), 0) AS input_tokens,
+			COALESCE(SUM(t.thought_tokens), 0) AS thought_tokens,
+			COALESCE(SUM(t.answer_tokens), 0) AS answer_tokens,
+			COALESCE(SUM(t.total_output_tokens), 0) AS total_output_tokens,
+			AVG(t.ttft_thought_ms) AS avg_ttft_thought_ms,
+			AVG(t.ttft_answer_ms) AS avg_ttft_answer_ms,
+			COALESCE(SUM(CASE WHEN t.doom_loop_action != 'none' THEN 1 ELSE 0 END), 0) AS doom_loop_events,
+			COALESCE(SUM(CASE WHEN t.stream_stalled = 1 THEN 1 ELSE 0 END), 0) AS stream_stalls,
+			COALESCE(SUM(t.refusal_retries), 0) AS refusal_retries
+		FROM benchmark_trials b
+		LEFT JOIN agent_turns t ON t.trial_id = b.trial_id
+		LEFT JOIN agent_sessions s ON s.session_id = b.session_id
+		GROUP BY b.trial_id;
+
+		-- Cost-of-Pass: tokens spent per successful trial. NULLIF yields NULL,
+		-- never a division error, when no trial in the group passed.
+		CREATE VIEW IF NOT EXISTS v_benchmark_cost_of_pass AS
+		SELECT
+			suite_id,
+			task_id,
+			stratum,
+			paradigm,
+			thinking_tier,
+			COUNT(*) AS trials,
+			SUM(oracle_passed) AS passes,
+			CAST(SUM(oracle_passed) AS REAL) / COUNT(*) AS pass_rate,
+			AVG(wall_time_ms) AS avg_wall_time_ms,
+			COALESCE(SUM(input_tokens + total_output_tokens), 0) AS total_tokens_sum,
+			COALESCE(SUM(thought_tokens), 0) AS thought_tokens_sum,
+			CAST(SUM(input_tokens + total_output_tokens) AS REAL) / NULLIF(SUM(oracle_passed), 0) AS cost_of_pass_total_tokens,
+			CAST(SUM(total_output_tokens) AS REAL) / NULLIF(SUM(oracle_passed), 0) AS cost_of_pass_output_tokens
+		FROM v_benchmark_trial_telemetry
+		GROUP BY suite_id, task_id, stratum, paradigm, thinking_tier;
+
 		`
 
 		if _, err := database.Exec(schema); err != nil {
+			initErr = err
+			return
+		}
+
+		// A column added after a table's first release is invisible to
+		// CREATE TABLE IF NOT EXISTS on an existing database, and an index over
+		// that missing column would have aborted the schema above. Migrate the
+		// column first, then create the index.
+		if err := ensureColumn(database, "agent_turns", "trial_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			initErr = err
+			return
+		}
+		if _, err := database.Exec(`CREATE INDEX IF NOT EXISTS idx_turns_trial ON agent_turns(trial_id) WHERE trial_id != ''`); err != nil {
 			initErr = err
 			return
 		}
@@ -730,6 +960,27 @@ func PurgeExpiredData(retentionDays int) (int64, error) {
 	}
 	n, _ = res.RowsAffected()
 	total += n
+
+	// Benchmark trials outlive their session: deleting a session only nulls
+	// benchmark_trials.session_id, so the aggregate verdict is still purged on
+	// its own age here rather than silently retained forever.
+	res, err = tx.Exec(`DELETE FROM benchmark_trials WHERE created_at < datetime('now', ?)`, cutoff)
+	if err != nil {
+		return total, fmt.Errorf("purge benchmark_trials: %w", err)
+	}
+	n, _ = res.RowsAffected()
+	total += n
+
+	// Safety net for rows whose parent was purged by an earlier run (cascade
+	// only fires when the parent is deleted by the same statement).
+	for _, table := range []string{"tool_call_spans", "turn_anomalies"} {
+		res, err = tx.Exec("DELETE FROM "+table+" WHERE created_at < datetime('now', ?)", cutoff)
+		if err != nil {
+			return total, fmt.Errorf("purge %s: %w", table, err)
+		}
+		n, _ = res.RowsAffected()
+		total += n
+	}
 
 	if err := tx.Commit(); err != nil {
 		return total, err

@@ -26,6 +26,11 @@ const (
 	doomLoopRepeatWarnThreshold = 3
 	doomLoopRepeatHaltThreshold = 5
 
+	// LoopRoute: an identical call whose previous occurrence failed is a much
+	// stronger signal than a plain repeat, so it warns and halts earlier.
+	doomLoopRepeatFailedWarnThreshold = 2
+	doomLoopRepeatFailedHaltThreshold = 4
+
 	// Signal B: consecutive read-only calls without a mutation.
 	doomLoopPassiveReadThreshold = 4
 
@@ -41,6 +46,8 @@ type doomLoopCall struct {
 	fingerprint string
 	name        string
 	isMutation  bool
+	callID      string
+	failed      bool
 }
 
 // DoomLoopTracker is a mutex-protected finite-state tracker for one session.
@@ -65,6 +72,12 @@ func NewDoomLoopTracker() *DoomLoopTracker {
 // from the tool name and a canonical (sorted-key) form of its JSON arguments,
 // so semantically identical calls with a different key order count as repeats.
 func (t *DoomLoopTracker) RecordToolCall(name, argsJSON string, isMutation bool) {
+	t.RecordToolCallWithID("", name, argsJSON, isMutation)
+}
+
+// RecordToolCallWithID is RecordToolCall plus the host-visible call id, which
+// lets the next turn attach the tool result's success or failure to this entry.
+func (t *DoomLoopTracker) RecordToolCallWithID(callID, name, argsJSON string, isMutation bool) {
 	if t == nil {
 		return
 	}
@@ -88,6 +101,7 @@ func (t *DoomLoopTracker) RecordToolCall(name, argsJSON string, isMutation bool)
 		fingerprint: fingerprint,
 		name:        name,
 		isMutation:  isMutation,
+		callID:      callID,
 	})
 	if len(t.history) > doomLoopHistoryLimit {
 		t.history = append([]doomLoopCall(nil), t.history[len(t.history)-doomLoopHistoryLimit:]...)
@@ -107,6 +121,41 @@ func (t *DoomLoopTracker) RecordToolCall(name, argsJSON string, isMutation bool)
 	}
 }
 
+// RecordToolOutcome attaches the result of a previously emitted call to its
+// history entry. The bounded history is scanned backwards, so the most recent
+// match wins and no second index has to be kept in sync.
+func (t *DoomLoopTracker) RecordToolOutcome(callID string, isError bool) {
+	if t == nil || strings.TrimSpace(callID) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for index := len(t.history) - 1; index >= 0; index-- {
+		if t.history[index].callID == callID {
+			t.history[index].failed = isError
+			return
+		}
+	}
+}
+
+// failedRepeatCountLocked counts the trailing history entries that share the
+// last fingerprint and failed. Callers must hold t.mu.
+func (t *DoomLoopTracker) failedRepeatCountLocked() int {
+	n := len(t.history)
+	if n == 0 {
+		return 0
+	}
+	fingerprint := t.history[n-1].fingerprint
+	count := 0
+	for index := n - 1; index >= 0; index-- {
+		if t.history[index].fingerprint != fingerprint || !t.history[index].failed {
+			break
+		}
+		count++
+	}
+	return count
+}
+
 // CheckIntervention returns the strongest pending action and a compact detail
 // string. Detail prefixes ("repeat:", "cycle:", "passive_read:") are also used
 // as Prometheus signal labels by the caller.
@@ -117,11 +166,19 @@ func (t *DoomLoopTracker) CheckIntervention() (string, string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	failedRepeats := t.failedRepeatCountLocked()
+
 	if t.repeatCount >= doomLoopRepeatHaltThreshold {
 		return ActionHalt, fmt.Sprintf("repeat:identical tool call '%s' repeated %d times", t.lastCallName, t.repeatCount)
 	}
+	if failedRepeats >= doomLoopRepeatFailedHaltThreshold {
+		return ActionHalt, fmt.Sprintf("repeat:identical tool call '%s' failed %d consecutive times", t.lastCallName, failedRepeats)
+	}
 	if names, repeats := t.detectCycleLocked(); repeats >= doomLoopCycleHaltRepeats {
 		return ActionHalt, fmt.Sprintf("cycle:rotating tool-call cycle %s repeated %d times", strings.Join(names, " -> "), repeats)
+	}
+	if failedRepeats >= doomLoopRepeatFailedWarnThreshold {
+		return ActionWarnRepeat, fmt.Sprintf("repeat:identical tool call '%s' failed and was repeated %d times", t.lastCallName, failedRepeats)
 	}
 	if t.repeatCount >= doomLoopRepeatWarnThreshold {
 		return ActionWarnRepeat, fmt.Sprintf("repeat:tool call '%s' repeated %d times", t.lastCallName, t.repeatCount)

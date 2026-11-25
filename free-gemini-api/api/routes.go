@@ -204,6 +204,15 @@ func RegisterRoutesWithAuth(app *fiber.App, adminToken, apiToken string) {
 	// OpenAI-compatible chat completions (with Native Tool Calling & Output Arranger)
 	app.Post("/v1/chat/completions", HandleOpenAIChatCompletions)
 
+	// Benchmark correlation: the shell bench posts its oracle verdict here and
+	// reads back the session, worker and Cost-of-Pass it was joined with.
+	app.Post("/v1/benchmark/trials", HandleRecordBenchmarkTrial)
+	app.Get("/v1/benchmark/trials", HandleListBenchmarkTrials)
+
+	// Granular telemetry: per-session aggregates plus recent tool spans and
+	// anomalies. Content-free by construction.
+	app.Get("/v1/telemetry/sessions", HandleTelemetrySessions)
+
 	// Unified chat endpoint (text, images, screen recordings, ref videos)
 	app.Post("/chat", HandleUnifiedChat)
 

@@ -32,6 +32,9 @@ CORE API ENDPOINTS:
   GET  /history/search?q=...  Full-text search across all stored conversations
   GET  /stats                 Real-time SQLite database, Free vs Subscription tier breakdown
   GET  /v1/analytics          Machine-readable JSON analytics export
+  POST /v1/benchmark/trials   Record one benchmark oracle verdict (correlates session telemetry)
+  GET  /v1/benchmark/trials   Read correlated trials & Cost-of-Pass aggregates
+  GET  /v1/telemetry/sessions Per-session aggregates, tool spans & anomaly journal
   GET  /export/excel          Download comprehensive Excel intelligence report (.xlsx)
   GET  /health                Cookie health, TTL inspector & extension status
   POST /reset                 Reset an active agent/user session
@@ -47,6 +50,8 @@ MULTI-AGENT & TASK MODE HEADERS:
   X-Agent-ID: <id>            Sticky affinity binding (Keeps agent thread with same account)
   X-Session-ID: <id>          Custom session identifier
   X-Conversation-ID: <id>     Gemini server-side thread continuation
+  X-Benchmark-Trial-ID: <id>  Groups turns under one benchmark trial
+                              (^[A-Za-z0-9_.:-]{1,128}$)
 
 BUILT-IN TOOLS & CAPABILITIES:
   * Gemini 4 Hydrogen (Everyday help flagship, 100% Free)
@@ -150,11 +155,14 @@ func HandleHelp(c fiber.Ctx) error {
 				{"method": "GET", "path": "/history/search", "description": "Search past conversations"},
 				{"method": "GET", "path": "/stats", "description": "Real-time SQLite database analytics"},
 				{"method": "GET", "path": "/v1/analytics", "description": "Machine-readable JSON analytics export"},
+				{"method": "POST", "path": "/v1/benchmark/trials", "description": "Record one benchmark oracle verdict and correlate it with turn telemetry"},
+				{"method": "GET", "path": "/v1/benchmark/trials", "description": "Read correlated benchmark trials and Cost-of-Pass aggregates"},
+				{"method": "GET", "path": "/v1/telemetry/sessions", "description": "Read per-session telemetry aggregates, tool spans and anomaly journal"},
 				{"method": "GET", "path": "/export/excel", "description": "Download comprehensive Excel report (.xlsx)"},
 				{"method": "GET", "path": "/health", "description": "Cookie health, TTL inspector & extension status"},
 				{"method": "GET", "path": "/help", "description": "CLI Developer manual and help"},
 			},
-			"multi_agent_headers": []string{"X-Agent-ID", "X-Session-ID", "X-Conversation-ID"},
+			"multi_agent_headers": []string{"X-Agent-ID", "X-Session-ID", "X-Conversation-ID", "X-Benchmark-Trial-ID"},
 			"tools":               []string{"native_function_calling", "multimodal_vision", "gemini_music_lyria", "multi_account_queue"},
 			"mcp_tools":           []string{"chat", "generate_image", "generate_video", "generate_music", "check_health", "reset_session"},
 		})

@@ -292,6 +292,32 @@ func HasInvalidSchemaToolCall(raw string, tools []map[string]any) (bool, string)
 	return false, ""
 }
 
+// StructuralValidationDetail reduces an actionable validation message to a form
+// that can be persisted. Only structural facts survive: property names, type
+// names and the nature of the error. The rejected value is never echoed, and an
+// unrecognized message collapses to a generic label.
+func StructuralValidationDetail(detail string) string {
+	detail = strings.TrimSpace(detail)
+	switch {
+	case detail == "":
+		return ""
+	case strings.HasPrefix(detail, "missing required propert"),
+		strings.HasPrefix(detail, "type mismatch"):
+		return detail
+	case strings.HasPrefix(detail, "invalid value for '"):
+		rest := detail[len("invalid value for '"):]
+		if end := strings.IndexByte(rest, '\''); end >= 0 {
+			return detail[:len("invalid value for '")+end+1]
+		}
+		return "invalid value"
+	case strings.HasPrefix(detail, "invalid JSON arguments"):
+		return "invalid JSON arguments"
+	case strings.Contains(detail, "is not declared"):
+		return "undeclared tool"
+	}
+	return "schema validation failed"
+}
+
 func describeSchemaViolation(err error) string {
 	validationErr, ok := err.(*jsonschema.ValidationError)
 	if !ok {

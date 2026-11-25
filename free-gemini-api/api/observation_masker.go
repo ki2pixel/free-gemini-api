@@ -2,6 +2,8 @@ package api
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -35,7 +37,121 @@ const (
 	// transcript would replay more than this many messages, regardless of how
 	// many tool observations it contains.
 	observationMaskMessageThreshold = 12
+
+	// observationMaskThinkingKeepRecent is the wider window used for reasoning
+	// tiers that benefit from more raw context.
+	observationMaskThinkingKeepRecent = 8
+
+	// observationMaskPreservedErrors keeps the two most recent failed tool
+	// results intact even when they fall outside the window: a thinking model
+	// needs the error text to change strategy instead of repeating the call.
+	observationMaskPreservedErrors = 2
 )
+
+// MaskOldToolObservationsForTier is the thinking/error-aware masker used by the
+// chat pipeline. The keep window widens for medium/high reasoning tiers, and the
+// two most recent failed tool results outside that window are preserved as long
+// as the projected prompt stays within maxPromptBytes. The input slice and its
+// messages are never modified.
+func MaskOldToolObservationsForTier(messages []OpenAIChatMessage, maxRecentKept, sizeThresholdBytes, overheadBytes int, thinkingTier string) ([]OpenAIChatMessage, int, int) {
+	if maxRecentKept <= 0 {
+		maxRecentKept = defaultObservationMaskKeepRecent
+	}
+	keepRecent := maxRecentKept
+	tier := strings.ToLower(strings.TrimSpace(thinkingTier))
+	if tier == "medium" || tier == "high" {
+		keepRecent = observationMaskThinkingKeepRecent
+	}
+	if override := strings.TrimSpace(os.Getenv("OBSERVATION_MASK_THINKING_KEEP_RECENT")); override != "" {
+		if parsed, err := strconv.Atoi(override); err == nil && parsed > 0 {
+			keepRecent = parsed
+		}
+	}
+	return maskOldToolObservationsForTier(messages, keepRecent, sizeThresholdBytes, overheadBytes)
+}
+
+func maskOldToolObservationsForTier(messages []OpenAIChatMessage, maxRecentKept, sizeThresholdBytes, overheadBytes int) ([]OpenAIChatMessage, int, int) {
+	if len(messages) == 0 {
+		return messages, 0, 0
+	}
+	if maxRecentKept <= 0 {
+		maxRecentKept = defaultObservationMaskKeepRecent
+	}
+	if sizeThresholdBytes <= 0 {
+		sizeThresholdBytes = defaultObservationMaskThreshold
+	}
+
+	totalBytes := overheadBytes + estimateMessagesBytes(messages)
+	if totalBytes <= sizeThresholdBytes &&
+		countToolObservations(messages) <= observationMaskToolObservationThreshold &&
+		len(messages) <= observationMaskMessageThreshold {
+		return messages, 0, 0
+	}
+
+	toolIndexes := make([]int, 0, len(messages))
+	for index, message := range messages {
+		if strings.EqualFold(message.Role, "tool") {
+			toolIndexes = append(toolIndexes, index)
+		}
+	}
+	if len(toolIndexes) <= maxRecentKept {
+		return messages, 0, 0
+	}
+
+	type candidate struct {
+		index             int
+		original, compact string
+	}
+	var candidates []candidate
+	totalSaving := 0
+	compactUntil := len(toolIndexes) - maxRecentKept
+	for _, index := range toolIndexes[:compactUntil] {
+		content := FlattenContent(messages[index].Content)
+		if len(content) <= observationMaskMinBodyBytes {
+			continue
+		}
+		compacted := compactObservation(content)
+		if compacted == content {
+			continue
+		}
+		candidates = append(candidates, candidate{index: index, original: content, compact: compacted})
+		totalSaving += len(content) - len(compacted)
+	}
+	if len(candidates) == 0 {
+		return messages, 0, 0
+	}
+
+	// Preserve the newest error candidates, from newest to oldest, while the
+	// projected prompt stays within the hard budget.
+	preserved := make(map[int]bool, observationMaskPreservedErrors)
+	projected := totalBytes - totalSaving
+	errorsPreserved := 0
+	for i := len(candidates) - 1; i >= 0 && errorsPreserved < observationMaskPreservedErrors; i-- {
+		item := candidates[i]
+		if !toolResultIndicatesError(item.original) {
+			continue
+		}
+		saving := len(item.original) - len(item.compact)
+		if projected+saving > maxPromptBytes {
+			continue
+		}
+		preserved[item.index] = true
+		projected += saving
+		errorsPreserved++
+	}
+
+	masked := make([]OpenAIChatMessage, len(messages))
+	copy(masked, messages)
+	bytesSaved := 0
+	for _, item := range candidates {
+		if preserved[item.index] {
+			continue
+		}
+		masked[item.index].Content = contentRawString(item.compact)
+		bytesSaved += len(item.original) - len(item.compact)
+	}
+	return masked, bytesSaved, errorsPreserved
+}
 
 // MaskOldToolObservations compacts old, large tool results when the message
 // history exceeds sizeThresholdBytes, contains more than six tool observations

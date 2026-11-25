@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // HistoryService decouples request handlers from SQLite. Every write is
@@ -29,6 +30,11 @@ type HistoryService struct {
 	closed bool
 
 	dropped atomic.Uint64
+
+	// telemetryPending counts enqueued records that have not been persisted yet
+	// (queued or in flight). Waiting on len(telemetryQueue) alone would report
+	// an empty queue while a worker is still committing.
+	telemetryPending atomic.Int64
 }
 
 type messageLogItem struct {
@@ -194,10 +200,29 @@ func (s *HistoryService) enqueueTelemetry(item TurnTelemetry) {
 		s.dropped.Add(1)
 		return
 	}
+	// Increment before publishing the item. If the increment followed the send,
+	// the worker could dequeue, commit and decrement in between, letting
+	// WaitTelemetryDrain observe a zero counter while the SQLite write is still
+	// running, and return before the verdict's correlation exists.
+	s.telemetryPending.Add(1)
 	select {
 	case s.telemetryQueue <- item:
 	default:
 		s.dropped.Add(1)
+		s.telemetryPending.Add(-1)
+	}
+}
+
+// WaitTelemetryDrain blocks until every enqueued telemetry record has been
+// persisted, or until the timeout expires. It is only used by the benchmark
+// verdict endpoint, which may arrive milliseconds after the stream ended.
+func (s *HistoryService) WaitTelemetryDrain(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for s.telemetryPending.Load() > 0 {
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -217,6 +242,8 @@ func sessionIDHash(sessionKey string) string {
 }
 
 func (s *HistoryService) processTelemetry(t TurnTelemetry) {
+	defer s.telemetryPending.Add(-1)
+
 	rec := db.AgentTurnRecord{
 		SessionID:       sessionIDHash(t.SessionKey),
 		UserID:          logFingerprint(t.SessionID),
@@ -234,6 +261,7 @@ func (s *HistoryService) processTelemetry(t TurnTelemetry) {
 		ToolsDeclared:    t.ToolsDeclared,
 
 		UpstreamConvID:   t.UpstreamConvID,
+		TrialID:          t.BenchmarkTrialID,
 		IsDelta:          t.IsDelta,
 		ReplayReason:     t.ReplayReason,
 		FlatPromptBytes:  t.FlatPromptBytes,
@@ -268,6 +296,10 @@ func (s *HistoryService) processTelemetry(t TurnTelemetry) {
 		ThoughtUnclosed:       t.ThoughtUnclosed,
 		ThoughtSHA256:         t.ThoughtSHA256,
 		VisibleLen:            t.VisibleLen,
+
+		Spans:        t.ToolSpans,
+		ToolOutcomes: t.ToolOutcomes,
+		Anomalies:    t.Anomalies,
 	}
 	if err := db.LogAgentTurn(rec); err != nil {
 		// Fingerprints only: the telemetry path must never print a prompt.

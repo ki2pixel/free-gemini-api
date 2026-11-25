@@ -309,7 +309,8 @@ func recordSessionToolCalls(sessionKey string, calls []gemini.ToolCall) {
 	}
 	tracker := getOrCreateSessionTracker(sessionKey)
 	for _, call := range calls {
-		tracker.RecordToolCall(
+		tracker.RecordToolCallWithID(
+			call.ID,
 			call.Function.Name,
 			call.Function.Arguments,
 			gemini.IsMutatingTool(call.Function.Name),

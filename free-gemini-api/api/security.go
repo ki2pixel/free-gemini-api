@@ -122,6 +122,7 @@ func CORSStrictMiddleware() fiber.Handler {
 			"X-Conversation-ID",
 			"X-Gemini-Mode",
 			"X-Allow-Task-Mode-For-Tools",
+			"X-Benchmark-Trial-ID",
 		},
 		ExposeHeaders: []string{
 			"Content-Disposition",

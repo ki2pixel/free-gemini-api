@@ -21,6 +21,19 @@ type ToolCallFunction struct {
 	Arguments string `json:"arguments"` // stringified JSON object
 }
 
+// ToolCallDiagnostic records how one candidate tool call was extracted and what
+// happened to it. Arguments stay in memory only: json:"-" guarantees a debug
+// marshal of ArrangedOutput can never leak them.
+type ToolCallDiagnostic struct {
+	ToolCallID        string `json:"tool_call_id,omitempty"`
+	ToolName          string `json:"tool_name"`
+	Arguments         string `json:"-"`
+	IsMutating        bool   `json:"is_mutating"`
+	ExtractionChannel string `json:"extraction_channel"`
+	Disposition       string `json:"disposition"`
+	ValidationError   string `json:"validation_error,omitempty"`
+}
+
 // ArrangedOutput contains the parsed, cleaned, and structured result of Gemini's response
 type ArrangedOutput struct {
 	CleanText        string     `json:"clean_text"`
@@ -40,6 +53,9 @@ type ArrangedOutput struct {
 	// closing tag, either at a <tool_call> switch or at end of stream. It is
 	// the truncation signal the telemetry layer records per turn.
 	ThoughtUnclosed bool `json:"thought_unclosed,omitempty"`
+	// ToolDiagnostics describes every candidate call, including the rejected and
+	// quarantined ones that ToolCalls silently omits.
+	ToolDiagnostics []ToolCallDiagnostic `json:"tool_diagnostics,omitempty"`
 }
 
 const (
@@ -750,7 +766,8 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 
 	// 2. Extract Tool Calls from <tool_call> tags (supporting standard </tool_call>, markdown fences ```, or unclosed blocks)
 	if strings.Contains(text, "<tool_call>") {
-		taggedCalls, cleanText := extractTaggedToolCalls(text, catalog)
+		taggedCalls, cleanText, taggedDiagnostics := extractTaggedToolCallsWithDiagnostics(text, catalog)
+		res.ToolDiagnostics = append(res.ToolDiagnostics, taggedDiagnostics...)
 		text = cleanText
 		if len(taggedCalls) > 0 {
 			res.ToolCalls = taggedCalls
@@ -760,7 +777,8 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 			// emitted in the same turn. Quarantine it so no raw tool JSON can
 			// survive in CleanText; the API layer retries the whole turn.
 			if catalog != nil {
-				sanitized, hasMutation, promoted := quarantineUntaggedToolJSON(cleanText, catalog)
+				sanitized, hasMutation, promoted, quarantineDiagnostics := quarantineUntaggedToolJSONWithDiagnostics(cleanText, catalog)
+				res.ToolDiagnostics = append(res.ToolDiagnostics, quarantineDiagnostics...)
 				res.UntaggedMutation = hasMutation
 				res.ToolCalls = append(res.ToolCalls, promoted...)
 				cleanText = sanitized
@@ -775,7 +793,8 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 	// quarantine removes every declared-tool object from the visible text and
 	// promotes only complete, schema-valid, read-only calls.
 	if catalog != nil {
-		sanitized, hasMutation, promoted := quarantineUntaggedToolJSON(text, catalog)
+		sanitized, hasMutation, promoted, quarantineDiagnostics := quarantineUntaggedToolJSONWithDiagnostics(text, catalog)
+		res.ToolDiagnostics = append(res.ToolDiagnostics, quarantineDiagnostics...)
 		res.UntaggedMutation = hasMutation
 		if len(promoted) > 0 {
 			res.ToolCalls = promoted
@@ -789,6 +808,16 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 	// 4. Fallback without a declared catalog: preserve the historical
 	// best-effort promotion of a complete JSON call.
 	if strings.Contains(text, `"name"`) {
+		recordFallback := func(tc ToolCall) {
+			res.ToolDiagnostics = append(res.ToolDiagnostics, ToolCallDiagnostic{
+				ToolCallID:        tc.ID,
+				ToolName:          tc.Function.Name,
+				Arguments:         tc.Function.Arguments,
+				IsMutating:        isMutatingTool(tc.Function.Name),
+				ExtractionChannel: "heuristic_fallback",
+				Disposition:       "emitted",
+			})
+		}
 		// Try code block first
 		if cbMatches := jsonCodeBlock.FindAllStringSubmatch(text, -1); len(cbMatches) > 0 {
 			for _, m := range cbMatches {
@@ -797,6 +826,7 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 					tc, ok := parseSingleToolCall(payload)
 					if ok && acceptsToolCall(catalog, tc) {
 						res.ToolCalls = append(res.ToolCalls, tc)
+						recordFallback(tc)
 					}
 				}
 			}
@@ -806,6 +836,7 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 			tc, ok := parseSingleToolCall(text)
 			if ok && acceptsToolCall(catalog, tc) {
 				res.ToolCalls = append(res.ToolCalls, tc)
+				recordFallback(tc)
 			}
 		}
 		// If still none, scan for the first balanced JSON object that parses as
@@ -816,6 +847,7 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 		if len(res.ToolCalls) == 0 {
 			if tc, ok := findFirstJSONToolCall(text, catalog); ok {
 				res.ToolCalls = append(res.ToolCalls, tc)
+				recordFallback(tc)
 			}
 		}
 
@@ -851,9 +883,46 @@ func noteBraceEnvelopeRepair(res *ArrangedOutput, raw string) {
 // When catalog is non-nil, calls that violate the declared schema are removed
 // from both the result and the cleaned text.
 func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCall, string) {
+	calls, clean, _ := extractTaggedToolCallsWithDiagnostics(text, catalog)
+	return calls, clean
+}
+
+// extractTaggedToolCallsWithDiagnostics is extractTaggedToolCalls plus the
+// per-candidate evidence. It never changes which calls are accepted: the
+// accept closure mirrors acceptsToolCall exactly.
+func extractTaggedToolCallsWithDiagnostics(text string, catalog *CompiledToolCatalog) ([]ToolCall, string, []ToolCallDiagnostic) {
+	var diagnostics []ToolCallDiagnostic
+	accept := func(tc ToolCall, channel string) bool {
+		diagnostic := ToolCallDiagnostic{
+			ToolCallID:        tc.ID,
+			ToolName:          tc.Function.Name,
+			Arguments:         tc.Function.Arguments,
+			IsMutating:        isMutatingTool(tc.Function.Name),
+			ExtractionChannel: channel,
+			Disposition:       "emitted",
+		}
+		if catalog == nil {
+			diagnostics = append(diagnostics, diagnostic)
+			return true
+		}
+		ok, detail := catalog.ValidateCall(tc.Function.Name, tc.Function.Arguments)
+		if ok {
+			diagnostics = append(diagnostics, diagnostic)
+			return true
+		}
+		diagnostic.Disposition = "rejected_schema_invalid"
+		if _, declared := catalog.declared[tc.Function.Name]; !declared {
+			diagnostic.Disposition = "rejected_undeclared_tool"
+		}
+		diagnostic.ValidationError = StructuralValidationDetail(detail)
+		diagnostics = append(diagnostics, diagnostic)
+		return false
+	}
+
 	const tag = "<tool_call>"
 	tagLen := len(tag)
 	var tcs []ToolCall
+	lastUnrecoveredTag := -1
 	type span struct {
 		start, end int
 	}
@@ -878,6 +947,7 @@ func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCa
 		if ok {
 			endObjIdx := braceIdx + len(objStr)
 			tc, parsed := parseSingleToolCall(objStr)
+			channel := "tagged_xml"
 			if !parsed {
 				// If parsing objStr failed (e.g. premature brace cutoff), try candidate between <tool_call> and </tool_call>
 				if closeIdx := strings.Index(text[absIdx+tagLen:], "</tool_call>"); closeIdx != -1 {
@@ -889,16 +959,18 @@ func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCa
 					} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
 						tc = tcHeur
 						parsed = true
+						channel = "heuristic_fallback"
 						endObjIdx = absIdx + tagLen + closeIdx
 					}
 				} else if tcHeur, okHeur := extractHeuristicToolCall(objStr); okHeur {
 					tc = tcHeur
 					parsed = true
+					channel = "heuristic_fallback"
 				}
 			}
 
 			if parsed {
-				if acceptsToolCall(catalog, tc) {
+				if accept(tc, channel) {
 					tcs = append(tcs, tc)
 				}
 				endBlock := endObjIdx
@@ -933,7 +1005,7 @@ func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCa
 			candLimit := absIdx + tagLen + closeIdx
 			candidate := strings.TrimSpace(text[absIdx+tagLen : candLimit])
 			if tc, parsed := parseSingleToolCall(candidate); parsed {
-				if acceptsToolCall(catalog, tc) {
+				if accept(tc, "tagged_xml") {
 					tcs = append(tcs, tc)
 				}
 				endBlock := candLimit + len("</tool_call>")
@@ -943,7 +1015,7 @@ func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCa
 			} else if !shouldRejectMidValueRepair(candidate) {
 				fixed, _ := autoCloseJSONBraces(candidate)
 				if tc, parsed := parseSingleToolCall(fixed); parsed {
-					if acceptsToolCall(catalog, tc) {
+					if accept(tc, "tagged_xml") {
 						tcs = append(tcs, tc)
 					}
 					endBlock := candLimit + len("</tool_call>")
@@ -951,7 +1023,7 @@ func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCa
 					pos = endBlock
 					recovered = true
 				} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
-					if acceptsToolCall(catalog, tcHeur) {
+					if accept(tcHeur, "heuristic_fallback") {
 						tcs = append(tcs, tcHeur)
 					}
 					endBlock := candLimit + len("</tool_call>")
@@ -978,14 +1050,14 @@ func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCa
 			if !shouldRejectMidValueRepair(candidate) {
 				fixed, _ := autoCloseJSONBraces(candidate)
 				if tc, parsed := parseSingleToolCall(fixed); parsed {
-					if acceptsToolCall(catalog, tc) {
+					if accept(tc, "tagged_xml") {
 						tcs = append(tcs, tc)
 					}
 					spans = append(spans, span{start: absIdx, end: endBlock})
 					pos = endBlock
 					recovered = true
 				} else if tcHeur, okHeur := extractHeuristicToolCall(candidate); okHeur {
-					if acceptsToolCall(catalog, tcHeur) {
+					if accept(tcHeur, "heuristic_fallback") {
 						tcs = append(tcs, tcHeur)
 					}
 					spans = append(spans, span{start: absIdx, end: endBlock})
@@ -999,11 +1071,26 @@ func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCa
 			continue
 		}
 
+		// Unrecoverable candidate: record it once per <tool_call> tag, without
+		// changing the cursor behaviour that lets the loop keep scanning.
+		if absIdx != lastUnrecoveredTag {
+			name := untaggedToolName(text[absIdx:limit])
+			if name == "" {
+				name = "unknown"
+			}
+			diagnostics = append(diagnostics, ToolCallDiagnostic{
+				ToolName:          name,
+				IsMutating:        isMutatingTool(name),
+				ExtractionChannel: "tagged_xml",
+				Disposition:       "rejected_mid_value_truncation",
+			})
+			lastUnrecoveredTag = absIdx
+		}
 		pos = braceIdx + 1
 	}
 
 	if len(spans) == 0 {
-		return nil, text
+		return nil, text, diagnostics
 	}
 
 	var sb strings.Builder
@@ -1018,7 +1105,7 @@ func extractTaggedToolCalls(text string, catalog *CompiledToolCatalog) ([]ToolCa
 		sb.WriteString(text[lastEnd:])
 	}
 
-	return tcs, strings.TrimSpace(sb.String())
+	return tcs, strings.TrimSpace(sb.String()), diagnostics
 }
 
 // acceptsToolCall reports whether tc conforms to the request's compiled tool
@@ -1031,23 +1118,30 @@ func acceptsToolCall(catalog *CompiledToolCatalog, tc ToolCall) bool {
 	return ok
 }
 
+// ThrottleMutatingToolCallsWithDropped is ThrottleMutatingToolCalls plus the
+// calls it removed, which the API records as throttled_write_serial spans.
+func ThrottleMutatingToolCallsWithDropped(calls []ToolCall) ([]ToolCall, []ToolCall) {
+	if len(calls) == 0 {
+		return calls, nil
+	}
+	out := make([]ToolCall, 0, len(calls))
+	for index, tc := range calls {
+		out = append(out, tc)
+		if isMutatingTool(tc.Function.Name) {
+			return out, calls[index+1:]
+		}
+	}
+	return out, nil
+}
+
 // ThrottleMutatingToolCalls enforces the Write-Serial cadence: every read-only
 // call preceding the first mutation is preserved, exactly one mutating call is
 // allowed, and the batch ends immediately after that mutation. Trailing calls
 // are dropped so the host must execute the mutation and return its result
 // before the model can request anything else (including a verification read).
 func ThrottleMutatingToolCalls(calls []ToolCall) []ToolCall {
-	if len(calls) == 0 {
-		return calls
-	}
-	out := make([]ToolCall, 0, len(calls))
-	for _, tc := range calls {
-		out = append(out, tc)
-		if isMutatingTool(tc.Function.Name) {
-			break
-		}
-	}
-	return out
+	kept, _ := ThrottleMutatingToolCallsWithDropped(calls)
+	return kept
 }
 
 func parseSingleToolCall(payload string) (ToolCall, bool) {
@@ -1363,8 +1457,14 @@ func QuarantineUntaggedToolJSON(cleanText string, catalog *CompiledToolCatalog) 
 
 // quarantineUntaggedToolJSON is the multi-call form used by the arranger.
 func quarantineUntaggedToolJSON(text string, catalog *CompiledToolCatalog) (string, bool, []ToolCall) {
+	clean, mutation, promoted, _ := quarantineUntaggedToolJSONWithDiagnostics(text, catalog)
+	return clean, mutation, promoted
+}
+
+func quarantineUntaggedToolJSONWithDiagnostics(text string, catalog *CompiledToolCatalog) (string, bool, []ToolCall, []ToolCallDiagnostic) {
+	var diagnostics []ToolCallDiagnostic
 	if catalog == nil || strings.TrimSpace(text) == "" {
-		return text, false, nil
+		return text, false, nil, diagnostics
 	}
 	type span struct{ start, end int }
 	var spans []span
@@ -1401,6 +1501,12 @@ func quarantineUntaggedToolJSON(text string, catalog *CompiledToolCatalog) (stri
 				// it out of the visible answer.
 				start, end := expandJSONFenceSpan(text, i, i+len(obj))
 				spans = append(spans, span{start, end})
+				diagnostics = append(diagnostics, ToolCallDiagnostic{
+					ToolName:          name,
+					IsMutating:        isMutatingTool(name),
+					ExtractionChannel: "untagged_quarantined",
+					Disposition:       "rejected_undeclared_tool",
+				})
 				i += len(obj)
 				continue
 			}
@@ -1408,16 +1514,42 @@ func quarantineUntaggedToolJSON(text string, catalog *CompiledToolCatalog) (stri
 				start, end := expandJSONFenceSpan(text, i, i+len(obj))
 				spans = append(spans, span{start, end})
 				hasMutation = true
+				diagnostics = append(diagnostics, ToolCallDiagnostic{
+					ToolName:          name,
+					IsMutating:        true,
+					ExtractionChannel: "untagged_quarantined",
+					Disposition:       "quarantined_untagged_mutation",
+				})
 				i += len(obj)
 				continue
 			}
 			call, parsed := parseUntaggedToolCall(obj)
-			if parsed && acceptsToolCall(catalog, call) {
+			ok, detail := false, ""
+			if parsed {
+				ok, detail = catalog.ValidateCall(call.Function.Name, call.Function.Arguments)
+			}
+			if parsed && ok {
 				promoted = append(promoted, call)
+				diagnostics = append(diagnostics, ToolCallDiagnostic{
+					ToolCallID:        call.ID,
+					ToolName:          call.Function.Name,
+					Arguments:         call.Function.Arguments,
+					ExtractionChannel: "untagged_readonly_promoted",
+					Disposition:       "emitted",
+				})
 			} else {
 				// A declared read-only call with invalid arguments is still a
 				// broken payload; quarantine and retry.
 				hasMutation = true
+				if !parsed {
+					detail = "invalid JSON arguments"
+				}
+				diagnostics = append(diagnostics, ToolCallDiagnostic{
+					ToolName:          name,
+					ExtractionChannel: "untagged_quarantined",
+					Disposition:       "rejected_schema_invalid",
+					ValidationError:   StructuralValidationDetail(detail),
+				})
 			}
 			start, end := expandJSONFenceSpan(text, i, i+len(obj))
 			spans = append(spans, span{start, end})
@@ -1441,6 +1573,11 @@ func quarantineUntaggedToolJSON(text string, catalog *CompiledToolCatalog) (stri
 		}
 		if name != "" && !declared {
 			spans = append(spans, span{i, len(text)})
+			diagnostics = append(diagnostics, ToolCallDiagnostic{
+				ToolName:          name,
+				ExtractionChannel: "untagged_quarantined",
+				Disposition:       "rejected_undeclared_tool",
+			})
 			break
 		}
 		if name == "" && !isMutatingToolPayload(text[i:]) {
@@ -1449,11 +1586,21 @@ func quarantineUntaggedToolJSON(text string, catalog *CompiledToolCatalog) (stri
 		}
 		spans = append(spans, span{i, len(text)})
 		hasMutation = true
+		truncatedName := name
+		if truncatedName == "" {
+			truncatedName = "unknown"
+		}
+		diagnostics = append(diagnostics, ToolCallDiagnostic{
+			ToolName:          truncatedName,
+			IsMutating:        isMutatingTool(truncatedName),
+			ExtractionChannel: "untagged_quarantined",
+			Disposition:       "rejected_mid_value_truncation",
+		})
 		break
 	}
 
 	if len(spans) == 0 {
-		return text, false, nil
+		return text, false, nil, diagnostics
 	}
 
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
@@ -1472,7 +1619,7 @@ func quarantineUntaggedToolJSON(text string, catalog *CompiledToolCatalog) (stri
 	if last < len(text) {
 		sb.WriteString(text[last:])
 	}
-	return strings.TrimSpace(sb.String()), hasMutation, promoted
+	return strings.TrimSpace(sb.String()), hasMutation, promoted, diagnostics
 }
 
 var (

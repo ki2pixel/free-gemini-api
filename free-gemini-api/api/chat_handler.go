@@ -270,11 +270,11 @@ func emitTurnSummary(t TurnTelemetry) {
 	if tier == "" {
 		tier = "none"
 	}
-	log.Printf("📊 [TURN SUMMARY] session=%s model=%s prompt_len=%d delta_len=%d replay_reason=%s conv_id=%s visible_len=%d tools=%d class=%s finish=%s ttft_thought_ms=%s ttft_answer_ms=%s thought_tok=%d answer_tok=%d thought_unclosed=%t tier=%s routed_task_to_chat=%t",
+	log.Printf("📊 [TURN SUMMARY] session=%s model=%s prompt_len=%d delta_len=%d replay_reason=%s conv_id=%s visible_len=%d tools=%d class=%s finish=%s ttft_thought_ms=%s ttft_answer_ms=%s thought_tok=%d answer_tok=%d thought_unclosed=%t tier=%s routed_task_to_chat=%t errors_preserved=%d",
 		logFingerprint(t.SessionKey), t.SendModel, t.SentPromptBytes, t.DeltaBytes, replayReason,
 		logFingerprint(t.UpstreamConvID), t.VisibleLen, t.ToolsDeclared, t.TurnClass, t.FinishReason,
 		msLabel(t.TTFTThoughtMs()), msLabel(t.TTFTAnswerMs()), t.ThoughtTokens, t.AnswerTokens,
-		t.ThoughtUnclosed, tier, t.RoutedTaskToChat)
+		t.ThoughtUnclosed, tier, t.RoutedTaskToChat, t.MaskedErrorsPreserved)
 }
 
 // turnTelemetryEmitter finalizes and publishes exactly one turn record.
@@ -311,6 +311,31 @@ func (e *turnTelemetryEmitter) emit(raw string, arranged *gemini.ArrangedOutput,
 		e.phase.apply(&e.tel)
 	}
 	e.tel.ThinkingTier = gemini.ThinkingTier(gemini.GetModelRegistry().Resolve(e.tel.SendModel), e.tel.SendModel)
+
+	// Context and classification evidence, recorded once the final class is
+	// known. Only categorical codes and bounded counters are stored.
+	switch e.tel.TurnClass {
+	case "greeting":
+		addTurnAnomaly(&e.tel, e.tel.AttemptCount, "context_reset", "greeting", "warn")
+	case "pseudo_report":
+		addTurnAnomaly(&e.tel, e.tel.AttemptCount, "context_reset", "pseudo_report", "warn")
+	case "unbacked_completion":
+		addTurnAnomaly(&e.tel, e.tel.AttemptCount, "unbacked_completion", "unbacked_completion", "warn")
+	}
+	switch e.tel.ReplayReason {
+	case "forced", "worker_mismatch", "conv_mismatch", "prefix_mismatch":
+		addTurnAnomaly(&e.tel, e.tel.AttemptCount, "context_reset", "forced_replay", "info")
+	}
+	if e.tel.DoomLoopAction != "" && e.tel.DoomLoopAction != ActionNone {
+		severity := "warn"
+		if e.tel.DoomLoopAction == ActionHalt {
+			severity = "halt"
+		}
+		addTurnAnomaly(&e.tel, e.tel.AttemptCount, "doom_loop", doomLoopAnomalyCode(e.tel.DoomLoopSignal), severity)
+	}
+	if e.tel.GroundTruthInjected {
+		addTurnAnomaly(&e.tel, e.tel.AttemptCount, "ground_truth_directive", "recent_tool_error", "info")
+	}
 
 	finalizeTurnTelemetry(&e.tel, raw, arranged)
 	emitTurnSummary(e.tel)
@@ -800,11 +825,12 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	// before flattening so stale logs are never replayed byte-for-byte, and it
 	// keeps the 1097 replay (one user message followed by a long assistant/tool
 	// chain) compact enough for the upstream backend.
-	nonSystemMessages, maskedBytesSaved := MaskOldToolObservationsWithStats(
+	nonSystemMessages, maskedBytesSaved, maskedErrorsPreserved := MaskOldToolObservationsForTier(
 		nonSystemMessages,
 		defaultObservationMaskKeepRecent,
 		defaultObservationMaskThreshold,
 		len(systemContent)+len(tiBlock),
+		gemini.ThinkingTier(modelCfg, model),
 	)
 
 	// Enforce the call↔result bijection before flattening: a call without a
@@ -930,6 +956,13 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	if requestStartsFreshTask(req.Messages) || requestStartsNewUserTurn(req.Messages) {
 		tracker.Reset()
 	}
+	// LoopRoute: attach the previous turn's results before deciding whether the
+	// model is looping. Only the bounded tail is needed; the transcript is
+	// replayed on every request.
+	toolOutcomes := collectToolOutcomes(pristineNonSystemMessages, elapsedMs())
+	for _, outcome := range toolOutcomes {
+		tracker.RecordToolOutcome(outcome.ToolCallID, outcome.IsError)
+	}
 	loopAction, loopDetail := tracker.CheckIntervention()
 	antiLoopDirective := ""
 	doomLoopActionLabel := ""
@@ -956,10 +989,12 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				RoutedTaskToChat: routedTaskToChat,
 				ThinkingTier:     gemini.ThinkingTier(modelCfg, model),
 				SystemScopeHash:  systemScopeHash,
+				BenchmarkTrialID: sanitizeBenchmarkTrialID(c.Get("X-Benchmark-Trial-ID")),
 				ToolsDeclared:    len(req.Tools),
 				RequestStartedMs: requestStartedMs,
 				DoomLoopAction:   loopAction,
 				DoomLoopSignal:   doomLoopSignal(loopAction, loopDetail),
+				ToolOutcomes:     toolOutcomes,
 			},
 			now: elapsedMs,
 		}
@@ -1015,24 +1050,27 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	// transcript are all known. Each branch copies it so a single request can
 	// never publish two records.
 	baseTelemetry := TurnTelemetry{
-		SessionKey:          sessionKey,
-		SessionID:           sessionID,
-		RequestedModel:      req.Model,
-		EffectiveModel:      model,
-		SendModel:           model,
-		ProductMode:         requestedAppMode,
-		RoutedTaskToChat:    routedTaskToChat,
-		ThinkingTier:        gemini.ThinkingTier(modelCfg, model),
-		SystemScopeHash:     systemScopeHash,
-		ToolsDeclared:       len(req.Tools),
-		FlatPromptBytes:     len(msgFlat),
-		SentPromptBytes:     len(msgFlat),
-		MaskedBytesSaved:    maskedBytesSaved,
-		RequestStartedMs:    requestStartedMs,
-		DoomLoopAction:      doomLoopActionLabel,
-		DoomLoopSignal:      doomLoopSignalLabel,
-		GroundTruthInjected: groundTruthInjected,
-		TokenEstimator:      "heuristic",
+		SessionKey:            sessionKey,
+		SessionID:             sessionID,
+		RequestedModel:        req.Model,
+		EffectiveModel:        model,
+		SendModel:             model,
+		ProductMode:           requestedAppMode,
+		RoutedTaskToChat:      routedTaskToChat,
+		ThinkingTier:          gemini.ThinkingTier(modelCfg, model),
+		SystemScopeHash:       systemScopeHash,
+		BenchmarkTrialID:      sanitizeBenchmarkTrialID(c.Get("X-Benchmark-Trial-ID")),
+		ToolsDeclared:         len(req.Tools),
+		FlatPromptBytes:       len(msgFlat),
+		SentPromptBytes:       len(msgFlat),
+		MaskedBytesSaved:      maskedBytesSaved,
+		RequestStartedMs:      requestStartedMs,
+		DoomLoopAction:        doomLoopActionLabel,
+		DoomLoopSignal:        doomLoopSignalLabel,
+		GroundTruthInjected:   groundTruthInjected,
+		TokenEstimator:        "heuristic",
+		MaskedErrorsPreserved: maskedErrorsPreserved,
+		ToolOutcomes:          toolOutcomes,
 	}
 	phase := newStreamPhaseTracker(elapsedMs, requestStartedMs)
 
@@ -1291,6 +1329,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							telTransportRetries = transportRetries
 							if errors.Is(err, gemini.ErrUpstreamStreamStalled) {
 								telStalled = true
+								addTurnAnomaly(&emitter.tel, telAttempt, "stream_stall", "stall_45s", "error")
 							}
 							log.Printf("⚠️ Stream transport incident %d/%d (%v), retrying on a fresh upstream conversation without consuming a generation attempt", transportRetries, maxTransportRetries, err)
 							wWorker.Client.ResetConversationStateSession(sessionKey, sendModel)
@@ -1364,6 +1403,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							RecordArrangerRejection("mid_value_truncation")
 							RecordQuarantine("truncated")
 							recordTurnClass("untagged_mutation", model)
+							recordRejectedAttempt(&emitter.tel, telAttempt, finalAttemptText, req.Tools, elapsedMs())
+							addTurnAnomaly(&emitter.tel, telAttempt, "arranger_rejection", "mid_value_truncation", "warn")
 							log.Printf("⚠️ Truncated mutation tool call detected, retrying once with an abstract truncation directive")
 							truncationRetry = true
 							schemaRetryDetail = ""
@@ -1377,6 +1418,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							RecordArrangerRejection(arrangerRejectionReason(detail))
 							RecordQuarantine("schema_invalid")
 							recordTurnClass("schema_invalid", model)
+							recordRejectedAttempt(&emitter.tel, telAttempt, finalAttemptText, req.Tools, elapsedMs())
+							addTurnAnomaly(&emitter.tel, telAttempt, "arranger_rejection", "schema_invalid", "warn")
 							log.Printf("⚠️ Invalid tool-call schema (%s), retrying with an abstract error directive", detail)
 							schemaRetryDetail = detail
 							truncationRetry = false
@@ -1390,6 +1433,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							RecordArrangerRejection("untagged_mutation")
 							RecordQuarantine("untagged_mutation")
 							recordTurnClass("untagged_mutation", model)
+							recordRejectedAttempt(&emitter.tel, telAttempt, finalAttemptText, req.Tools, elapsedMs())
+							addTurnAnomaly(&emitter.tel, telAttempt, "quarantine", "untagged_mutation", "warn")
 							log.Printf("⚠️ Untagged mutating tool JSON detected in prose, retrying with truncation directive")
 							truncationRetry = true
 							schemaRetryDetail = ""
@@ -1402,6 +1447,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						if len(req.Tools) > 0 && isUnbackedCompletion(finalAttemptText, req.Tools, sessionKey) {
 							RecordArrangerRejection("unbacked_completion")
 							recordTurnClass("unbacked_completion", model)
+							recordRejectedAttempt(&emitter.tel, telAttempt, finalAttemptText, req.Tools, elapsedMs())
+							addTurnAnomaly(&emitter.tel, telAttempt, "unbacked_completion", "unbacked_completion", "warn")
 							log.Printf("⚠️ Unbacked completion claim detected (S7), retrying with ground-truth directive")
 							pseudoReportRetry = false
 							truncationRetry = false
@@ -1414,7 +1461,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						if isUnusableModelOutput(finalAttemptText, req.Tools) {
 							class := classifyTurnOutput(finalAttemptText, gemini.ArrangeGeminiOutputWithTools(finalAttemptText, req.Tools), req.Tools, sessionKey)
 							recordTurnClass(class, model)
+							recordRejectedAttempt(&emitter.tel, telAttempt, finalAttemptText, req.Tools, elapsedMs())
 							if len(req.Tools) > 0 && isPseudoProgressReport(finalAttemptText, req.Tools) {
+								addTurnAnomaly(&emitter.tel, telAttempt, "context_reset", "pseudo_report", "warn")
 								log.Printf("⚠️ Pseudo-report without a tool call (%d chars), retrying with an anti-summary directive", len(finalAttemptText))
 								pseudoReportRetry = true
 								truncationRetry = false
@@ -1425,6 +1474,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 									RecordRefusalRetry()
 									refusalRetries++
 									telRefusalRetries = refusalRetries
+									addTurnAnomaly(&emitter.tel, telAttempt, "refusal_retry", "refusal", "warn")
+								} else if class == "greeting" {
+									addTurnAnomaly(&emitter.tel, telAttempt, "context_reset", "greeting", "warn")
 								}
 								truncationRetry = false
 								schemaRetryDetail = ""
@@ -1446,6 +1498,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				log.Printf("❌ Streaming error: %v", streamErr)
 				if errors.Is(streamErr, gemini.ErrUpstreamStreamStalled) {
 					telStalled = true
+					addTurnAnomaly(&emitter.tel, telAttempt, "stream_stall", "stall_45s", "error")
 				}
 				invalidateSessionTurn(sessionKey)
 				emitSummary("none", "error", 0, "", accumulatedOutput.String(), nil)
@@ -1469,6 +1522,10 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					RecordArrangerRejection(arrangerRejectionReason(detail))
 					RecordQuarantine("schema_invalid")
 					recordTurnClass("schema_invalid", model)
+					// The turn is rejected for good: the evidence must survive even
+					// though no usable arrangement exists for the final text.
+					recordRejectedAttempt(&emitter.tel, telAttempt, finalText, req.Tools, elapsedMs())
+					addTurnAnomaly(&emitter.tel, telAttempt, "arranger_rejection", "schema_invalid", "warn")
 					log.Printf("❌ Upstream tool call failed schema validation after retry: %s", detail)
 					invalidateSessionTurn(sessionKey)
 					convID := ""
@@ -1506,13 +1563,15 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				arranged := gemini.ArrangeGeminiOutputWithTools(rawOutput, req.Tools)
 				turnArranged = arranged
 				recordArrangerRepairs(arranged)
+				var droppedCalls []gemini.ToolCall
 				if arranged.IsToolCall {
-					arranged.ToolCalls = gemini.ThrottleMutatingToolCalls(arranged.ToolCalls)
+					arranged.ToolCalls, droppedCalls = gemini.ThrottleMutatingToolCallsWithDropped(arranged.ToolCalls)
 					if len(arranged.ToolCalls) == 0 {
 						arranged.IsToolCall = false
 						arranged.FinishReason = "stop"
 					}
 				}
+				recordArrangerEvidence(&emitter.tel, telAttempt, arranged, droppedCalls, elapsedMs())
 				if gemini.HasTruncatedMutationToolCall(rawOutput) {
 					// The model was cut off inside a mutating tool call. The
 					// arranger deliberately rejected it; report an explicit
@@ -1713,6 +1772,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	telEmptyGenRetries := 0
 	telRefusalRetries := 0
 	telStalled := false
+	// Anomalies and rejected attempt spans are collected inside the execute
+	// callback, before the emitter exists, then transferred once the call returns.
+	telPreAnomalies := &TurnTelemetry{}
 	resp, err := pool.ExecuteQueuedWithTier(ctx, sessionID, requiredTier, func(w *AccountWorker) (*gemini.GeminiResponse, error) {
 		usedWorker = w
 		// Nothing has been emitted yet, so a blocked/empty generation can be
@@ -1800,6 +1862,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					telTransportRetries = transportRetries
 					if errors.Is(err, gemini.ErrUpstreamStreamStalled) {
 						telStalled = true
+						addTurnAnomaly(telPreAnomalies, telAttempt, "stream_stall", "stall_45s", "error")
 					}
 					log.Printf("⚠️ Non-stream transport incident %d/%d (%v), retrying on a fresh upstream conversation without consuming a generation attempt", transportRetries, maxTransportRetries, err)
 					w.Client.ResetConversationStateSession(sessionKey, sendModel)
@@ -1849,6 +1912,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					RecordArrangerRejection("mid_value_truncation")
 					RecordQuarantine("truncated")
 					recordTurnClass("untagged_mutation", model)
+					recordRejectedAttempt(telPreAnomalies, telAttempt, r.Text, req.Tools, elapsedMs())
+					addTurnAnomaly(telPreAnomalies, telAttempt, "arranger_rejection", "mid_value_truncation", "warn")
 					log.Printf("⚠️ Truncated mutation tool call detected, retrying once with an abstract truncation directive")
 					truncationRetry = true
 					schemaRetryDetail = ""
@@ -1862,6 +1927,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					RecordArrangerRejection(arrangerRejectionReason(detail))
 					RecordQuarantine("schema_invalid")
 					recordTurnClass("schema_invalid", model)
+					recordRejectedAttempt(telPreAnomalies, telAttempt, r.Text, req.Tools, elapsedMs())
+					addTurnAnomaly(telPreAnomalies, telAttempt, "arranger_rejection", "schema_invalid", "warn")
 					log.Printf("⚠️ Invalid tool-call schema (%s), retrying with an abstract error directive", detail)
 					schemaRetryDetail = detail
 					truncationRetry = false
@@ -1875,6 +1942,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					RecordArrangerRejection("untagged_mutation")
 					RecordQuarantine("untagged_mutation")
 					recordTurnClass("untagged_mutation", model)
+					recordRejectedAttempt(telPreAnomalies, telAttempt, r.Text, req.Tools, elapsedMs())
+					addTurnAnomaly(telPreAnomalies, telAttempt, "quarantine", "untagged_mutation", "warn")
 					log.Printf("⚠️ Untagged mutating tool JSON detected in prose, retrying with truncation directive")
 					truncationRetry = true
 					schemaRetryDetail = ""
@@ -1887,6 +1956,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				if len(req.Tools) > 0 && isUnbackedCompletion(r.Text, req.Tools, sessionKey) {
 					RecordArrangerRejection("unbacked_completion")
 					recordTurnClass("unbacked_completion", model)
+					recordRejectedAttempt(telPreAnomalies, telAttempt, r.Text, req.Tools, elapsedMs())
+					addTurnAnomaly(telPreAnomalies, telAttempt, "unbacked_completion", "unbacked_completion", "warn")
 					log.Printf("⚠️ Unbacked completion claim detected (S7), retrying with ground-truth directive")
 					pseudoReportRetry = false
 					truncationRetry = false
@@ -1899,7 +1970,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				if isUnusableModelOutput(r.Text, req.Tools) {
 					class := classifyTurnOutput(r.Text, gemini.ArrangeGeminiOutputWithTools(r.Text, req.Tools), req.Tools, sessionKey)
 					recordTurnClass(class, model)
+					recordRejectedAttempt(telPreAnomalies, telAttempt, r.Text, req.Tools, elapsedMs())
 					if len(req.Tools) > 0 && isPseudoProgressReport(r.Text, req.Tools) {
+						addTurnAnomaly(telPreAnomalies, telAttempt, "context_reset", "pseudo_report", "warn")
 						log.Printf("⚠️ Pseudo-report without a tool call (%d chars), retrying with an anti-summary directive", len(r.Text))
 						pseudoReportRetry = true
 						truncationRetry = false
@@ -1910,6 +1983,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							RecordRefusalRetry()
 							refusalRetries++
 							telRefusalRetries = refusalRetries
+							addTurnAnomaly(telPreAnomalies, telAttempt, "refusal_retry", "refusal", "warn")
+						} else if class == "greeting" {
+							addTurnAnomaly(telPreAnomalies, telAttempt, "context_reset", "greeting", "warn")
 						}
 						truncationRetry = false
 						schemaRetryDetail = ""
@@ -1943,6 +2019,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	}
 
 	emitter := &turnTelemetryEmitter{tel: baseTelemetry, phase: phase, now: elapsedMs}
+	transferPreTelemetry(&emitter.tel, telPreAnomalies)
 	emitSummary := func(class, finish string, visibleLen int, raw string, arranged *gemini.ArrangedOutput) {
 		emitter.tel.SendModel = telSendModel
 		emitter.tel.AttemptCount = telAttempt
@@ -1963,6 +2040,10 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			RecordArrangerRejection(arrangerRejectionReason(detail))
 			RecordQuarantine("schema_invalid")
 			recordTurnClass("schema_invalid", model)
+			// The turn is rejected for good: the evidence must survive even
+			// though no usable arrangement exists for the final text.
+			recordRejectedAttempt(&emitter.tel, telAttempt, resp.Text, req.Tools, elapsedMs())
+			addTurnAnomaly(&emitter.tel, telAttempt, "arranger_rejection", "schema_invalid", "warn")
 			log.Printf("❌ Upstream tool call failed schema validation after retry: %s", detail)
 			invalidateSessionTurn(sessionKey)
 			emitSummary("schema_invalid", "error", len(resp.Text), resp.Text, nil)
@@ -1987,13 +2068,15 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 
 	arranged := gemini.ArrangeGeminiOutputWithTools(resp.Text, req.Tools)
 	recordArrangerRepairs(arranged)
+	var droppedCalls []gemini.ToolCall
 	if arranged.IsToolCall {
-		arranged.ToolCalls = gemini.ThrottleMutatingToolCalls(arranged.ToolCalls)
+		arranged.ToolCalls, droppedCalls = gemini.ThrottleMutatingToolCallsWithDropped(arranged.ToolCalls)
 		if len(arranged.ToolCalls) == 0 {
 			arranged.IsToolCall = false
 			arranged.FinishReason = "stop"
 		}
 	}
+	recordArrangerEvidence(&emitter.tel, telAttempt, arranged, droppedCalls, elapsedMs())
 	if gemini.HasTruncatedMutationToolCall(resp.Text) {
 		RecordArrangerRejection("mid_value_truncation")
 		RecordQuarantine("truncated")
