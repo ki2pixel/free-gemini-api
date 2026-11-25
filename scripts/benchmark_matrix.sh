@@ -226,11 +226,18 @@ cleanup() {
   if [ "$KEEP_WORKTREES" != "1" ]; then
     for dir in "${WORKTREES[@]:-}"; do
       if [ -n "$dir" ]; then
-        git -C "$ROOT_DIR" worktree remove --force "$dir" >/dev/null 2>&1 || rm -rf "$dir"
+        # The agent may create root-owned runtime directories inside its
+        # worktree (for example free-gemini-api/*/data). Neither git nor rm -rf
+        # can remove those as the invoking user: the benchmark itself already
+        # succeeded, so cleanup must never turn it into a non-zero exit.
+        git -C "$ROOT_DIR" worktree remove --force "$dir" >/dev/null 2>&1 \
+          || rm -rf "$dir" 2>/dev/null \
+          || true
       fi
     done
+    git -C "$ROOT_DIR" worktree prune >/dev/null 2>&1 || true
   fi
-  rm -rf "$TMP_DIR"
+  rm -rf "$TMP_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
