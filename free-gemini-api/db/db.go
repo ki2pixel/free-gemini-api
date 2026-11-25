@@ -44,7 +44,7 @@ func InitDB() (*sql.DB, error) {
 		}
 		_ = os.Chmod(dir, 0700)
 
-		database, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=synchronous(normal)&_pragma=busy_timeout(5000)&_pragma=temp_store(memory)")
+		database, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=synchronous(normal)&_pragma=busy_timeout(5000)&_pragma=temp_store(memory)&_pragma=foreign_keys(1)")
 		if err != nil {
 			initErr = err
 			return
@@ -109,6 +109,130 @@ func InitDB() (*sql.DB, error) {
 			total_requests INTEGER DEFAULT 0,
 			last_used_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
+
+		-- Agent telemetry. Content-free by construction: session keys are
+		-- hashed, reasoning is reduced to a digest, and no prompt, reasoning
+		-- body or tool argument is ever stored. FOREIGN KEY enforcement is on
+		-- every pooled connection through the DSN pragma above.
+		CREATE TABLE IF NOT EXISTS agent_sessions (
+			session_id TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			system_scope_hash TEXT NOT NULL DEFAULT '',
+			requested_model TEXT NOT NULL,
+			effective_model TEXT NOT NULL,
+			product_mode INTEGER NOT NULL CHECK (product_mode IN (0, 40)),
+			routed_task_to_chat INTEGER NOT NULL DEFAULT 0 CHECK (routed_task_to_chat IN (0, 1)),
+			thinking_tier TEXT NOT NULL DEFAULT 'none' CHECK (thinking_tier IN ('none', 'low', 'medium', 'high')),
+			worker_id TEXT NOT NULL DEFAULT '',
+			account_tier TEXT NOT NULL DEFAULT 'free' CHECK (account_tier IN ('free', 'subscription', 'ultra')),
+			tools_declared_count INTEGER NOT NULL DEFAULT 0 CHECK (tools_declared_count >= 0),
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		) STRICT;
+
+		CREATE INDEX IF NOT EXISTS idx_sessions_conv ON agent_sessions(conversation_id);
+		CREATE INDEX IF NOT EXISTS idx_sessions_paradigm ON agent_sessions(product_mode, routed_task_to_chat);
+		CREATE INDEX IF NOT EXISTS idx_sessions_updated ON agent_sessions(updated_at);
+
+		CREATE TABLE IF NOT EXISTS agent_turns (
+			turn_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+			turn_index INTEGER NOT NULL CHECK (turn_index >= 0),
+			upstream_conv_id TEXT NOT NULL DEFAULT '',
+			send_model TEXT NOT NULL DEFAULT '',
+			is_delta INTEGER NOT NULL DEFAULT 0 CHECK (is_delta IN (0, 1)),
+			replay_reason TEXT NOT NULL DEFAULT 'none' CHECK (replay_reason IN ('none', 'delta', 'new', 'forced', 'worker_mismatch', 'conv_mismatch', 'identical', 'prefix_mismatch')),
+			flat_prompt_bytes INTEGER NOT NULL DEFAULT 0 CHECK (flat_prompt_bytes >= 0),
+			sent_prompt_bytes INTEGER NOT NULL DEFAULT 0 CHECK (sent_prompt_bytes >= 0),
+			delta_bytes INTEGER NOT NULL DEFAULT 0 CHECK (delta_bytes >= 0),
+			masked_obs_bytes_saved INTEGER NOT NULL DEFAULT 0 CHECK (masked_obs_bytes_saved >= 0),
+			request_started_ms INTEGER NOT NULL CHECK (request_started_ms >= 1),
+			attempt_started_ms INTEGER,
+			first_thought_ms INTEGER,
+			thought_ended_ms INTEGER,
+			first_answer_ms INTEGER,
+			client_first_thought_ms INTEGER,
+			completed_ms INTEGER NOT NULL CHECK (completed_ms >= request_started_ms),
+			input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+			thought_tokens INTEGER NOT NULL DEFAULT 0 CHECK (thought_tokens >= 0),
+			answer_tokens INTEGER NOT NULL DEFAULT 0 CHECK (answer_tokens >= 0),
+			token_estimator TEXT NOT NULL DEFAULT 'heuristic' CHECK (token_estimator IN ('heuristic', 'bpe')),
+			attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+			empty_gen_retries INTEGER NOT NULL DEFAULT 0 CHECK (empty_gen_retries >= 0),
+			refusal_retries INTEGER NOT NULL DEFAULT 0 CHECK (refusal_retries >= 0),
+			transport_retries INTEGER NOT NULL DEFAULT 0 CHECK (transport_retries >= 0),
+			stream_stalled INTEGER NOT NULL DEFAULT 0 CHECK (stream_stalled IN (0, 1)),
+			upstream_suspected_stop INTEGER NOT NULL DEFAULT 0 CHECK (upstream_suspected_stop IN (0, 1)),
+			ground_truth_injected INTEGER NOT NULL DEFAULT 0 CHECK (ground_truth_injected IN (0, 1)),
+			turn_class TEXT NOT NULL DEFAULT 'none' CHECK (turn_class IN ('none', 'tool_call', 'ok', 'greeting', 'incomplete', 'refusal', 'pseudo_report', 'unbacked_completion', 'untagged_mutation', 'schema_invalid')),
+			finish_reason TEXT NOT NULL DEFAULT 'error' CHECK (finish_reason IN ('stop', 'tool_calls', 'error')),
+			doom_loop_action TEXT NOT NULL DEFAULT 'none' CHECK (doom_loop_action IN ('none', 'warn_repeat', 'warn_passive_read', 'halt')),
+			doom_loop_signal TEXT NOT NULL DEFAULT '' CHECK (doom_loop_signal IN ('', 'repeat', 'cycle', 'passive_read')),
+			thought_unclosed INTEGER NOT NULL DEFAULT 0 CHECK (thought_unclosed IN (0, 1)),
+			thought_sha256 TEXT NOT NULL DEFAULT '',
+			visible_len INTEGER NOT NULL DEFAULT 0 CHECK (visible_len >= 0),
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			ttft_thought_ms INTEGER GENERATED ALWAYS AS (first_thought_ms - request_started_ms) VIRTUAL,
+			ttft_answer_ms INTEGER GENERATED ALWAYS AS (first_answer_ms - request_started_ms) VIRTUAL,
+			thought_duration_ms INTEGER GENERATED ALWAYS AS (thought_ended_ms - first_thought_ms) VIRTUAL,
+			answer_duration_ms INTEGER GENERATED ALWAYS AS (completed_ms - first_answer_ms) VIRTUAL,
+			total_duration_ms INTEGER GENERATED ALWAYS AS (completed_ms - request_started_ms) VIRTUAL,
+			total_output_tokens INTEGER GENERATED ALWAYS AS (thought_tokens + answer_tokens) STORED,
+			thinking_share REAL GENERATED ALWAYS AS (
+				CASE WHEN thought_tokens + answer_tokens = 0 THEN 0.0
+					ELSE CAST(thought_tokens AS REAL) / (thought_tokens + answer_tokens) END) VIRTUAL,
+			thought_to_answer_ratio REAL GENERATED ALWAYS AS (
+				CASE WHEN answer_tokens = 0 THEN 0.0
+					ELSE CAST(thought_tokens AS REAL) / answer_tokens END) VIRTUAL,
+			CHECK (first_thought_ms IS NULL OR first_thought_ms >= request_started_ms),
+			CHECK (thought_ended_ms IS NULL OR thought_ended_ms >= request_started_ms),
+			CHECK (first_answer_ms IS NULL OR first_answer_ms >= request_started_ms),
+			CHECK (client_first_thought_ms IS NULL OR client_first_thought_ms >= request_started_ms),
+			CHECK (thought_ended_ms IS NULL OR first_thought_ms IS NULL OR thought_ended_ms >= first_thought_ms),
+			CHECK (first_answer_ms IS NULL OR completed_ms >= first_answer_ms),
+			UNIQUE (session_id, turn_index)
+		) STRICT;
+
+		CREATE INDEX IF NOT EXISTS idx_turns_session_idx ON agent_turns(session_id, turn_index);
+		CREATE INDEX IF NOT EXISTS idx_turns_class_finish ON agent_turns(turn_class, finish_reason);
+		CREATE INDEX IF NOT EXISTS idx_turns_replay ON agent_turns(replay_reason) WHERE is_delta = 0;
+		CREATE INDEX IF NOT EXISTS idx_turns_doom ON agent_turns(doom_loop_action) WHERE doom_loop_action != 'none';
+		CREATE INDEX IF NOT EXISTS idx_turns_conv ON agent_turns(upstream_conv_id);
+		CREATE INDEX IF NOT EXISTS idx_turns_created ON agent_turns(created_at);
+
+		-- One row per session with at least one turn. AVG ignores the NULL
+		-- milestones of non-streaming turns, so a mixed session still reports
+		-- the mean of the turns that actually observed each phase.
+		CREATE VIEW IF NOT EXISTS v_session_telemetry_summary AS
+		SELECT
+			s.session_id,
+			s.user_id,
+			s.requested_model,
+			s.effective_model,
+			s.product_mode,
+			s.routed_task_to_chat,
+			s.thinking_tier,
+			s.account_tier,
+			s.worker_id,
+			COUNT(t.turn_id) AS total_turns,
+			SUM(CASE WHEN t.is_delta = 0 THEN 1 ELSE 0 END) AS full_replays,
+			COALESCE(SUM(t.thought_tokens), 0) AS sum_thought_tokens,
+			COALESCE(SUM(t.answer_tokens), 0) AS sum_answer_tokens,
+			COALESCE(SUM(t.total_output_tokens), 0) AS sum_output_tokens,
+			CASE WHEN COALESCE(SUM(t.total_output_tokens), 0) = 0 THEN 0.0
+				ELSE CAST(COALESCE(SUM(t.thought_tokens), 0) AS REAL) / SUM(t.total_output_tokens) END AS session_thinking_share,
+			AVG(t.ttft_thought_ms) AS avg_ttft_thought_ms,
+			AVG(t.ttft_answer_ms) AS avg_ttft_answer_ms,
+			COALESCE(SUM(t.total_duration_ms), 0) AS sum_total_duration_ms,
+			SUM(CASE WHEN t.doom_loop_action != 'none' THEN 1 ELSE 0 END) AS doom_loop_events,
+			SUM(CASE WHEN t.stream_stalled = 1 THEN 1 ELSE 0 END) AS stream_stalls,
+			COALESCE(SUM(t.refusal_retries), 0) AS refusal_retries,
+			MAX(t.created_at) AS last_turn_at
+		FROM agent_sessions s
+		JOIN agent_turns t ON t.session_id = s.session_id
+		GROUP BY s.session_id;
+
 		`
 
 		if _, err := database.Exec(schema); err != nil {
@@ -130,7 +254,13 @@ func InitDB() (*sql.DB, error) {
 		_ = os.Chmod(dbPath+"-wal", 0600)
 		_ = os.Chmod(dbPath+"-shm", 0600)
 
+		// Publish the handle under the writer mutex. An asynchronous history or
+		// telemetry worker may already be running (tests start the chat service
+		// before the first InitDB call), and an unsynchronised pointer swap is a
+		// data race.
+		dbMu.Lock()
 		DB = database
+		dbMu.Unlock()
 		log.Printf("🗄️  SQLite Database initialized successfully at %s (WAL Mode)", dbPath)
 	})
 
@@ -581,14 +711,35 @@ func PurgeExpiredData(retentionDays int) (int64, error) {
 		n, _ := res.RowsAffected()
 		total += n
 	}
+
+	// Agent sessions are aged on their last activity, not their creation: a
+	// long-running session must stay while it is still used. Deleting the
+	// session cascades to its turns, which RowsAffected does not count.
+	res, err := tx.Exec(`DELETE FROM agent_sessions WHERE updated_at < datetime('now', ?)`, cutoff)
+	if err != nil {
+		return total, fmt.Errorf("purge agent_sessions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	total += n
+
+	// Turns of a session that is still active are aged individually, so a
+	// months-old session cannot retain its oldest rows indefinitely.
+	res, err = tx.Exec(`DELETE FROM agent_turns WHERE created_at < datetime('now', ?)`, cutoff)
+	if err != nil {
+		return total, fmt.Errorf("purge agent_turns: %w", err)
+	}
+	n, _ = res.RowsAffected()
+	total += n
+
 	if err := tx.Commit(); err != nil {
 		return total, err
 	}
 	return total, nil
 }
 
-// DeleteConversation removes every message and media row attached to a
-// conversation. It is idempotent: deleting an unknown id returns (0, nil).
+// DeleteConversation removes every message, media row and agent telemetry row
+// attached to a conversation. It is idempotent: deleting an unknown id returns
+// (0, nil).
 func DeleteConversation(conversationID string) (int64, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
@@ -619,6 +770,25 @@ func DeleteConversation(conversationID string) (int64, error) {
 		n, _ := res.RowsAffected()
 		total += n
 	}
+
+	// A session may span several upstream resets (c_1 then c_2), so turns are
+	// matched on the conversation they belong to while the session row is
+	// matched on the last upstream id it recorded. Deleting the session
+	// cascades to any remaining turns.
+	res, err := tx.Exec(`DELETE FROM agent_turns WHERE upstream_conv_id = ?`, conversationID)
+	if err != nil {
+		return total, err
+	}
+	n, _ := res.RowsAffected()
+	total += n
+
+	res, err = tx.Exec(`DELETE FROM agent_sessions WHERE conversation_id = ?`, conversationID)
+	if err != nil {
+		return total, err
+	}
+	n, _ = res.RowsAffected()
+	total += n
+
 	if err := tx.Commit(); err != nil {
 		return total, err
 	}

@@ -7,7 +7,7 @@ choix ont été retenus et ce qui a été écarté.
 
 ---
 
-## 📄 Les quatre documents
+## 📄 Les six documents
 
 ### 1. Arbitrage du benchmark en vol v3.5.7
 
@@ -108,6 +108,43 @@ référence pour comprendre l'origine du durcissement.
 
 ---
 
+### 5. État de l'art 2024–2026 — Traces, observabilité et benchmarking agentique
+
+[**Traces-Observabilite-Et-Benchmarking-Agentique.md**](Traces-Observabilite-Et-Benchmarking-Agentique.md)
+— 25 novembre 2026, 413 lignes.
+
+Synthèse de recherche sur l'observabilité, l'analyse comportementale et le
+benchmarking des proxys agentiques Gemini 4 :
+- Recensement et analyse critique des corpus de traces Long-CoT et trajectoires
+  agentiques (Open-SWE-Traces, Toucan-1.5M, Dolphin-R1, SWE-smith, etc.).
+- Analyse comportementale des phases de réflexion : métriques d'Outcome /
+  Process Efficiency, underthinking vs overthinking, causalité et fidélité CoT
+  (*The Reasoning Trap*, ACL 2026 ; *Inverse Scaling*, TMLR 2025).
+- Risque de dérive contextuelle et impact du masquage d'observations (*The
+  Complexity Trap*, NeurIPS 2025 Workshop).
+- Étude comparative des standards d'observabilité GenAI (OpenTelemetry GenAI
+  SemConv, OpenInference, Langfuse OTel, OpenLLMetry) face aux besoins du proxy
+  (absence de double TTFT natif, gestion disjointe des tokens de pensée).
+- Définition du schéma DDL SQLite relationnel pour la télémétrie des sessions
+  et des tours.
+
+---
+
+### 6. Confrontation d'audit — Traces, observabilité et code Go
+
+[**audit-confrontation-traces-observabilite.html**](audit-confrontation-traces-observabilite.html)
+— 25 novembre 2026, 255 lignes (rapport HTML).
+
+Audit indépendant confrontant les affirmations de la synthèse théorique n° 5
+au code Go réel du proxy et aux tables SQLite :
+- Validation des constats : verrou Task `[40]` → Chat `[0]`, dette du pragma
+  `foreign_keys` sur le DSN, comportement d'observation masking face au mode
+  thinking, exécution réelle du DDL.
+- Clarification des nuances, vérification des formules et validation des
+  estimateurs combinatoires non biaisés de Yao et al. pour le banc pass^k.
+
+---
+
 ## 🧭 Par où commencer
 
 | Votre intention | Document |
@@ -116,6 +153,7 @@ référence pour comprendre l'origine du durcissement.
 | Comprendre un échec précis observé en benchmark | n° 1 — arbitrage |
 | Savoir ce qui a été transposé depuis un plugin JS | n° 2 — audit comparatif |
 | Reproduire la méthode d'audit | n° 3 — brief |
+| Approfondir l'observabilité, CoT faithfulness et pass^k | n° 5 & 6 — état de l'art & audit |
 
 ## 🔗 Voir aussi
 

@@ -178,15 +178,26 @@ func (s *ChatService) ResolveModel(c fiber.Ctx, requested string) (*gemini.Model
 // requalified to the Chat model of the same family (hydrogen-task -> hydrogen,
 // neon-task -> neon) so the external tool execution loop is preserved.
 func (s *ChatService) ResolveModelForRequest(c fiber.Ctx, requested string, hasTools bool) (*gemini.ModelConfig, string, string) {
+	modelCfg, model, tier, _, _ := s.ResolveModelWithRouting(c, requested, hasTools)
+	return modelCfg, model, tier
+}
+
+// ResolveModelWithRouting is ResolveModelForRequest plus the routing decision
+// itself: the AppMode the caller asked for and whether a tool-bearing request
+// was requalified from Task [40] to Chat [0]. Telemetry records the
+// requalification so a benchmark arm can be proven to reach the model it names.
+func (s *ChatService) ResolveModelWithRouting(c fiber.Ctx, requested string, hasTools bool) (*gemini.ModelConfig, string, string, int, bool) {
 	registry := gemini.GetModelRegistry()
 	modelCfg := registry.Resolve(requested)
+	requestedAppMode := modelCfg.AppMode
 
 	taskRequested := strings.EqualFold(c.Get("X-Gemini-Mode"), "task") ||
 		strings.EqualFold(c.Query("mode"), "task") ||
 		strings.HasSuffix(strings.ToLower(strings.TrimSpace(requested)), "-task")
 	if !taskRequested {
-		return modelCfg, modelCfg.ID, modelCfg.MinTier
+		return modelCfg, modelCfg.ID, modelCfg.MinTier, requestedAppMode, false
 	}
+	requestedAppMode = 40
 
 	if hasTools && !TaskModeAllowedForTools(c) {
 		baseModel := chatModelForTaskRequest(registry, requested, modelCfg)
@@ -201,13 +212,13 @@ func (s *ChatService) ResolveModelForRequest(c fiber.Ctx, requested string, hasT
 			modelCfg = &cfgCopy
 			log.Printf("🔀 Tool-bearing request: forced task model %q to Chat mode [0] (no Chat alias found)", requested)
 		}
-		return modelCfg, modelCfg.ID, modelCfg.MinTier
+		return modelCfg, modelCfg.ID, modelCfg.MinTier, requestedAppMode, true
 	}
 
 	cfgCopy := *modelCfg
 	cfgCopy.AppMode = 40
 	modelCfg = &cfgCopy
-	return modelCfg, modelCfg.ID, modelCfg.MinTier
+	return modelCfg, modelCfg.ID, modelCfg.MinTier, requestedAppMode, false
 }
 
 // chatModelForTaskRequest finds the Chat-mode counterpart of a task-mode

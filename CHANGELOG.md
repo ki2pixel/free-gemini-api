@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.8] - 2026-11-25
+
+> Chantier observabilité, métriques agentiques fines, persistance SQLite native et fiabilisation du benchmarking combinatoire pass^k. Fondé sur les recherches et l'audit de confrontation [`docs/recherches/Traces-Observabilite-Et-Benchmarking-Agentique.md`](docs/recherches/Traces-Observabilite-Et-Benchmarking-Agentique.md) et [`docs/recherches/audit-confrontation-traces-observabilite.html`](docs/recherches/audit-confrontation-traces-observabilite.html).
+
+### Added
+- **Persistance SQLite de la télémétrie agentique (`db/db.go`, `db/telemetry.go`, `api/telemetry.go`, `api/history_service.go`)**:
+  - Activation de l'intégrité référentielle SQLite via `&_pragma=foreign_keys(1)` sur le pool WAL de `db.go`, garantissant l'exécution effective des contraintes `ON DELETE CASCADE`.
+  - Création des tables `agent_sessions` et `agent_turns` (`STRICT`) et de la vue analytique `v_session_telemetry_summary`.
+  - Colonnes virtuelles générées calculant les métriques temporelles à haute précision : `ttft_thought_ms`, `ttft_answer_ms`, `thought_duration_ms`, `total_duration_ms` et `thinking_share`.
+  - File de travail asynchrone non-bloquante (`telemetryQueue`) dans `HistoryService` absorbant les écritures sans bloquer la boucle de streaming ou de requête.
+  - Garantie de confidentialité dès la conception (RGPD art. 17) : `session_id` haché en SHA-256 complet, pseudonymisation irréversible de l'identifiant client (`user_id`), empreinte `thought_sha256` non inversible ; aucun prompt, corps de réflexion ou argument d'outil n'est persisté.
+  - Purge automatique en cascade dans `PurgeExpiredData` et effacement idempotent ciblé dans `DeleteConversation`.
+- **Découpage des phases de streaming et double TTFT (`gemini/arranger.go`, `api/chat_handler.go`)**:
+  - Fonctions `scanThoughts` et `InspectStreamProgress` séparant la pensée balisée et le contenu visible en un seul passage, signalant l'ouverture, la fermeture, les blocs clos et les balises non fermées (`ThoughtSeen`, `ThoughtClosed`, `ClosedBlocks`, `ThoughtUnclosed`, `AnswerStarted`). Les citations dans les blocs de code Markdown clôturés sont scrupuleusement préservées sans être confondues avec des blocs de réflexion actifs.
+  - Capture haute précision des jalons de latence via `streamPhaseTracker` (`first_thought_ms`, `thought_ended_ms`, `first_answer_ms`, `client_first_thought_ms`), ancrés de manière monotone sur `requestStartTime` pour prévenir toute dérive de chronologie.
+  - Ligne de log structurée `📊 [TURN SUMMARY]` enrichie des indicateurs temporels et volumétriques : `ttft_thought_ms`, `ttft_answer_ms`, `thought_tok`, `answer_tok`, `thought_unclosed`, `tier` et `routed_task_to_chat`.
+- **Comptabilité des tokens de complétion disjoints (`api/metrics.go`, `gemini/thinking.go`)**:
+  - Compteurs Prometheus étiquetés par palier de réflexion (`none|low|medium|high`) : `gemini_thought_tokens_total{tier}` et `gemini_answer_tokens_total{tier}`. Les deux compartiments sont strictement disjoints, facilitant l'interopérabilité avec les conventions sémantiques OpenTelemetry GenAI et les compartiments exclusifs de Langfuse.
+  - Résolution déterministe des paliers via `gemini.ThinkingTier(cfg, modelID)`.
+- **Télémétrie d'optimisation de contexte (`api/observation_masker.go`)**:
+  - Fonction `MaskOldToolObservationsWithStats` calculant le gain net en octets (`masked_obs_bytes_saved`) consigné dans chaque tour de télémétrie.
+- **Harnais de benchmark combinatoire sans biais (`scripts/benchmark_matrix.sh`, `scripts/test_benchmark_matrix.sh`)**:
+  - Remplacement de la formule naïve `(c/n)^k` par les estimateurs combinatoires sans biais de Yao et al. : `pass^1 = c/n`, `pass^k = C(c,k)/C(n,k)` et `pass@k = 1 - C(n-c,k)/C(n,k)`.
+  - Levée du verrou Task vs Chat : variable `BENCHMARK_ALLOW_TASK_MODE_FOR_TOOLS=auto` injectant l'en-tête `X-Allow-Task-Mode-For-Tools: true` pour les modèles `-task`, évitant leur requalification silencieuse vers le mode Chat `[0]`.
+  - Support de l'option OpenCode `--standalone` via `BENCHMARK_STANDALONE=auto` garantissant que les overlays de configuration atteignent exclusivement le serveur dédié.
+  - Nouveaux réglages : `BENCHMARK_K`, `BENCHMARK_MIN_PASS_K` et `BENCHMARK_PROVIDER_ID`.
+  - Suite de validation automatisée `scripts/test_benchmark_matrix.sh` validant hors-ligne l'harnais de benchmark et les estimateurs mathématiques (73 tests, 0 échec).
+- **Corpus de recherche et confrontation critique (`docs/recherches/`)**:
+  - `docs/recherches/Traces-Observabilite-Et-Benchmarking-Agentique.md` : État de l'art 2024–2026 sur les corpus de raisonnement, la fidélité causale pensée/action (CoT faithfulness), les boucles infinies agentiques (IAL), la dérive contextuelle multi-tours et le comparatif OTel GenAI / OpenInference / Langfuse / OpenLLMetry.
+  - `docs/recherches/audit-confrontation-traces-observabilite.html` : Rapport d'audit indépendant confrontant les hypothèses de recherche au code Go et formalisant les arbitrages techniques.
+
+### Changed
+- **Gouvernance et spécifications (`AGENTS.md`, `free-gemini-api/PRIVACY.md`)**:
+  - Alignement des spécifications d'invariants (I1–I8) et de la politique de rétention RGPD avec les tables de télémétrie anonymisées et le pragma `foreign_keys`.
+
+### Regression Tests
+- `free-gemini-api/api/observability_test.go`:
+  - Exposition et incrémentation des compteurs disjoints `gemini_thought_tokens_total` et `gemini_answer_tokens_total` sous différents paliers de réflexion.
+- `free-gemini-api/api/telemetry_test.go` & `free-gemini-api/api/telemetry_persistence_test.go`:
+  - Dérivation et calcul des TTFT (`ttft_thought_ms`, `ttft_answer_ms`), calcul du résumé de tour, persistance asynchrone dans `agent_turns` et `agent_sessions`, et intégrité de la vue `v_session_telemetry_summary`.
+- `free-gemini-api/db/telemetry_test.go`:
+  - Validation des contraintes de schéma SQLite `STRICT`, des clés étrangères `ON DELETE CASCADE`, et de la purge RGPD sur sessions et tours expirés.
+- `free-gemini-api/gemini/stream_progress_test.go`:
+  - Détection des transitions de phase de pensée en streaming et gestion des balises tronquées ou orphelines.
+- `free-gemini-api/gemini/thinking_tier_test.go`:
+  - Résolution des paliers de réflexion (`none`, `low`, `medium`, `high`) selon la configuration du modèle et son identifiant.
+- `scripts/test_benchmark_matrix.sh`:
+  - Validation exhaustive de l'harnais de benchmark : injection Task [40], estimateurs combinatoires de Yao et al., validation des entrées et intégrité tabulaire du TSV.
+
+### Validation
+| Check | Command | Result |
+|---|---|---|
+| Go formatting | `test -z "$(gofmt -l .)"` | **OK** |
+| Static analysis | `go vet ./...` (Docker `golang:1.26-alpine`) | **OK** |
+| Short unit tests | `go test -short ./...` (Docker `golang:1.26-alpine`) | **OK** — api (66.2%), db (81.4%), gemini (74.4%) |
+| Full audit script | `./scripts/audit_check.sh` | **OK** — exit 0 |
+| Benchmark harness suite | `./scripts/test_benchmark_matrix.sh` | **OK** — 73/73 tests PASS |
+
+---
+
 ## [3.5.7] - 2026-11-24
 
 > Release de clôture du benchmark « en vol » v3.5.7. Les trois vagues P0, P1 et P2 sont intégrées dans cette version ; le rapport officiel est [`docs/remediation/remediation_agentic_gemini4_v3.5.7.md`](docs/remediation/remediation_agentic_gemini4_v3.5.7.md).

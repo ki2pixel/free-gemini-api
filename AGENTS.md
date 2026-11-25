@@ -2,8 +2,7 @@
 
 High-signal instructions and operational context for AI agents working in this repository.
 
-**Target version: v3.5.7** — post-audit hardening (waves 1–3) plus in-flight
-benchmark waves P0 / P1 / P2. Sécurité : voir
+**Target version: v3.5.8** — observabilité agentique, télémétrie SQLite native, estimateurs Yao et durcissement benchmark. Sécurité : voir
 [`free-gemini-api/SECURITY.md`](free-gemini-api/SECURITY.md). Hub documentaire :
 [`docs/README.md`](docs/README.md).
 
@@ -17,7 +16,7 @@ Open-source, drop-in OpenAI-compatible proxy engine in pure Go unlocking Google'
 - **`free-gemini-api/`**: Main Go server root (all build/test commands run here).
   - `api/`: REST & SSE streaming handlers, OpenAI schema conversions, auth middleware, rate-limiting, SQLite metrics/analytics, MCP and queue. Contient l'état de session (`session_transcripts.go`), le coupe-circuit (`doom_loop.go`), le masquage d'observations (`observation_masker.go`) et les métriques Prometheus (`metrics.go`).
   - `gemini/`: Gemini web/client driver, cookies/session managers, output arranger (tool calls, thinking extraction, JSON repair), model registry, `schema_validator.go`, `stream_guard.go`, `thinking.go`, `crypto.go`.
-  - `db/`: SQLite access layer (`sqlite` WAL), retention worker, exports.
+  - `db/`: SQLite access layer (`sqlite` WAL, `_pragma=foreign_keys(1)` sur chaque connexion du pool), retention worker, exports. Contient `telemetry.go` : `agent_sessions` (clé = SHA-256 de la session), `agent_turns` (métriques de tour sans contenu, colonnes générées, `ON DELETE CASCADE`) et la vue `v_session_telemetry_summary`.
   - `data/`: Local SQLite database (`gemini.db` + WAL/SHM). Runtime only, never commit.
   - `cookies/`: Cookie jars (`account_*.json`, `session_*.json`), `0700`/`0600`. Never commit.
   - `output/`: Generated media served by `GET /output/*`. Never commit.
@@ -91,7 +90,9 @@ quota réel. Volontairement exclu de `audit_check.sh`.
 ```bash
 ./scripts/benchmark_matrix.sh
 BENCHMARK_RUNS=3 BENCHMARK_MODELS="gemini-4-neon gemini-4-hydrogen" ./scripts/benchmark_matrix.sh
+BENCHMARK_RUNS=5 BENCHMARK_K=3 ./scripts/benchmark_matrix.sh
 BENCHMARK_STRICT=1 ./scripts/benchmark_matrix.sh   # exit non-zéro si un modèle échoue
+./scripts/test_benchmark_matrix.sh                 # suite hors-ligne, sans quota
 ```
 Rejoue le plan v3.5.7 via OpenCode pour quatre modèles, `k` fois, dans des
 git worktrees isolés créés depuis un instantané du working tree courant. Détecte
@@ -100,6 +101,18 @@ inachevée et `finish_reason`. Écrit `results.tsv`, `summary.txt` et les
 transcripts dans `debug/benchmark_matrix_<ts>/`. Le working tree principal n'est
 **jamais** réinitialisé ni nettoyé. Prérequis : `opencode`, `python3`, `jq`
 (facultatif), proxy démarré et authentifié.
+
+Le résumé rapporte les estimateurs combinatoires sans biais de Yao et al. —
+`pass^1 = c/n`, `pass^k = C(c,k)/C(n,k)`, `pass@k = 1 - C(n-c,k)/C(n,k)` — et non
+la formule naïve `(c/n)^k`, fortement biaisée à petit `n`. Réglages :
+
+| Variable | Défaut | Effet |
+|---|---|---|
+| `BENCHMARK_K` | `BENCHMARK_RUNS` | `k` des estimateurs ; doit vérifier `1 <= k <= RUNS`. |
+| `BENCHMARK_MIN_PASS_K` | `1.0` | Seuil de `pass^k` pour un verdict `PASS` et pour que `BENCHMARK_STRICT=1` sorte en 0. |
+| `BENCHMARK_ALLOW_TASK_MODE_FOR_TOOLS` | `auto` | Envoie `X-Allow-Task-Mode-For-Tools: true` pour tout modèle dont le nom canonique finit par `-task`. Sans cet en-tête, le proxy requalifie la requête porteuse d'outils de `[40]` vers `[0]` et le bras Task mesure en réalité le modèle Chat (`api/chat_service.go`). |
+| `BENCHMARK_STANDALONE` | `auto` | Ajoute `--standalone` exactement quand un overlay est injecté : `OPENCODE_CONFIG_CONTENT` n'atteint que le serveur propriétaire de la config. |
+| `BENCHMARK_PROVIDER_ID` | `free-gemini` | Clé provider ciblée quand la référence modèle n'a pas de préfixe `provider/`. |
 
 ### Docker Deployment
 ```bash
@@ -238,7 +251,11 @@ maxChatLoopIterations     = 8
 `gemini_delta_replay_total{reason}`, `gemini_quarantine_total{kind}`,
 `gemini_upstream_suspected_stop_total{model}`, plus
 `gemini_arranger_repairs_total{kind}`, `gemini_doom_loop_interventions_total` et
-`gemini_ground_truth_directives_total`.
+`gemini_ground_truth_directives_total`. Les tokens de complétion sont exposés en
+deux familles **disjointes**, étiquetées par palier de réflexion
+(`none|low|medium|high`) : `gemini_thought_tokens_total{tier}` et
+`gemini_answer_tokens_total{tier}` (cette dernière incluant les appels d'outils,
+donc non nulle pour un tour purement agentique).
 
 ---
 

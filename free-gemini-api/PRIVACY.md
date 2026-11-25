@@ -52,7 +52,11 @@ supprime :
 
 - les messages de plus de `RETENTION_DAYS` jours ;
 - les métadonnées de médias de plus de `RETENTION_DAYS` jours ;
-- les journaux de requêtes de plus de `RETENTION_DAYS` jours.
+- les journaux de requêtes de plus de `RETENTION_DAYS` jours ;
+- les sessions de télémétrie (`agent_sessions`) dont la dernière activité dépasse
+  `RETENTION_DAYS` jours, avec suppression en cascade de leurs tours
+  (`agent_turns`) ; les tours d'une session encore active sont purgés
+  individuellement selon leur propre date.
 
 Les fichiers médias présents dans `output/` ne sont pas supprimés
 automatiquement par ce travailleur ; l'exploitant doit appliquer sa propre
@@ -67,6 +71,20 @@ hashes tronqués SHA-256 et des labels normalisés (`replay=<reason>`,
 conversation y figurent sous forme hachée. Cette conception permet de
 diagnostiquer une dérive comportementale sans constituer un nouveau traitement
 de données à caractère personnel.
+
+La même règle s'applique aux tables de télémétrie persistées
+(`agent_sessions`, `agent_turns`, vue `v_session_telemetry_summary`) :
+
+- `agent_sessions.session_id` est le **SHA-256 complet** de la clé de session
+  interne (IP ou identifiant client, suffixé par le scope de conversation et le
+  scope du prompt système), jamais la clé en clair ;
+- `agent_sessions.user_id` est une empreinte tronquée de l'identifiant de
+  session client ;
+- aucune colonne ne stocke de prompt, de pensée brute ni d'argument d'outil : la
+  réflexion n'est représentée que par `thought_sha256`, une empreinte non
+  réversible, et par des compteurs de tokens.
+
+Ces tables ne permettent donc pas de reconstituer le contenu d'une conversation.
 
 Les journaux de requêtes (endpoint, méthode, IP, statut, latence) restent
 soumis à `RETENTION_DAYS` et ne sont jamais exportés dans les rapports

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audit indépendant — « Traces, Observabilité et Benchmarking Agentique »</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c2230; --ink:#e6edf3; --muted:#8b949e;
+    --line:#2a323d; --accent:#6ea8fe; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+    --okbg:rgba(63,185,80,.10); --warnbg:rgba(210,153,34,.10); --badbg:rgba(248,81,73,.10);
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1080px;margin:0 auto;padding:40px 24px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:32px}
+  .kicker{font:600 11px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:14px}
+  h1{font-size:29px;line-height:1.25;margin:0 0 12px;letter-spacing:-.02em}
+  .sub{color:var(--muted);font-size:14px;max-width:78ch}
+  .verdict{margin-top:22px;padding:16px 18px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;font-size:14.5px}
+  .verdict b{color:var(--warn)}
+  h2{font-size:16px;margin:44px 0 6px;letter-spacing:.01em}
+  h2 .n{color:var(--muted);font:600 12px var(--mono);margin-right:8px}
+  .lead{color:var(--muted);font-size:13.5px;margin:0 0 18px;max-width:80ch}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;margin:14px 0;overflow:hidden}
+  .card-head{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  .tag{flex:0 0 auto;font:700 10px/1 var(--mono);letter-spacing:.08em;padding:5px 8px;border-radius:5px;margin-top:2px;white-space:nowrap}
+  .t-ok{background:var(--okbg);color:var(--ok);border:1px solid rgba(63,185,80,.3)}
+  .t-warn{background:var(--warnbg);color:var(--warn);border:1px solid rgba(210,153,34,.3)}
+  .t-bad{background:var(--badbg);color:var(--bad);border:1px solid rgba(248,81,73,.3)}
+  .t-info{background:rgba(110,168,254,.10);color:var(--accent);border:1px solid rgba(110,168,254,.3)}
+  .card-head h3{margin:0;font-size:14.5px;font-weight:600;line-height:1.35}
+  .card-body{padding:14px 16px}
+  .card-body p{margin:0 0 10px}
+  .card-body p:last-child{margin-bottom:0}
+  code{font:12.5px var(--mono);background:rgba(110,168,254,.08);color:#a5d6ff;padding:1px 5px;border-radius:4px;border:1px solid rgba(110,168,254,.15);white-space:nowrap}
+  .ev{font:12.5px var(--mono);color:var(--muted);border-left:2px solid var(--line);padding:2px 0 2px 12px;margin:10px 0 0;display:block}
+  .ev b{color:var(--ink);font-weight:600}
+  ul{margin:8px 0 0;padding-left:20px}
+  li{margin:4px 0}
+  .pill{font:600 11px var(--mono);padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font:600 11px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  td.y{color:var(--ok)} td.n{color:var(--bad)} td.p{color:var(--warn)}
+  .num{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}
+  .stat .v{font:600 22px var(--mono);letter-spacing:-.02em}
+  .stat .k{font-size:12px;color:var(--muted);margin-top:4px}
+  .v-good{color:var(--ok)} .v-warn{color:var(--warn)} .v-bad{color:var(--bad)}
+  footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px}
+  .grade{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+  .grade span{font:600 12px var(--mono);padding:5px 10px;border-radius:6px;background:var(--panel);border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">Confrontation indépendante · free-gemini-api v3.5.7</div>
+  <h1>« Traces, Observabilité et Benchmarking Agentique » — ce que la synthèse retient, ce qu'elle déforme, ce qu'elle invente</h1>
+  <p class="sub">J'ai confronté la synthèse critique du rapport (<code>docs/recherches/Traces-Observabilite-Et-Benchmarking-Agentique.md</code>, 412 lignes, 9 264 mots) au document source <em>et</em> au code Go réel. Chaque affirmation ci-dessous a été rejouée : DDL exécuté dans SQLite 3.37.2, constantes relues dans les fichiers, identifiants arXiv résolus.</p>
+  <div class="verdict">
+    <b>Verdict.</b> La synthèse est fidèle sur le fond — les quatre « révélations » sont réelles, les chiffres de <em>The Complexity Trap</em> sont exacts au dixième près, et le DDL s'exécute vraiment. Mais elle <b>surestime</b> la maturité opérationnelle de trois chantiers : elle présente comme « actionnables » des éléments qui n'ont ni producteur, ni consommateur, ni adaptation au modèle réellement utilisé. Trois points sont <b>factuellement faux ou non étayés</b>.
+  </div>
+</header>
+
+<h2><span class="n">01</span>Les affirmations qui tiennent (vérifiées)</h2>
+<p class="lead">Ce ne sont pas des paraphrases plausibles : je les ai confirmées ligne par ligne.</p>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-ok">EXACT</span><h3>Le verrou Task [40] → Chat [0] du banc d'essai</h3></div>
+  <div class="card-body">
+    <p>C'est la révélation la plus opérationnelle, et elle est juste. <code>ResolveModelForRequest</code> requalifie bien une requête porteuse d'outils vers le modèle Chat de la même famille, et <code>benchmark_matrix.sh</code> ne pose jamais l'en-tête d'opt-in.</p>
+    <span class="ev">Preuve : <b>chat_service.go:191-205</b> — <code>if hasTools &amp;&amp; !TaskModeAllowedForTools(c)</code> → <code>chatModelForTaskRequest</code> ; <b>:684</b> passe <code>len(req.Tools) &gt; 0</code>. Le banc n'invoque que <code>opencode run --model</code>, aucun en-tête.</span>
+    <p style="margin-top:10px"><span class="pill">Nuance</span> Le bras <code>gemini-4-argon</code> (AppMode 0) n'était pas concerné ; seuls les deux alias <code>-task</code> l'étaient. La conclusion « Chat contre Chat » vaut pour eux, pas pour la matrice entière.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-ok">EXACT</span><h3>La dette <code>foreign_keys</code> du DSN et le <em>failure mode</em> RGPD</h3></div>
+  <div class="card-body">
+    <p>Le DSN n'active effectivement pas les clés étrangères, et je l'ai mesuré : sans ce pragma, tous les <code>ON DELETE CASCADE</code> sont décoratifs. Mais la conclusion « les purges ne cascadent pas » est <b>inversée</b> pour le périmètre actuel.</p>
+    <span class="ev">Preuve : <b>db.go:47</b> — <code>?_pragma=journal_mode(wal)&amp;...&amp;_pragma=temp_store(memory)</code>. Aucune de ces tables n'existe aujourd'hui dans <code>db.go</code> ; <code>PurgeExpiredData</code> et <code>DeleteConversation</code> suppriment par <code>WHERE</code> explicite, donc ils fonctionnent déjà.</span>
+    <p style="margin-top:10px">Le risque réel est <b>futur</b> : dès que le schéma proposé sera adopté, une purge RGPD laissera des lignes orphelines dans <code>agent_turns</code> et <code>tool_call_spans</code> tant que le pragma manque.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-ok">EXACT</span><h3>Le masquage d'observations n'a aucune notion de palier de réflexion</h3></div>
+  <div class="card-body">
+    <p>Confirmé, et c'est bien un angle mort. <code>observation_masker.go</code> ne contient ni <code>thinking</code>, ni <code>tier</code>, ni <code>reasoning</code> : il compacte les observations anciennes en gardant les 4 plus récentes, sans distinguer les erreurs.</p>
+    <span class="ev">Preuve : fichier entier relu — zéro occurrence de « thinking » ; signature <code>maskOldToolObservations(messages, maxRecentKept, sizeThresholdBytes, overheadBytes)</code>. Appel unique <b>chat_handler.go:733</b>, avec <code>defaultObservationMaskKeepRecent = 4</code>.</span>
+    <p style="margin-top:10px"><span class="pill">Mais</span> « préserver les erreurs récentes » est déjà partiellement vrai : les 4 dernières observations échappent au masquage. Le vrai chantier est de <em>détecter les erreurs</em>, ce que le masker ne sait pas faire.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-ok">EXACT</span><h3>Le DDL s'exécute — 6 objets, 0 erreur</h3></div>
+  <div class="card-body">
+    <p>J'ai extrait les 229 lignes du bloc et les ai passées à <code>sqlite3 3.37.2</code> : les 5 tables <code>STRICT</code>, les index partiels et la vue <code>v_session_telemetry_summary</code> se créent sans erreur, avec les colonnes <code>GENERATED</code>.</p>
+    <span class="ev">Preuve : <code>sqlite3 ddl2.db &lt; ddl.sql</code> → <code>DDL OK</code> ; <code>.tables</code> liste <code>agent_sessions, agent_turns, tool_call_spans, turn_anomalies, benchmark_trials</code> + la vue ; <code>SELECT count(*) FROM v_session_telemetry_summary</code> → 0.</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-ok">EXACT</span><h3>Les chiffres de <em>The Complexity Trap</em></h3></div>
+  <div class="card-body">
+    <p>Ce n'est pas une citation approximative. J'ai relu la Table 1 de la v3 : le message de la synthèse est numériquement exact.</p>
+    <span class="ev">Gemini 2.5 Flash (thinking) : Raw 40,4 % → Observation Masking 36,4 % (<b>-9,9 %</b>, p = 0,0406) → LLM-Summary 31,4 % (<b>-22,3 %</b>). Qwen3-Coder 480B : +2,6 % à -52,7 % de coût. Gemini non-thinking : +8,5 % à -56,1 %.</span>
+  </div>
+</div>
+
+<h2><span class="n">02</span>Les affirmations fausses, extrapolées ou non étayées</h2>
+<p class="lead">C'est ici que la synthèse dépasse le document — et parfois le contredit.</p>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-bad">FAUX</span><h3>« Remplacer la formule naïve (c/n)^k par les estimateurs de Yao »</h3></div>
+  <div class="card-body">
+    <p>Le script ne calcule <em>nulle part</em> <code>(c/n)^k</code>. Il exige une conjonction stricte : <code>passes == RUNS</code>. Présenter cela comme un correctif d'estimateur est une <b>transposition pure</b> : il n'y a aucun estimateur à corriger, mais un protocole à construire.</p>
+    <span class="ev">Preuve : <b>benchmark_matrix.sh:343-350</b> — <code>if [ "$total" -eq "$RUNS" ] &amp;&amp; [ "$passes" -eq "$RUNS" ]</code>. Aucun <code>awk</code> de puissance, aucune division <code>c/n</code>.</span>
+    <p style="margin-top:10px">La formule sans biais elle-même est correcte, et l'exemple numérique est juste (n=5, k=3, c=3 → 1/10 = 10 % contre 21,6 %). Le problème est de l'énoncer comme une correction d'un existant qui n'existe pas.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-bad">FAUX</span><h3>« LoopRoute : abaisser le seuil de 3 à 2 dès que le dernier appel est en erreur »</h3></div>
+  <div class="card-body">
+    <p>Techniquement infaisable tel quel : <code>DoomLoopTracker</code> n'a <b>aucune connaissance</b> du résultat d'outil. Il n'enregistre que nom + empreinte d'arguments + booléen de mutation. Le seuil <code>doomLoopRepeatWarnThreshold</code> est une constante globale, pas une fonction du contexte.</p>
+    <span class="ev">Preuve : <b>doom_loop.go:67</b> — <code>RecordToolCall(name, argsJSON string, isMutation bool)</code>. <b>session_transcripts.go:312</b> — appelé depuis <code>recordSessionToolCalls</code>, qui ne voit que les appels émis. Les résultats d'outils sont traités ailleurs (<code>recordSessionToolResultOutcome</code>, ledger).</span>
+    <p style="margin-top:10px">Il faudrait <em>ajouter</em> un champ d'état au tracker et un canal de retour — un chantier, pas un réglage de constante.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-bad">FAUX</span><h3>« Le DDL s'ajoute directement à côté des tables existantes (messages, media_generations, request_logs, accounts) »</h3></div>
+  <div class="card-body">
+    <p>Le DDL est exécutable isolément, mais il <b>rejette des valeurs que le code produit réellement</b>. Je l'ai testé : le schéma et le producteur se contredisent sur deux axes.</p>
+    <ul>
+      <li><code>replay_reason</code> n'admet pas <code>'none'</code>, alors que <code>emitTurnSummary</code> normalise toute valeur vide en <code>"none"</code>. Mon <code>INSERT</code> a échoué avec <code>CHECK constraint failed</code> (exit 19).</li>
+      <li>Le CHECK exige <code>'delta'</code>, mais <code>planSessionTurnWithReason</code> ne retourne jamais ce label pour un delta : <code>reason</code> n'est renseigné que dans la branche <code>reset()</code>.</li>
+      <li><code>turn_class</code> admet <code>stream_stalled</code> et <code>empty_thought_only</code>, que <code>classifyTurnOutput</code> ne produit jamais (ces états sont des drapeaux/colonnes séparées).</li>
+    </ul>
+    <span class="ev">Vérifié : <code>INSERT ... replay_reason='none'</code> → exit 19 ; <code>replay_reason='delta'</code> → exit 0 ; <code>turn_class='stream_stalled'</code> → exit 0. Le classifieur réel renvoie l'un de <code>refusal, untagged_mutation, schema_invalid, tool_call, incomplete, greeting, pseudo_report, unbacked_completion, ok</code>.</span>
+    <p style="margin-top:10px">Rien de bloquant — mais cela confirme que « intégré » est prématuré : il faudra une passe d'alignement schéma ↔ producteurs, et un test qui insère les valeurs réelles.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-warn">EXTRAPOLÉ</span><h3>Le -9,9 % présenté comme valant pour Gemini 4 / mode thinking</h3></div>
+  <div class="card-body">
+    <p>La mesure porte sur <b>Gemini 2.5 Flash</b> via l'API Vertex, avec un budget de réflexion plafonné à 800 tokens pour raison de coût. Le rapport source le dit correctement ; la synthèse écrit « Gemini 2.5 Flash en mode thinking » dans le constat, mais l'applique ensuite à « votre proxy » sans aucune clause de transposition.</p>
+    <span class="ev">Le rapport ne mentionne « 2.5 Flash » que 3 fois, toujours correctement. Aucune mention d'un protocole de réplication sur gemini-4-* : c'est un résultat à reproduire localement, pas un acquis.</span>
+    <p style="margin-top:10px">Aggravant : c'est le <em>seul</em> modèle de l'étude dont le masquage <b>régresse</b>. Les quatre autres configurations s'améliorent ou sont neutres. Généraliser l'angle mort à l'ensemble du proxy est donc un pari, pas une conclusion.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-warn">INCOMPLET</span><h3>« Validation formelle des invariants I1–I8 »</h3></div>
+  <div class="card-body">
+    <p>Le titre promet une validation des huit invariants. Le corps n'en discute que <b>quatre</b> (I4/I5, I6 via E_FAKE_QUOTA, I7) et en cite trois nommément. I1, I2, I3 et I8 — continuité de session, retry sur greeting, absence de JSON d'outil dans CleanText, budget mémoire LRU — ne sont <b>jamais mentionnés</b>.</p>
+    <span class="ev">Comptage sur le fichier : I1 → 1, I6 → 1, I7 → 2, I2/I3/I4/I5/I8 → 0 occurrence. Le tableau « validation formelle » ne couvre donc pas son titre.</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-warn">FAIBLE</span><h3>« 90 sources académiques et industrielles »</h3></div>
+  <div class="card-body">
+    <p>Il y a bien 90 entrées, et les identifiants que j'ai résolus existent (y compris les très récents 2607.x / 2611.x). Mais la composition est plus hétérogène qu'annoncé :</p>
+    <ul>
+      <li>35 <code>arxiv.org</code>, 9 <code>huggingface.co</code> (fiches de datasets, pas des publications), 9 <code>github.com</code> (dépôts).</li>
+      <li>Une dizaine de domaines de blogs ou d'agrégateurs — <code>agentswarms.fyi</code>, <code>santageai.com</code>, <code>iotdigitaltwinplm.com</code>, <code>hypeart.ai</code> — sans garantie de revue.</li>
+      <li>Deux références d'ingénierie (« Demystifying Evals », guide Anthropic) ne figurent pas dans les sources listées.</li>
+    </ul>
+    <span class="ev">Ce n'est pas une faute — mais « 90 sources académiques et industrielles » survend une bibliographie où le quart est de la documentation produit.</span>
+  </div>
+</div>
+
+<h2><span class="n">03</span>Ce que la synthèse omet et qui change les priorités</h2>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-info">OMIS</span><h3>Le double TTFT n'a aucun producteur</h3></div>
+  <div class="card-body">
+    <p>C'est l'omission la plus lourde. La synthèse présente le double TTFT comme un simple ajout de colonnes. Or <b>aucune instrumentation de première pensée / première réponse n'existe</b> dans le code : ni <code>ttft</code>, ni <code>first_thought</code>, ni <code>first_answer</code>. La ventilation <code>thought_tokens</code> / <code>answer_tokens</code> n'existe pas davantage.</p>
+    <span class="ev"><code>grep -rn "ttft|first_thought|first_answer|thought_tokens|answer_tokens" --include=*.go .</code> → aucun résultat. <code>EstimateTokens</code> ne produit qu'un total.</span>
+    <p style="margin-top:10px">Le chantier n°1 n'est donc pas « ajouter des colonnes », c'est <b>instrumenter le streaming SSE</b> pour horodater trois fronts (début, premier <code>&lt;thought&gt;</code>, premier texte visible). C'est un travail dans <code>arranger.go</code>/<code>stream_guard.go</code>, pas dans <code>db.go</code>.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-info">OMIS</span><h3>Aucune donnée de benchmark n'alimente le DDL</h3></div>
+  <div class="card-body">
+    <p><code>benchmark_trials</code> attend un en-tête <code>X-Benchmark-Trial-ID</code>. Cet en-tête n'existe nulle part : ni dans le script, ni dans la liste CORS, ni dans un handler. Le lien entre banc et télémétrie est aujourd'hui entièrement à construire.</p>
+    <span class="ev">Recherche sur <code>*.go</code>, <code>*.sh</code>, <code>.env*</code> → 0 occurrence. <code>security.go:112-126</code> n'autorise pas cet en-tête en CORS.</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-info">OMIS</span><h3>Le masquage s'exécute AVANT le ledger, et c'est déjà géré</h3></div>
+  <div class="card-body">
+    <p>La synthèse présente « vérifier que le masquage ne s'applique jamais aux erreurs récentes » comme une sécurité à ajouter. Le code a déjà la parade, mais par un autre mécanisme : <code>pristineNonSystemMessages</code> est conservé avant masquage et sert à reconstruire le ledger de preuves.</p>
+    <span class="ev"><b>chat_handler.go:722-726</b> — « Keep the unmasked transcript for the evidence ledger: masking may compact an old tool result past an error marker » ; <b>:850</b> — <code>recordSessionLedgerFromMessages(sessionKey, pristineNonSystemMessages)</code>.</span>
+    <p style="margin-top:10px">La preuve d'exécution est donc déjà immunisée contre le masquage. Ce qui manque réellement, c'est que le <em>modèle</em> voie encore ses erreurs — pas que le ledger les voie.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="tag t-info">OMIS</span><h3>Un quota de retries et un pipeline d'échec déjà bien plus riches que le tableau</h3></div>
+  <div class="card-body">
+    <p>La taxonomie d'échec à 4 couches est excellente, mais elle ignore des signaux déjà exposés qu'elle pourrait consommer sans nouvel instrument : <code>gemini_quarantine_total{kind}</code>, <code>gemini_arranger_repairs_total{kind}</code>, <code>gemini_doom_loop_interventions_total</code>, <code>gemini_ground_truth_directives_total</code>, <code>gemini_upstream_suspected_stop_total</code>.</p>
+    <span class="ev"><b>metrics.go</b> — les cinq compteurs existent et sont déjà alimentés par <code>recordArrangerRepairs</code>, <code>recordTurnClass</code> et le circuit-breaker.</span>
+  </div>
+</div>
+
+<h2><span class="n">04</span>Tableau de confrontation</h2>
+<table>
+  <thead><tr><th>Affirmation de la synthèse</th><th>Vérification</th><th>Statut</th></tr></thead>
+  <tbody>
+    <tr><td>Banc : bras Task requalifiés en Chat sans opt-in</td><td><code>chat_service.go:191</code> + script sans en-tête</td><td class="y">Confirmé</td></tr>
+    <tr><td><code>foreign_keys</code> absent du DSN</td><td><code>db.go:47</code></td><td class="y">Confirmé</td></tr>
+    <tr><td>Masquage sans notion de palier de réflexion</td><td>Fichier entier, zéro occurrence</td><td class="y">Confirmé</td></tr>
+    <tr><td>DDL exécutable (6 objets)</td><td><code>sqlite3 3.37.2</code> → OK</td><td class="y">Confirmé</td></tr>
+    <tr><td>Chiffres <em>Complexity Trap</em> (-9,9 % / -22,3 %)</td><td>Table 1, v3, p=0,0406</td><td class="y">Confirmé</td></tr>
+    <tr><td>« Corriger la formule naïve (c/n)^k »</td><td>Aucune formule dans le script</td><td class="n">Faux</td></tr>
+    <tr><td>« LoopRoute : seuil 3→2 sur erreur d'environnement »</td><td>Le tracker ne voit aucun résultat</td><td class="n">Faux</td></tr>
+    <tr><td>DDL « intégré » aux producteurs</td><td>Rejette <code>replay_reason='none'</code></td><td class="n">Faux</td></tr>
+    <tr><td>-9,9 % applicable à Gemini 4 thinking</td><td>Mesuré sur Gemini 2.5 Flash, budget 800 tok.</td><td class="p">Extrapolé</td></tr>
+    <tr><td>« Validation formelle I1–I8 »</td><td>4 invariants sur 8 discutés</td><td class="p">Incomplet</td></tr>
+    <tr><td>« 90 sources académiques »</td><td>~25 % documentation produit / blogs</td><td class="p">Survendu</td></tr>
+    <tr><td>Double TTFT prêt à instrumenter</td><td>Aucun producteur dans le code</td><td class="n">Omis</td></tr>
+    <tr><td><code>X-Benchmark-Trial-ID</code> actionnable</td><td>N'existe nulle part</td><td class="n">Omis</td></tr>
+  </tbody>
+</table>
+
+<h2><span class="n">05</span>Ce que je retiendrais, dans l'ordre</h2>
+<div class="card">
+  <div class="card-body">
+    <ul>
+      <li><b>1. Le banc d'essai est le seul chantier immédiat.</b> Ajouter <code>X-Allow-Task-Mode-For-Tools: true</code> au bras <code>-task</code>, et remplacer <code>passes == RUNS</code> par <code>pass^k</code> et <code>pass@k</code> avec les formules combinatoires. Les deux sont de vraies corrections, localisées, à faible risque.</li>
+      <li><b>2. Instrumenter avant de schématiser.</b> Le DDL est bon mais ne peut rien stocker : pas de TTFT, pas de ventilation de tokens, pas d'en-tête de corrélation. Écrire les tables d'abord reviendrait à créer un schéma vide et à le laisser diverger.</li>
+      <li><b>3. Aligner le schéma sur les producteurs.</b> Une fois l'instrumentation faite, tester le DDL en insérant les valeurs réelles de <code>classifyTurnOutput</code> et des raisons de replay — pas seulement vérifier qu'il compile.</li>
+      <li><b>4. Le seuil dynamique du doom-loop est un chantier annexe.</b> Utile, mais il exige de faire remonter <code>result_is_error</code> jusqu'au tracker ; à planifier après le banc, pas avec lui.</li>
+      <li><b>5. Ne pas activer <code>foreign_keys</code> « pour plus tard ».</b> Le faire au moment où le schéma est adopté, avec un test de cascade ; l'activer seul aujourd'hui ne change rien et donnera une fausse impression de conformité RGPD.</li>
+    </ul>
+  </div>
+</div>
+
+<footer>
+  Audit indépendant · 24 novembre 2026 · vérifications exécutées sur <code>main@a500dfb</code> — dépôt <code>free-gemini-api</code>, Go 1.26, SQLite 3.37.2, modernc.org/sqlite v1.58.0. Aucun fichier du dépôt n'a été modifié.
+</footer>
+
+</div>
+</body>
+</html>

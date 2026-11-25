@@ -250,16 +250,75 @@ func recordTurnClass(class, model string) {
 	}
 }
 
+// msLabel renders a nullable millisecond milestone for the turn summary.
+func msLabel(value *int64) string {
+	if value == nil {
+		return "null"
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
 // emitTurnSummary writes the structured, content-free turn line. Only lengths,
 // hashes and normalized labels are emitted: never the prompt body, tool
 // arguments, or raw conversation ids.
-func emitTurnSummary(sessionKey, model string, promptLen, deltaLen int, replayReason, convID string, visibleLen, toolCount int, class, finish string) {
-	if strings.TrimSpace(replayReason) == "" {
+func emitTurnSummary(t TurnTelemetry) {
+	replayReason := strings.TrimSpace(t.ReplayReason)
+	if replayReason == "" {
 		replayReason = "none"
 	}
-	log.Printf("📊 [TURN SUMMARY] session=%s model=%s prompt_len=%d delta_len=%d replay_reason=%s conv_id=%s visible_len=%d tools=%d class=%s finish=%s",
-		logFingerprint(sessionKey), model, promptLen, deltaLen, replayReason,
-		logFingerprint(convID), visibleLen, toolCount, class, finish)
+	tier := t.ThinkingTier
+	if tier == "" {
+		tier = "none"
+	}
+	log.Printf("📊 [TURN SUMMARY] session=%s model=%s prompt_len=%d delta_len=%d replay_reason=%s conv_id=%s visible_len=%d tools=%d class=%s finish=%s ttft_thought_ms=%s ttft_answer_ms=%s thought_tok=%d answer_tok=%d thought_unclosed=%t tier=%s routed_task_to_chat=%t",
+		logFingerprint(t.SessionKey), t.SendModel, t.SentPromptBytes, t.DeltaBytes, replayReason,
+		logFingerprint(t.UpstreamConvID), t.VisibleLen, t.ToolsDeclared, t.TurnClass, t.FinishReason,
+		msLabel(t.TTFTThoughtMs()), msLabel(t.TTFTAnswerMs()), t.ThoughtTokens, t.AnswerTokens,
+		t.ThoughtUnclosed, tier, t.RoutedTaskToChat)
+}
+
+// turnTelemetryEmitter finalizes and publishes exactly one turn record.
+//
+// Emission is idempotent: several error branches call the summary before
+// returning, and a second emission would double-count the Prometheus counters.
+type turnTelemetryEmitter struct {
+	tel     TurnTelemetry
+	phase   *streamPhaseTracker
+	now     func() int64
+	emitted bool
+}
+
+// emit finalizes the turn and publishes it. raw and arranged are the most
+// precise inputs the caller has: arranged when the turn reached the arranger,
+// raw when it was blocked earlier. A nil arranged still yields token counts.
+func (e *turnTelemetryEmitter) emit(raw string, arranged *gemini.ArrangedOutput, class, finish string, visibleLen int, convID string) {
+	if e.emitted {
+		return
+	}
+	e.emitted = true
+
+	e.tel.TurnClass = class
+	e.tel.FinishReason = finish
+	e.tel.VisibleLen = visibleLen
+	e.tel.UpstreamConvID = convID
+	now := time.Now().UnixMilli
+	if e.now != nil {
+		now = e.now
+	}
+	e.tel.CompletedMs = now()
+	e.tel.UpstreamSuspectedStop = class == "greeting" || class == "incomplete"
+	if e.phase != nil {
+		e.phase.apply(&e.tel)
+	}
+	e.tel.ThinkingTier = gemini.ThinkingTier(gemini.GetModelRegistry().Resolve(e.tel.SendModel), e.tel.SendModel)
+
+	finalizeTurnTelemetry(&e.tel, raw, arranged)
+	emitTurnSummary(e.tel)
+	RecordOutputTokenBreakdown(e.tel.ThinkingTier, e.tel.ThoughtTokens, e.tel.AnswerTokens)
+	// The history queue absorbs the SQLite write: the handler never blocks on
+	// storage, and RegisterTurnTelemetrySink stays free for tests and observers.
+	GetHistoryService().LogTelemetry(e.tel)
+	notifyTurnTelemetry(e.tel)
 }
 
 // arrangerRejectionReason classifies a schema-validation detail into the
@@ -649,6 +708,17 @@ func (t *streamBlockTracker) delta(snapshot string) string {
 
 // HandleOpenAIChatCompletions handles /v1/chat/completions with Native Tool Calling & Output Arranger
 func HandleOpenAIChatCompletions(c fiber.Ctx) error {
+	// Captured before any guard so every turn's timeline starts at the same
+	// origin, including turns rejected by the doom-loop or queue checks.
+	requestStartTime := time.Now()
+	requestStartedMs := requestStartTime.UnixMilli()
+	// Every milestone is derived from this single monotonic anchor: a wall-clock
+	// jump (NTP step) can then never make completed_ms precede
+	// request_started_ms, which the telemetry table enforces as a CHECK.
+	elapsedMs := func() int64 {
+		return requestStartTime.Add(time.Since(requestStartTime)).UnixMilli()
+	}
+
 	var req OpenAIChatCompletionRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
@@ -681,7 +751,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	if requestedModel != req.Model {
 		log.Printf("🧠 reasoning_effort=%q maps model %q -> %q", req.ReasoningEffort, req.Model, requestedModel)
 	}
-	_, model, requiredTier := GetChatService().ResolveModelForRequest(c, requestedModel, len(req.Tools) > 0)
+	modelCfg, model, requiredTier, requestedAppMode, routedTaskToChat := GetChatService().ResolveModelWithRouting(c, requestedModel, len(req.Tools) > 0)
 
 	var tiBlock string
 	if len(req.Tools) > 0 {
@@ -730,7 +800,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	// before flattening so stale logs are never replayed byte-for-byte, and it
 	// keeps the 1097 replay (one user message followed by a long assistant/tool
 	// chain) compact enough for the upstream backend.
-	nonSystemMessages = MaskOldToolObservationsWithOverhead(
+	nonSystemMessages, maskedBytesSaved := MaskOldToolObservationsWithStats(
 		nonSystemMessages,
 		defaultObservationMaskKeepRecent,
 		defaultObservationMaskThreshold,
@@ -838,8 +908,10 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	// completely different system prompt through the same client IP, and they
 	// must not reset or pollute the main chat thread's upstream conversation.
 	sessionKey := sessionID
+	systemScopeHash := ""
 	if len(req.Messages) > 0 && strings.EqualFold(req.Messages[0].Role, "system") {
 		if scope := systemScopeKey(FlattenContent(req.Messages[0].Content)); scope != "" {
+			systemScopeHash = scope
 			sessionKey = sessionID + "|" + scope
 		}
 	}
@@ -860,12 +932,38 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	}
 	loopAction, loopDetail := tracker.CheckIntervention()
 	antiLoopDirective := ""
+	doomLoopActionLabel := ""
+	doomLoopSignalLabel := ""
 	switch loopAction {
 	case ActionHalt:
+		doomLoopActionLabel = loopAction
+		doomLoopSignalLabel = doomLoopSignal(loopAction, loopDetail)
 		RecordDoomLoopIntervention(doomLoopSignal(loopAction, loopDetail))
 		invalidateSessionTurn(sessionKey)
 		humanDetail := doomLoopHumanDetail(loopDetail)
 		log.Printf("🛑 Doom-loop circuit breaker for session %q: %s", sessionKey, humanDetail)
+		// A halt returns before the worker pool, so it would otherwise leave no
+		// trace in agent_turns. Emit a minimal record: no attempt was made, and
+		// the halt itself is the classification.
+		haltEmitter := &turnTelemetryEmitter{
+			tel: TurnTelemetry{
+				SessionKey:       sessionKey,
+				SessionID:        sessionID,
+				RequestedModel:   req.Model,
+				EffectiveModel:   model,
+				SendModel:        model,
+				ProductMode:      requestedAppMode,
+				RoutedTaskToChat: routedTaskToChat,
+				ThinkingTier:     gemini.ThinkingTier(modelCfg, model),
+				SystemScopeHash:  systemScopeHash,
+				ToolsDeclared:    len(req.Tools),
+				RequestStartedMs: requestStartedMs,
+				DoomLoopAction:   loopAction,
+				DoomLoopSignal:   doomLoopSignal(loopAction, loopDetail),
+			},
+			now: elapsedMs,
+		}
+		haltEmitter.emit("", nil, "none", "error", 0, "")
 		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 			"error": fiber.Map{
 				"message": fmt.Sprintf("doom-loop detected: %s", humanDetail),
@@ -874,6 +972,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			},
 		})
 	case ActionWarnRepeat, ActionWarnPassiveRead:
+		doomLoopActionLabel = loopAction
+		doomLoopSignalLabel = doomLoopSignal(loopAction, loopDetail)
 		RecordDoomLoopIntervention(doomLoopSignal(loopAction, loopDetail))
 		antiLoopDirective = formatDoomLoopDirective(loopAction, loopDetail)
 		log.Printf("⚠️ Doom-loop warning for session %q: %s", sessionKey, loopDetail)
@@ -883,7 +983,9 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	// reports a failure, inject an explicit recovery directive at maximum
 	// recency. This makes it much harder for the model to ignore the failure
 	// and declare a false success on the next turn.
+	groundTruthInjected := false
 	if groundTruth := formatRecentToolErrorDirective(nonSystemMessages); groundTruth != "" {
+		groundTruthInjected = true
 		RecordGroundTruthDirective()
 		antiLoopDirective += groundTruth
 		log.Printf("🧪 Ground-truth recovery directive injected for session %q", sessionKey)
@@ -908,6 +1010,31 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	if len(msgFlat) > maxPromptBytes || len(prompt) > maxPromptBytes {
 		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": "prompt exceeds 1 MiB limit"})
 	}
+
+	// Turn telemetry is seeded here, where routing, masking and the flattened
+	// transcript are all known. Each branch copies it so a single request can
+	// never publish two records.
+	baseTelemetry := TurnTelemetry{
+		SessionKey:          sessionKey,
+		SessionID:           sessionID,
+		RequestedModel:      req.Model,
+		EffectiveModel:      model,
+		SendModel:           model,
+		ProductMode:         requestedAppMode,
+		RoutedTaskToChat:    routedTaskToChat,
+		ThinkingTier:        gemini.ThinkingTier(modelCfg, model),
+		SystemScopeHash:     systemScopeHash,
+		ToolsDeclared:       len(req.Tools),
+		FlatPromptBytes:     len(msgFlat),
+		SentPromptBytes:     len(msgFlat),
+		MaskedBytesSaved:    maskedBytesSaved,
+		RequestStartedMs:    requestStartedMs,
+		DoomLoopAction:      doomLoopActionLabel,
+		DoomLoopSignal:      doomLoopSignalLabel,
+		GroundTruthInjected: groundTruthInjected,
+		TokenEstimator:      "heuristic",
+	}
+	phase := newStreamPhaseTracker(elapsedMs, requestStartedMs)
 
 	pool := GetWorkerPool()
 	streamUserIP := c.IP() // capture before SendStreamWriter: the request ctx is invalid inside the closure
@@ -978,10 +1105,31 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			var accumulatedOutput strings.Builder
 			var thoughtTracker streamBlockTracker
 			var contentTracker streamBlockTracker
-			var lastSendPromptLen, lastDeltaLen int
+			var lastDeltaLen int
 			var replayReason string
-			emitSummary := func(class, finish string, visibleLen int, convID string) {
-				emitTurnSummary(sessionKey, model, lastSendPromptLen, lastDeltaLen, replayReason, convID, visibleLen, len(req.Tools), class, finish)
+			// Mirrors of the retry bookkeeping declared inside the execute
+			// callback, which the summary closure cannot see.
+			telSendModel := model
+			telSendPrompt := ""
+			telAttempt := 0
+			telTransportRetries := 0
+			telEmptyGenRetries := 0
+			telRefusalRetries := 0
+			telStalled := false
+			emitter := &turnTelemetryEmitter{tel: baseTelemetry, phase: phase, now: elapsedMs}
+			emitSummary := func(class, finish string, visibleLen int, convID string, raw string, arranged *gemini.ArrangedOutput) {
+				emitter.tel.SendModel = telSendModel
+				emitter.tel.AttemptCount = telAttempt
+				emitter.tel.TransportRetries = telTransportRetries
+				emitter.tel.EmptyGenRetries = telEmptyGenRetries
+				emitter.tel.RefusalRetries = telRefusalRetries
+				emitter.tel.StreamStalled = telStalled
+				emitter.tel.ReplayReason = replayReason
+				emitter.tel.IsDelta = replayReason == "delta"
+				emitter.tel.DeltaBytes = lastDeltaLen
+				emitter.setSentPrompt(telSendPrompt)
+				applyWorkerTelemetry(&emitter.tel, usedWorker)
+				emitter.emit(raw, arranged, class, finish, visibleLen, convID)
 			}
 
 			streamErr := pool.ExecuteQueuedStreamWithTier(streamCtx, sessionID, requiredTier, func(wWorker *AccountWorker) error {
@@ -999,6 +1147,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 				unbackedRetry := false
 				transportRetries := 0
 				emptyGenerationRetries := 0
+				refusalRetries := 0
 				// sendModel is the upstream model actually queried. It starts as
 				// the client-facing model and only escalates to a deeper thinking
 				// variant after a technically empty turn; the response keeps
@@ -1008,6 +1157,14 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					var sendPrompt string
 					thoughtTracker.reset()
 					contentTracker.reset()
+					// A retry discards the rejected generation, so the phase
+					// milestones must describe the generation that survives.
+					phase.markAttemptStart()
+					telAttempt = attempt + 1
+					telSendModel = sendModel
+					telTransportRetries = transportRetries
+					telEmptyGenRetries = emptyGenerationRetries
+					telRefusalRetries = refusalRetries
 					if forceFull {
 						// Previous attempt hit a blocked/empty generation, a
 						// refusal, or an invalid tool call: replay everything
@@ -1059,7 +1216,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							sendPrompt = plan.prompt + antiLoopDirective + effectiveTurnCue
 						}
 					}
-					lastSendPromptLen = len(sendPrompt)
+					telSendPrompt = sendPrompt
 
 					accumulatedOutput.Reset()
 					sr, err := wWorker.Client.AskStreamModelSession(sendPrompt, sendModel, func(chunk string) {
@@ -1067,11 +1224,17 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 
 						rawSoFar := accumulatedOutput.String()
 
+						// One scan per chunk feeds both trackers and the phase
+						// milestones. It replaces a second full parse that only
+						// ran for tool-free requests, and it reports the phase
+						// transitions the two-value accessors cannot express.
+						progress := gemini.InspectStreamProgress(rawSoFar)
+						phase.observeProgress(progress)
+
 						// 1. Live stream thinking tokens whenever available. The
 						// tracker rebases on a reopened thought block instead of
 						// comparing against a stale monotone high-water mark.
-						allThoughts := gemini.ExtractAvailableThoughts(rawSoFar)
-						if deltaThought := thoughtTracker.delta(allThoughts); deltaThought != "" {
+						if deltaThought := thoughtTracker.delta(progress.ReasoningContent); deltaThought != "" {
 							chunkResp := OpenAIChatCompletionChunk{
 								ID:      chunkID,
 								Object:  "chat.completion.chunk",
@@ -1089,6 +1252,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							}
 							data, _ := json.Marshal(chunkResp)
 							writeChunk(data)
+							phase.markClientThought()
 						}
 
 						if len(req.Tools) > 0 {
@@ -1097,8 +1261,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 						}
 
 						// 2. For non-tool requests, stream content (outside thoughts)
-						allContent := gemini.ExtractAvailableContent(rawSoFar)
-						if deltaContent := contentTracker.delta(allContent); deltaContent != "" {
+						if deltaContent := contentTracker.delta(progress.CleanedContent); deltaContent != "" {
 							chunkResp := OpenAIChatCompletionChunk{
 								ID:      chunkID,
 								Object:  "chat.completion.chunk",
@@ -1125,6 +1288,10 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							// conversation and retry on a fresh one without
 							// consuming the model's functional attempt.
 							transportRetries++
+							telTransportRetries = transportRetries
+							if errors.Is(err, gemini.ErrUpstreamStreamStalled) {
+								telStalled = true
+							}
 							log.Printf("⚠️ Stream transport incident %d/%d (%v), retrying on a fresh upstream conversation without consuming a generation attempt", transportRetries, maxTransportRetries, err)
 							wWorker.Client.ResetConversationStateSession(sessionKey, sendModel)
 							truncationRetry = false
@@ -1164,6 +1331,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					if len(req.Tools) > 0 && isEmptyGenerationOutput(finalAttemptText, req.Tools) && emptyGenerationRetries < maxEmptyGenerationRetries {
 						recordTurnClass("incomplete", model)
 						emptyGenerationRetries++
+						telEmptyGenRetries = emptyGenerationRetries
 						// An identical empty turn replayed at the same depth
 						// tends to fail identically. Escalate to the next
 						// thinking variant (Low -> Medium -> High, then a fixed
@@ -1255,6 +1423,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 							} else {
 								if len(req.Tools) > 0 && isToolRefusalOutput(finalAttemptText, req.Tools) {
 									RecordRefusalRetry()
+									refusalRetries++
+									telRefusalRetries = refusalRetries
 								}
 								truncationRetry = false
 								schemaRetryDetail = ""
@@ -1274,8 +1444,11 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 
 			if streamErr != nil {
 				log.Printf("❌ Streaming error: %v", streamErr)
+				if errors.Is(streamErr, gemini.ErrUpstreamStreamStalled) {
+					telStalled = true
+				}
 				invalidateSessionTurn(sessionKey)
-				emitSummary("none", "error", 0, "")
+				emitSummary("none", "error", 0, "", accumulatedOutput.String(), nil)
 				errChunk := newStreamErrorChunk(chunkID, model, createdTime, fmt.Sprintf("\n\n[Error: %v]", streamErr))
 				if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 					writeChunk(errBytes)
@@ -1302,7 +1475,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					if streamResp != nil {
 						convID = streamResp.ConversationID
 					}
-					emitSummary("schema_invalid", "error", len(finalText), convID)
+					emitSummary("schema_invalid", "error", len(finalText), convID, finalText, nil)
 					errChunk := newStreamErrorChunk(chunkID, model, createdTime, fmt.Sprintf("\n\n[Error: upstream tool call failed schema validation: %s]", detail))
 					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 						writeChunk(errBytes)
@@ -1351,7 +1524,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					if streamResp != nil {
 						convID = streamResp.ConversationID
 					}
-					emitSummary("untagged_mutation", "error", len(arranged.CleanText), convID)
+					emitSummary("untagged_mutation", "error", len(arranged.CleanText), convID, finalText, arranged)
 					errChunk := newStreamErrorChunk(chunkID, model, createdTime, "\n\n[Error: upstream tool call was truncated mid-value; no mutation was executed. Please retry.]")
 					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 						writeChunk(errBytes)
@@ -1381,7 +1554,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					if streamResp != nil {
 						convID = streamResp.ConversationID
 					}
-					emitSummary(class, "error", len(arranged.CleanText), convID)
+					emitSummary(class, "error", len(arranged.CleanText), convID, finalText, arranged)
 					errChunk := newStreamErrorChunk(chunkID, model, createdTime, "\n\n[Error: "+unusableActionErrorMessage+". Please retry.]")
 					if errBytes, mErr := json.Marshal(errChunk); mErr == nil {
 						writeChunk(errBytes)
@@ -1521,7 +1694,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			}
 			class := classifyTurnOutput(finalText, turnArranged, req.Tools, sessionKey)
 			recordTurnClass(class, model)
-			emitSummary(class, finishReason, len(finalContentForLog), convID)
+			emitSummary(class, finishReason, len(finalContentForLog), convID, finalText, turnArranged)
 			history := GetHistoryService()
 			history.LogTurn(convID, sessionID, prompt, finalContentForLog, model, pTokens, rTokens, tier, accID)
 			history.LogRequest("/v1/chat/completions", "POST", userIP, 200, float64(time.Now().Unix()-createdTime)*1000)
@@ -1529,8 +1702,17 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 	}
 
 	var usedWorker *AccountWorker
-	var lastSendPromptLen, lastDeltaLen int
+	var lastDeltaLen int
 	var replayReason string
+	// Mirrors of the retry bookkeeping declared inside the execute callback,
+	// which the summary closure cannot see.
+	telSendModel := model
+	telSendPrompt := ""
+	telAttempt := 0
+	telTransportRetries := 0
+	telEmptyGenRetries := 0
+	telRefusalRetries := 0
+	telStalled := false
 	resp, err := pool.ExecuteQueuedWithTier(ctx, sessionID, requiredTier, func(w *AccountWorker) (*gemini.GeminiResponse, error) {
 		usedWorker = w
 		// Nothing has been emitted yet, so a blocked/empty generation can be
@@ -1545,12 +1727,21 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		unbackedRetry := false
 		transportRetries := 0
 		emptyGenerationRetries := 0
+		refusalRetries := 0
 		// sendModel is the upstream model actually queried; it escalates to a
 		// deeper thinking variant after a technically empty turn. The response
 		// still reports the model the caller requested.
 		sendModel := model
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			var sendPrompt string
+			// A retry discards the rejected generation, so the phase milestones
+			// must describe the generation that survives.
+			phase.markAttemptStart()
+			telAttempt = attempt + 1
+			telSendModel = sendModel
+			telTransportRetries = transportRetries
+			telEmptyGenRetries = emptyGenerationRetries
+			telRefusalRetries = refusalRetries
 			if forceFull {
 				// Previous attempt hit a blocked/empty generation, a refusal,
 				// or an invalid tool call: replay everything fresh with a
@@ -1597,7 +1788,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					sendPrompt = plan.prompt + antiLoopDirective + effectiveTurnCue
 				}
 			}
-			lastSendPromptLen = len(sendPrompt)
+			telSendPrompt = sendPrompt
 			r, err := w.Client.AskModelSession(sendPrompt, sendModel, sessionKey)
 			if err != nil {
 				if shouldRetryTransport(err, transportRetries) {
@@ -1606,6 +1797,10 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					// replay on a fresh one without consuming the functional
 					// recovery budget.
 					transportRetries++
+					telTransportRetries = transportRetries
+					if errors.Is(err, gemini.ErrUpstreamStreamStalled) {
+						telStalled = true
+					}
 					log.Printf("⚠️ Non-stream transport incident %d/%d (%v), retrying on a fresh upstream conversation without consuming a generation attempt", transportRetries, maxTransportRetries, err)
 					w.Client.ResetConversationStateSession(sessionKey, sendModel)
 					truncationRetry = false
@@ -1628,6 +1823,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			if len(req.Tools) > 0 && isEmptyGenerationOutput(r.Text, req.Tools) && emptyGenerationRetries < maxEmptyGenerationRetries {
 				recordTurnClass("incomplete", model)
 				emptyGenerationRetries++
+				telEmptyGenRetries = emptyGenerationRetries
 				// Escalate the depth on the retry: an identical empty turn at
 				// the same level tends to fail identically.
 				if escalated := gemini.EscalateThinkingModel(sendModel); escalated != sendModel {
@@ -1712,6 +1908,8 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 					} else {
 						if len(req.Tools) > 0 && isToolRefusalOutput(r.Text, req.Tools) {
 							RecordRefusalRetry()
+							refusalRetries++
+							telRefusalRetries = refusalRetries
 						}
 						truncationRetry = false
 						schemaRetryDetail = ""
@@ -1744,8 +1942,20 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	emitSummary := func(class, finish string, visibleLen int) {
-		emitTurnSummary(sessionKey, model, lastSendPromptLen, lastDeltaLen, replayReason, resp.ConversationID, visibleLen, len(req.Tools), class, finish)
+	emitter := &turnTelemetryEmitter{tel: baseTelemetry, phase: phase, now: elapsedMs}
+	emitSummary := func(class, finish string, visibleLen int, raw string, arranged *gemini.ArrangedOutput) {
+		emitter.tel.SendModel = telSendModel
+		emitter.tel.AttemptCount = telAttempt
+		emitter.tel.TransportRetries = telTransportRetries
+		emitter.tel.EmptyGenRetries = telEmptyGenRetries
+		emitter.tel.RefusalRetries = telRefusalRetries
+		emitter.tel.StreamStalled = telStalled
+		emitter.tel.ReplayReason = replayReason
+		emitter.tel.IsDelta = replayReason == "delta"
+		emitter.tel.DeltaBytes = lastDeltaLen
+		emitter.setSentPrompt(telSendPrompt)
+		applyWorkerTelemetry(&emitter.tel, usedWorker)
+		emitter.emit(raw, arranged, class, finish, visibleLen, resp.ConversationID)
 	}
 
 	if len(req.Tools) > 0 {
@@ -1755,7 +1965,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			recordTurnClass("schema_invalid", model)
 			log.Printf("❌ Upstream tool call failed schema validation after retry: %s", detail)
 			invalidateSessionTurn(sessionKey)
-			emitSummary("schema_invalid", "error", len(resp.Text))
+			emitSummary("schema_invalid", "error", len(resp.Text), resp.Text, nil)
 			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 				"error": fmt.Sprintf("upstream tool call failed schema validation: %s", detail),
 			})
@@ -1788,7 +1998,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 		RecordArrangerRejection("mid_value_truncation")
 		RecordQuarantine("truncated")
 		recordTurnClass("untagged_mutation", model)
-		emitSummary("untagged_mutation", "error", len(arranged.CleanText))
+		emitSummary("untagged_mutation", "error", len(arranged.CleanText), resp.Text, arranged)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": "upstream tool call was truncated mid-value; no mutation was executed",
 		})
@@ -1807,7 +2017,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 			RecordQuarantine("untagged_mutation")
 		}
 		invalidateSessionTurn(sessionKey)
-		emitSummary(class, "error", len(arranged.CleanText))
+		emitSummary(class, "error", len(arranged.CleanText), resp.Text, arranged)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": unusableActionErrorMessage,
 		})
@@ -1885,7 +2095,7 @@ func HandleOpenAIChatCompletions(c fiber.Ctx) error {
 
 	class := classifyTurnOutput(resp.Text, arranged, req.Tools, sessionKey)
 	recordTurnClass(class, model)
-	emitSummary(class, arranged.FinishReason, len(arranged.CleanText))
+	emitSummary(class, arranged.FinishReason, len(arranged.CleanText), resp.Text, arranged)
 
 	return c.JSON(openAIResp)
 }

@@ -32,6 +32,8 @@ var (
 	deltaReplays           sync.Map // reason string -> *atomic.Uint64
 	upstreamSuspectedStops sync.Map // model string -> *atomic.Uint64
 	quarantineKinds        sync.Map // kind string -> *atomic.Uint64
+	thoughtTokenCounters   sync.Map // tier string -> *atomic.Uint64
+	answerTokenCounters    sync.Map // tier string -> *atomic.Uint64
 	rateLimitDrops         atomic.Uint64
 	refusalRetries         atomic.Uint64
 	groundTruthDirectives  atomic.Uint64
@@ -56,6 +58,19 @@ func RecordTokenUsage(tier string, tokens int) {
 // RecordRateLimitDrop increments the limiter drop counter.
 func RecordRateLimitDrop() {
 	rateLimitDrops.Add(1)
+}
+
+// RecordOutputTokenBreakdown increments the disjoint completion-token counters.
+// Reasoning and answer tokens never overlap, so their sum is the turn's real
+// completion volume even when the visible content is empty.
+func RecordOutputTokenBreakdown(tier string, thoughtTokens, answerTokens int) {
+	label := normalizeMetricLabel(tier)
+	if thoughtTokens > 0 {
+		incrementCounter(&thoughtTokenCounters, label, uint64(thoughtTokens))
+	}
+	if answerTokens > 0 {
+		incrementCounter(&answerTokenCounters, label, uint64(answerTokens))
+	}
 }
 
 // RecordDoomLoopIntervention increments the anti-loop counter for a signal
@@ -291,6 +306,22 @@ func writeTurnMetrics(b *strings.Builder) {
 		"kind",
 		&quarantineKinds,
 		[]string{"untagged_mutation", "schema_invalid", "truncated"},
+	)
+	writeLabeledCounter(
+		b,
+		"gemini_thought_tokens_total",
+		"Completion tokens produced inside reasoning blocks, disjoint from answer tokens.",
+		"tier",
+		&thoughtTokenCounters,
+		[]string{"none", "low", "medium", "high"},
+	)
+	writeLabeledCounter(
+		b,
+		"gemini_answer_tokens_total",
+		"Completion tokens produced as visible content or tool calls, disjoint from thought tokens.",
+		"tier",
+		&answerTokenCounters,
+		[]string{"none", "low", "medium", "high"},
 	)
 }
 

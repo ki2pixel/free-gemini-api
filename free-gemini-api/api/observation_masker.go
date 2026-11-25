@@ -58,8 +58,20 @@ func MaskOldToolObservationsWithOverhead(messages []OpenAIChatMessage, maxRecent
 }
 
 func maskOldToolObservations(messages []OpenAIChatMessage, maxRecentKept, sizeThresholdBytes, overheadBytes int) []OpenAIChatMessage {
+	masked, _ := maskOldToolObservationsWithStats(messages, maxRecentKept, sizeThresholdBytes, overheadBytes)
+	return masked
+}
+
+// MaskOldToolObservationsWithStats is MaskOldToolObservationsWithOverhead plus
+// the number of bytes actually removed from the transcript. Telemetry records
+// the saving so a masked turn can be told apart from a naturally small one.
+func MaskOldToolObservationsWithStats(messages []OpenAIChatMessage, maxRecentKept, sizeThresholdBytes, overheadBytes int) ([]OpenAIChatMessage, int) {
+	return maskOldToolObservationsWithStats(messages, maxRecentKept, sizeThresholdBytes, overheadBytes)
+}
+
+func maskOldToolObservationsWithStats(messages []OpenAIChatMessage, maxRecentKept, sizeThresholdBytes, overheadBytes int) ([]OpenAIChatMessage, int) {
 	if len(messages) == 0 {
-		return messages
+		return messages, 0
 	}
 	if maxRecentKept <= 0 {
 		maxRecentKept = defaultObservationMaskKeepRecent
@@ -76,7 +88,7 @@ func maskOldToolObservations(messages []OpenAIChatMessage, maxRecentKept, sizeTh
 	if totalBytes <= sizeThresholdBytes &&
 		countToolObservations(messages) <= observationMaskToolObservationThreshold &&
 		len(messages) <= observationMaskMessageThreshold {
-		return messages
+		return messages, 0
 	}
 
 	toolIndexes := make([]int, 0, len(messages))
@@ -86,12 +98,13 @@ func maskOldToolObservations(messages []OpenAIChatMessage, maxRecentKept, sizeTh
 		}
 	}
 	if len(toolIndexes) <= maxRecentKept {
-		return messages
+		return messages, 0
 	}
 
 	masked := make([]OpenAIChatMessage, len(messages))
 	copy(masked, messages)
 
+	bytesSaved := 0
 	compactUntil := len(toolIndexes) - maxRecentKept
 	for _, index := range toolIndexes[:compactUntil] {
 		content := FlattenContent(masked[index].Content)
@@ -103,8 +116,11 @@ func maskOldToolObservations(messages []OpenAIChatMessage, maxRecentKept, sizeTh
 			continue
 		}
 		masked[index].Content = contentRawString(compacted)
+		if saved := len(content) - len(compacted); saved > 0 {
+			bytesSaved += saved
+		}
 	}
-	return masked
+	return masked, bytesSaved
 }
 
 func estimateMessagesBytes(messages []OpenAIChatMessage) int {

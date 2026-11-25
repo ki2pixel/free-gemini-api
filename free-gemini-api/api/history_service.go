@@ -1,8 +1,11 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"goapi/db"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -13,9 +16,10 @@ import (
 // burst of chat traffic spawn an unbounded number of goroutines and serialise
 // them all on the database mutex (F-23).
 type HistoryService struct {
-	msgQueue   chan messageLogItem
-	reqQueue   chan requestLogItem
-	mediaQueue chan mediaLogItem
+	msgQueue       chan messageLogItem
+	reqQueue       chan requestLogItem
+	mediaQueue     chan mediaLogItem
+	telemetryQueue chan TurnTelemetry
 
 	stopChan  chan struct{}
 	closeOnce sync.Once
@@ -79,15 +83,17 @@ func NewHistoryService(queueSize int) *HistoryService {
 		queueSize = defaultHistoryQueueSize
 	}
 	s := &HistoryService{
-		msgQueue:   make(chan messageLogItem, queueSize),
-		reqQueue:   make(chan requestLogItem, queueSize),
-		mediaQueue: make(chan mediaLogItem, queueSize),
-		stopChan:   make(chan struct{}),
+		msgQueue:       make(chan messageLogItem, queueSize),
+		reqQueue:       make(chan requestLogItem, queueSize),
+		mediaQueue:     make(chan mediaLogItem, queueSize),
+		telemetryQueue: make(chan TurnTelemetry, queueSize),
+		stopChan:       make(chan struct{}),
 	}
-	s.wg.Add(3)
+	s.wg.Add(4)
 	go s.runMessageWorker()
 	go s.runRequestWorker()
 	go s.runMediaWorker()
+	go s.runTelemetryWorker()
 	return s
 }
 
@@ -179,6 +185,113 @@ func (s *HistoryService) LogMedia(mediaType, conversationID, prompt, fileName, f
 		aspectRatio:    aspectRatio,
 		responseID:     responseID,
 	})
+}
+
+func (s *HistoryService) enqueueTelemetry(item TurnTelemetry) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		s.dropped.Add(1)
+		return
+	}
+	select {
+	case s.telemetryQueue <- item:
+	default:
+		s.dropped.Add(1)
+	}
+}
+
+// LogTelemetry enqueues one turn record for asynchronous persistence. It never
+// blocks: when the queue is full the record is dropped and counted, exactly like
+// the other history streams.
+func (s *HistoryService) LogTelemetry(t TurnTelemetry) {
+	s.enqueueTelemetry(t)
+}
+
+// sessionIDHash is the pseudonymous primary key stored for a session. It is a
+// full SHA-256 digest, so two upstream conversations can never collide the way a
+// truncated log fingerprint might.
+func sessionIDHash(sessionKey string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(sessionKey)))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *HistoryService) processTelemetry(t TurnTelemetry) {
+	rec := db.AgentTurnRecord{
+		SessionID:       sessionIDHash(t.SessionKey),
+		UserID:          logFingerprint(t.SessionID),
+		ConversationID:  t.UpstreamConvID,
+		SystemScopeHash: t.SystemScopeHash,
+
+		RequestedModel:   t.RequestedModel,
+		EffectiveModel:   t.EffectiveModel,
+		SendModel:        t.SendModel,
+		ProductMode:      t.ProductMode,
+		RoutedTaskToChat: t.RoutedTaskToChat,
+		ThinkingTier:     t.ThinkingTier,
+		WorkerID:         t.WorkerID,
+		AccountTier:      t.AccountTier,
+		ToolsDeclared:    t.ToolsDeclared,
+
+		UpstreamConvID:   t.UpstreamConvID,
+		IsDelta:          t.IsDelta,
+		ReplayReason:     t.ReplayReason,
+		FlatPromptBytes:  t.FlatPromptBytes,
+		SentPromptBytes:  t.SentPromptBytes,
+		DeltaBytes:       t.DeltaBytes,
+		MaskedBytesSaved: t.MaskedBytesSaved,
+
+		RequestStartedMs:     t.RequestStartedMs,
+		AttemptStartedMs:     t.AttemptStartedMs,
+		FirstThoughtMs:       t.FirstThoughtMs,
+		ThoughtEndedMs:       t.ThoughtEndedMs,
+		FirstAnswerMs:        t.FirstAnswerMs,
+		ClientFirstThoughtMs: t.ClientFirstThoughtMs,
+		CompletedMs:          t.CompletedMs,
+
+		InputTokens:    t.InputTokens,
+		ThoughtTokens:  t.ThoughtTokens,
+		AnswerTokens:   t.AnswerTokens,
+		TokenEstimator: t.TokenEstimator,
+
+		AttemptCount:          t.AttemptCount,
+		EmptyGenRetries:       t.EmptyGenRetries,
+		RefusalRetries:        t.RefusalRetries,
+		TransportRetries:      t.TransportRetries,
+		StreamStalled:         t.StreamStalled,
+		UpstreamSuspectedStop: t.UpstreamSuspectedStop,
+		GroundTruthInjected:   t.GroundTruthInjected,
+		TurnClass:             t.TurnClass,
+		FinishReason:          t.FinishReason,
+		DoomLoopAction:        t.DoomLoopAction,
+		DoomLoopSignal:        t.DoomLoopSignal,
+		ThoughtUnclosed:       t.ThoughtUnclosed,
+		ThoughtSHA256:         t.ThoughtSHA256,
+		VisibleLen:            t.VisibleLen,
+	}
+	if err := db.LogAgentTurn(rec); err != nil {
+		// Fingerprints only: the telemetry path must never print a prompt.
+		log.Printf("⚠️ [TELEMETRY] Failed to persist turn for session %s: %v", logFingerprint(t.SessionKey), err)
+	}
+}
+
+func (s *HistoryService) runTelemetryWorker() {
+	defer s.wg.Done()
+	for {
+		select {
+		case item := <-s.telemetryQueue:
+			s.processTelemetry(item)
+		case <-s.stopChan:
+			for {
+				select {
+				case item := <-s.telemetryQueue:
+					s.processTelemetry(item)
+				default:
+					return
+				}
+			}
+		}
+	}
 }
 
 func (s *HistoryService) runMessageWorker() {

@@ -105,3 +105,32 @@ func stripThinkingSuffix(model string) string {
 	}
 	return model
 }
+
+// ThinkingTier maps a resolved model onto the bounded label set used by turn
+// telemetry and Prometheus: "none", "low", "medium" or "high".
+//
+// A tier encoded in the model name wins over the configured level, because
+// escalation is expressed as a model name and never mutates the shared registry
+// entry. A model without a thinking level (the tier-less base of a family)
+// reports "none".
+//
+// The level-to-tier mapping mirrors the registry: Low=1, Medium=4, High=2. The
+// ladder is ordered by upstream depth rather than by level number, which is why
+// Medium (4) sits above High (2).
+func ThinkingTier(cfg *ModelConfig, modelID string) string {
+	if tier := thinkingTierOf(strings.ToLower(strings.TrimSpace(modelID))); tier != "" {
+		return tier
+	}
+	if cfg == nil {
+		return thinkingTierNone
+	}
+	switch cfg.ThinkingLevel {
+	case 1:
+		return thinkingTierLow
+	case 2:
+		return thinkingTierHigh
+	case 4:
+		return thinkingTierMedium
+	}
+	return thinkingTierNone
+}

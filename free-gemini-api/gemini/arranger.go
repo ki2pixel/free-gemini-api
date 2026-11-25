@@ -36,6 +36,10 @@ type ArrangedOutput struct {
 	// ("disclaimer", "control_chars", "brace_envelope"). The API layer turns
 	// them into Prometheus counters.
 	Repairs []string `json:"repairs,omitempty"`
+	// ThoughtUnclosed reports that a reasoning block ended without an explicit
+	// closing tag, either at a <tool_call> switch or at end of stream. It is
+	// the truncation signal the telemetry layer records per turn.
+	ThoughtUnclosed bool `json:"thought_unclosed,omitempty"`
 }
 
 const (
@@ -734,7 +738,9 @@ func ArrangeGeminiOutputWithTools(raw string, tools []map[string]any) *ArrangedO
 	// <thinking>). The extractor also handles unclosed thoughts (a switch to a
 	// tool call or a truncated stream), nested/orphan tags, and guarantees that
 	// no thought text or tag can leak into the assistant-visible content.
-	text, res.ReasoningContent = extractThoughtsAndContent(raw)
+	thoughtScan := scanThoughts(raw)
+	text, res.ReasoningContent = thoughtScan.Cleaned, thoughtScan.Reasoning
+	res.ThoughtUnclosed = thoughtScan.OpenAtEnd
 
 	text = strings.TrimSpace(text)
 
@@ -2097,10 +2103,39 @@ func trimPartialThoughtClose(s string) string {
 // Nested/orphan opening tags are stripped from the reasoning text. The returned
 // cleanedContent never contains a thought tag or text from an unclosed thought.
 func extractThoughtsAndContent(raw string) (cleanedContent string, reasoningContent string) {
-	if !strings.Contains(raw, "<thought>") && !strings.Contains(raw, "<thinking>") {
-		return sanitizeThoughtArtifacts(raw), ""
-	}
+	scan := scanThoughts(raw)
+	return scan.Cleaned, scan.Reasoning
+}
 
+// ThoughtScan is the single-pass result of separating private reasoning from
+// assistant-visible content. It also reports how the thought blocks ended,
+// which the two-value accessors above cannot express.
+type ThoughtScan struct {
+	Cleaned   string
+	Reasoning string
+	// SawOpen reports that at least one thought opening tag was found outside a
+	// Markdown code fence. A fenced citation is documentation, not reasoning.
+	SawOpen bool
+	// ClosedBlocks counts the thought blocks that reached depth zero. A turn
+	// may interleave reasoning and visible text, so the count — not a boolean —
+	// is what lets telemetry date the last close.
+	ClosedBlocks int
+	// OpenAtEnd reports that at least one thought block ended without an
+	// explicit closing tag, either at a <tool_call> switch or at the end of
+	// the input. It is only meaningful for a final (EOF) input: mid-stream an
+	// open block is the normal state.
+	OpenAtEnd bool
+}
+
+// scanThoughts is the single implementation shared by the arranger and the
+// live-stream accessors, so both always agree on what is reasoning and what is
+// visible content.
+func scanThoughts(raw string) ThoughtScan {
+	var result ThoughtScan
+	if !strings.Contains(raw, "<thought>") && !strings.Contains(raw, "<thinking>") {
+		result.Cleaned = sanitizeThoughtArtifacts(raw)
+		return result
+	}
 	var cleaned strings.Builder
 	var thoughts []string
 	remaining := raw
@@ -2110,6 +2145,9 @@ func extractThoughtsAndContent(raw string) (cleanedContent string, reasoningCont
 			cleaned.WriteString(remaining)
 			break
 		}
+		// Only a tag found outside a fence starts a reasoning phase: a fenced
+		// citation must not date a first-thought milestone.
+		result.SawOpen = true
 		cleaned.WriteString(remaining[:start])
 
 		// Walk the inside of this thought. An explicit closing tag has
@@ -2120,28 +2158,28 @@ func extractThoughtsAndContent(raw string) (cleanedContent string, reasoningCont
 		var segment string
 		if closeIdx, _ := earliestThoughtTag(remaining[pos:], thoughtCloseTags); closeIdx != -1 {
 			depth := 1
-			scan := pos
+			cursor := pos
 			end := len(remaining)
 			closingTag := ""
 			for {
-				nestedIdx, nestedTag := earliestThoughtTag(remaining[scan:], thoughtOpenTags)
+				nestedIdx, nestedTag := earliestThoughtTag(remaining[cursor:], thoughtOpenTags)
 				if nestedIdx != -1 {
-					nestedIdx += scan
+					nestedIdx += cursor
 				}
-				closeAt, closeTag := earliestThoughtTag(remaining[scan:], thoughtCloseTags)
+				closeAt, closeTag := earliestThoughtTag(remaining[cursor:], thoughtCloseTags)
 				if closeAt != -1 {
-					closeAt += scan
+					closeAt += cursor
 				}
 				if nestedIdx == -1 && closeAt == -1 {
 					break
 				}
 				if nestedIdx != -1 && (closeAt == -1 || nestedIdx < closeAt) {
 					depth++
-					scan = nestedIdx + len(nestedTag)
+					cursor = nestedIdx + len(nestedTag)
 					continue
 				}
 				end = closeAt
-				scan = closeAt + len(closeTag)
+				cursor = closeAt + len(closeTag)
 				depth--
 				if depth == 0 {
 					closingTag = closeTag
@@ -2152,6 +2190,9 @@ func extractThoughtsAndContent(raw string) (cleanedContent string, reasoningCont
 			pos = end
 			if depth == 0 {
 				pos += len(closingTag)
+				result.ClosedBlocks++
+			} else {
+				result.OpenAtEnd = true
 			}
 		} else {
 			// Unclosed thought: it ends at a <tool_call> switch (the call is
@@ -2162,6 +2203,7 @@ func extractThoughtsAndContent(raw string) (cleanedContent string, reasoningCont
 			}
 			segment = trimPartialThoughtClose(remaining[pos:end])
 			pos = end
+			result.OpenAtEnd = true
 		}
 		segment = strings.TrimSpace(thoughtTagRegex.ReplaceAllString(segment, ""))
 		if segment != "" {
@@ -2175,8 +2217,61 @@ func extractThoughtsAndContent(raw string) (cleanedContent string, reasoningCont
 
 	// Belt-and-braces: a stray tag must never reach the host as visible text,
 	// except for intentional citations inside fenced code blocks.
-	cleanedContent = sanitizeThoughtArtifacts(cleaned.String())
-	return cleanedContent, strings.Join(thoughts, "\n\n")
+	result.Cleaned = sanitizeThoughtArtifacts(cleaned.String())
+	result.Reasoning = strings.Join(thoughts, "\n\n")
+	return result
+}
+
+// trimPartialThoughtOpen removes a trailing partial opening tag ("<", "<t",
+// "<thou", ...) so a stream cut inside a tag never looks like visible answer
+// content. A real opening tag is recognized on the next chunk once complete.
+func trimPartialThoughtOpen(s string) string {
+	for _, openTag := range thoughtOpenTags {
+		for i := len(openTag) - 1; i > 0; i-- {
+			partial := openTag[:i]
+			if strings.HasSuffix(s, partial) {
+				return s[:len(s)-len(partial)]
+			}
+		}
+	}
+	return s
+}
+
+// StreamThoughtState is the per-chunk projection of a growing upstream buffer.
+// It exposes the same separation as the arranger plus the phase transitions the
+// telemetry layer timestamps.
+type StreamThoughtState struct {
+	CleanedContent   string
+	ReasoningContent string
+	// ThoughtSeen reports that a thought block started (its first byte).
+	ThoughtSeen bool
+	// ThoughtClosed reports that a thought block reached its closing tag.
+	ThoughtClosed bool
+	// ClosedBlocks counts every thought block that reached its closing tag, so
+	// a turn that interleaves reasoning and visible text can be dated on its
+	// last close rather than its first.
+	ClosedBlocks int
+	// ThoughtUnclosed reports an unterminated block. Only meaningful on the
+	// final buffer: mid-stream an open block is expected.
+	ThoughtUnclosed bool
+	// AnswerStarted reports visible content outside thoughts. A trailing
+	// partial opening tag never counts, so "<tho" cannot start the answer.
+	AnswerStarted bool
+}
+
+// InspectStreamProgress parses a accumulated upstream buffer once and returns
+// every phase signal the streaming handler and the telemetry layer need.
+func InspectStreamProgress(raw string) StreamThoughtState {
+	scan := scanThoughts(raw)
+	return StreamThoughtState{
+		CleanedContent:   scan.Cleaned,
+		ReasoningContent: scan.Reasoning,
+		ThoughtSeen:      scan.SawOpen || scan.Reasoning != "",
+		ThoughtClosed:    scan.ClosedBlocks > 0,
+		ClosedBlocks:     scan.ClosedBlocks,
+		ThoughtUnclosed:  scan.OpenAtEnd,
+		AnswerStarted:    strings.TrimSpace(trimPartialThoughtOpen(scan.Cleaned)) != "",
+	}
 }
 
 // ExtractAvailableThoughts extracts currently generated thoughts from raw stream text,

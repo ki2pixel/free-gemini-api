@@ -113,7 +113,7 @@ func planSessionTurn(sessionKey, curWorkerID, curConvID, flat string) (sendPromp
 type sessionTurnPlan struct {
 	prompt     string
 	needReset  bool
-	reason     string // replay reason when needReset is true
+	reason     string // "delta" for a continuation, otherwise the replay reason
 	deltaBytes int    // transcript suffix size when a delta is sent
 }
 
@@ -160,7 +160,7 @@ func planSessionTurnWithReason(sessionKey, curWorkerID, curConvID, flat string) 
 		if !deltaContainsUserInstruction(delta) {
 			delta = continuationAnchor + delta
 		}
-		return sessionTurnPlan{prompt: delta, needReset: false, deltaBytes: deltaBytes}
+		return sessionTurnPlan{prompt: delta, needReset: false, reason: "delta", deltaBytes: deltaBytes}
 	}
 	return reset("prefix_mismatch")
 }

@@ -228,6 +228,11 @@ func TestPlanSessionTurn_ReplayReasons(t *testing.T) {
 	if plan.needReset || plan.deltaBytes != len("Assistant: x\n") {
 		t.Fatalf("valid delta plan = %+v", plan)
 	}
+	// A continuation must be distinguishable from a turn that never reached
+	// planning, which the summary renders as "none".
+	if plan.reason != "delta" {
+		t.Fatalf("continuation reason = %q, want delta", plan.reason)
+	}
 	invalidateSessionTurn(key)
 	if plan = planSessionTurnWithReason(key, "worker-1", "conv-1", flat+"Assistant: y\n"); plan.reason != "forced" {
 		t.Fatalf("invalidated session reason = %q, want forced", plan.reason)
